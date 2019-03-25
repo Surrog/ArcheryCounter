@@ -27,7 +27,7 @@ install:
   - |
     travis_retry git clone --depth 1 --recursive ${OPENCV_URL} ${OPENCV_DIR} || exit 1
           (cd ${OPENCV_DIR} && mkdir bin && cd bin && cmake .. && cmake --build . --config Release) || exit 1
-    CMAKE_OPTIONS+=" -DOPENCV_DIR=${OPENCV_DIR}"
+    CMAKE_OPTIONS+=" -DOpenCV_DIR=${OPENCV_DIR}/bin"
   - cd ${TRAVIS_BUILD_DIR}
 
 script:
