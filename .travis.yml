@@ -1,0 +1,37 @@
+dist: trusty
+sudo: false
+language: cpp
+
+matrix:
+  include:
+    # works on Precise and Trusty
+    - os: linux
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-8
+            - cppcheck
+      env:
+        - MATRIX_EVAL="CC=gcc-8 && CXX=g++-8"
+
+before_install:
+    - eval "${MATRIX_EVAL}"
+
+install:
+  - DEPS_DIR="${TRAVIS_BUILD_DIR}/deps"
+  - mkdir -p ${DEPS_DIR} && cd ${DEPS_DIR}
+  - OPENCV_DIR=${DEPS_DIR}/opencv
+  - OPENCV_URL="https://github.com/opencv/opencv.git"
+  - |
+    travis_retry git clone --depth 1 --recursive ${OPENCV_URL} ${OPENCV_DIR} || exit 1
+          (cd ${OPENCV_DIR} && mkdir bin && cd bin && cmake .. && cmake --build . --config Release) || exit 1
+    CMAKE_OPTIONS+=" -DOpenCV_DIR=${OPENCV_DIR}/bin"
+  - cd ${TRAVIS_BUILD_DIR}
+
+script:
+  - mkdir bin
+  - cd bin/
+  - cmake ..
+  - scan-build cmake --build . -- -j2
