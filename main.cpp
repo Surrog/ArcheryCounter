@@ -1,7 +1,6 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 #include <stdio.h>
-#include "main.h"
 
 constexpr const char* model = R".(C:\Users\fancel\Documents\ArcheryCounter\Images\model\cleaned.jpg).";
 constexpr const char* test = R".(C:\Users\fancel\Documents\ArcheryCounter\Images\20190325_193217.jpg).";
@@ -49,6 +48,24 @@ struct ORB_Param
     };
 };
 
+std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& img, const ORB_Param& param)
+{
+    auto orb = cv::ORB::create(param.nfeature);
+
+    orb->setEdgeThreshold(param.edgeThreshold);
+    orb->setNLevels(param.nlevels);
+    orb->setFastThreshold(param.fastThreshold);
+    orb->setPatchSize(param.patchSize);
+    orb->setWTA_K(param.WTA_K);
+
+    std::vector<cv::KeyPoint> keypoint;
+    keypoint.reserve(param.nfeature);
+    cv::Mat descriptor;
+    orb->detectAndCompute(img, cv::noArray(), keypoint, descriptor, false);
+
+    return {std::move(keypoint), std::move(descriptor)};
+}
+
 std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test, const ORB_Param& val)
 {
 	auto [keypoint_model, descriptor_model] = keypoint_compute(image_model, val);
@@ -61,23 +78,6 @@ std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test
     const float ratio_thresh = 0.75f;
     std::vector<cv::DMatch> filtered_matches = filter_match(keypoint_model, keypoint_test, knn_matches, ratio_thresh);
     return filtered_matches.size();
-}
-
-std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& img, const ORB_Param& param) {
-    auto orb = cv::ORB::create(param.nfeature);
-
-	orb->setEdgeThreshold(param.edgeThreshold);
-    orb->setNLevels(param.nlevels);
-    orb->setFastThreshold(param.fastThreshold);
-    orb->setPatchSize(param.patchSize);
-    orb->setWTA_K(param.WTA_K);
-
-	std::vector<cv::KeyPoint> keypoint;
-    keypoint.reserve(param.nfeature);
-    cv::Mat descriptor;
-	orb->detectAndCompute(img, cv::noArray(), keypoint, descriptor, false);
-
-	return {std::move(keypoint), std::move(descriptor)};
 }
 
 void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
