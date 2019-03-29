@@ -51,10 +51,11 @@ struct ORB_Param
 std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& img, const ORB_Param& param)
 {
 #if CV_MAJOR_VERSION < 3
-    auto orb = cv::ORB::create("ORB");
+    auto orb = std::make_unique<cv::ORB>(param.nfeature, 1.2f, param.nlevels, param.edgeThreshold, 0, param.WTA_K,
+        cv::ORB::HARRIS_SCORE, param.patchSize);
+
 #else
 	auto orb = cv::ORB::create();
-#endif
 
 	orb->setMaxFeatures(param.nfeature);
     orb->setEdgeThreshold(param.edgeThreshold);
@@ -62,6 +63,7 @@ std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& im
     orb->setFastThreshold(param.fastThreshold);
     orb->setPatchSize(param.patchSize);
     orb->setWTA_K(param.WTA_K);
+#endif
 
     std::vector<cv::KeyPoint> keypoint;
     keypoint.reserve(param.nfeature);
