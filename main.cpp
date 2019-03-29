@@ -1,4 +1,5 @@
 #include <iostream>
+#include <memory>
 #include <opencv2/opencv.hpp>
 #include <stdio.h>
 
@@ -53,11 +54,10 @@ std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& im
 #if CV_MAJOR_VERSION < 3
     auto orb = std::make_unique<cv::ORB>(param.nfeature, 1.2f, param.nlevels, param.edgeThreshold, 0, param.WTA_K,
         cv::ORB::HARRIS_SCORE, param.patchSize);
-
 #else
-	auto orb = cv::ORB::create();
+    auto orb = cv::ORB::create();
 
-	orb->setMaxFeatures(param.nfeature);
+    orb->setMaxFeatures(param.nfeature);
     orb->setEdgeThreshold(param.edgeThreshold);
     orb->setNLevels(param.nlevels);
     orb->setFastThreshold(param.fastThreshold);
@@ -119,26 +119,61 @@ void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
     cv::destroyAllWindows();
 }
 
-void canny_approach(const cv::Mat& img)
+void hough_approach(const cv::Mat& img)
 {
-    cv::Mat output;
-    double hysteresis_threshold1 = 150;
-    double hysteresis_threshold2 = 200;
+    cv::Mat pretreat = img.clone();
+    cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
+    cv::inRange(pretreat, cv::Scalar(0, 0, 170), cv::Scalar(220, 25, 255), pretreat);
+
+    // cv::GaussianBlur(pretreat, pretreat, cv::Size(15, 15), 1.5, 1.5);
+    // cv::erode(pretreat, pretreat, cv::Mat());
+    // cv::dilate(pretreat, pretreat, cv::Mat());
+
+    // cv::namedWindow("pretreat", cv::WINDOW_NORMAL);
+    // cv::imshow("pretreat", pretreat);
+    // cv::waitKey(0);
+    // cv::destroyAllWindows();
+
+    double hysteresis_threshold1 = 0;
+    double hysteresis_threshold2 = 25;
     int aperture_size = 5;
     bool gradient = false;
+    cv::Mat canny_output;
 
-    cv::Canny(img, output, hysteresis_threshold1, hysteresis_threshold2, aperture_size, gradient);
+    cv::Canny(pretreat, canny_output, hysteresis_threshold1, hysteresis_threshold2, aperture_size, gradient);
 
-	cv::namedWindow("Display Image", cv::WINDOW_NORMAL);
-    cv::imshow("Display Image", output);
+    cv::namedWindow("Canny", cv::WINDOW_NORMAL);
+    cv::imshow("Canny", canny_output);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+
+    // cv::Mat color_convert;
+    // cv::cvtColor(canny_output, color_convert, cv::COLOR_GRAY2BGR);
+
+    // cv::namedWindow("gray", cv::WINDOW_NORMAL);
+    // cv::imshow("gray", color_convert);
+    // cv::waitKey(0);
+    // cv::destroyAllWindows();
+
+    cv::Mat display = img.clone();
+    std::vector<cv::Vec4i> lines;
+    cv::HoughLinesP(canny_output, lines, 1, CV_PI / 180, 100, 0, 0);
+
+    for(const auto& v : lines)
+    {
+        cv::line(display, cv::Point(v[0], v[1]), cv::Point(v[2], v[3]), cv::Scalar(0, 0, 255), 1, 8);
+    }
+
+    cv::namedWindow("HoughLinesP", cv::WINDOW_NORMAL);
+    cv::imshow("HoughLinesP", display);
     cv::waitKey(0);
     cv::destroyAllWindows();
 }
 
 int main(int argc, char** argv)
 {
-    cv::Mat image_model = cv::imread(model, cv::IMREAD_GRAYSCALE);
-    cv::Mat image_test = cv::imread(test, cv::IMREAD_GRAYSCALE);
+    cv::Mat image_model = cv::imread(model, cv::IMREAD_COLOR);
+    cv::Mat image_test = cv::imread(test, cv::IMREAD_COLOR);
 
     if(!image_model.data || !image_test.data)
     {
@@ -149,9 +184,8 @@ int main(int argc, char** argv)
     cv::copyMakeBorder(image_model, image_model, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(255));
     // cv::threshold(image_model, image_model, 255 / 2, 255, cv::THRESH_BINARY);
     // cv::threshold(image_test, image_test, 255 / 2, 255, cv::THRESH_BINARY);
-    cv::blur(image_test, image_test, cv::Size(50, 50));
 
-    //keypoint_approach(image_model, image_test);
-    canny_approach(image_test);
+    // keypoint_approach(image_model, image_test);
+    hough_approach(image_test);
     return 0;
 }
