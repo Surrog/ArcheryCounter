@@ -117,6 +117,22 @@ void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
     cv::destroyAllWindows();
 }
 
+void canny_approach(const cv::Mat& img)
+{
+    cv::Mat output;
+    double hysteresis_threshold1 = 150;
+    double hysteresis_threshold2 = 200;
+    int aperture_size = 5;
+    bool gradient = false;
+
+    cv::Canny(img, output, hysteresis_threshold1, hysteresis_threshold2, aperture_size, gradient);
+
+	cv::namedWindow("Display Image", cv::WINDOW_NORMAL);
+    cv::imshow("Display Image", output);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+}
+
 int main(int argc, char** argv)
 {
     cv::Mat image_model = cv::imread(model, cv::IMREAD_GRAYSCALE);
@@ -129,40 +145,11 @@ int main(int argc, char** argv)
     }
 
     cv::copyMakeBorder(image_model, image_model, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(255));
-    // cv::blur(image_test, image_test, cv::Size(5, 5));
     // cv::threshold(image_model, image_model, 255 / 2, 255, cv::THRESH_BINARY);
     // cv::threshold(image_test, image_test, 255 / 2, 255, cv::THRESH_BINARY);
+    cv::blur(image_test, image_test, cv::Size(50, 50));
 
-    keypoint_approach(image_model, image_test);
-
-    //   ORB_Param starting_point;
-    //   starting_point.nlevels = 15;
-    //   starting_point.edgeThreshold = 499;
-
-    // ORB_Param best_param;
-    //   std::size_t best_found = 0;
-
-    //   for(std::size_t i = ORB_Param::EDGE_THRESHOLD_MIN; i < ORB_Param::EDGE_THRESHOLD_MAX; i++)
-    //   {
-    //       starting_point.edgeThreshold = i;
-    //       auto score = test_orb_param(image_model, image_test, starting_point);
-    //       if(score > best_found)
-    //       {
-    //           best_found = score;
-    //           best_param = starting_point;
-    //       }
-    //   }
-
-    //   std::cout << "final score " << best_found << '\n';
-    //   std::cout << "best ORB_Param is: nlevel=" << starting_point.nlevels
-    //             << "\n edge_threshold=" << starting_point.edgeThreshold
-    //             << "\n fast_threshold=" << starting_point.fastThreshold << "\n patch_size=" <<
-    //             starting_point.patchSize
-    //             << '\n';
-
-    // cv::blur(image_model, image_model, cv::Size(5, 5));
-    // cv::blur(image_test, image_test, cv::Size(5, 5));
-
-    // keypoint_approach(image_model, image_test);
+    //keypoint_approach(image_model, image_test);
+    canny_approach(image_test);
     return 0;
 }
