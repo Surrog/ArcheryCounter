@@ -83,12 +83,11 @@ std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test
     auto [keypoint_test, descriptor_test] = keypoint_compute(image_test, val);
 
 #if CV_MAJOR_VERSION < 3
-    auto descriptor_type = cv::NORM_HAMMING;
+    auto matcher = cv::DescriptorMatcher::create("NORM_HAMMING");
 #else
-    auto descriptor_type = cv::DescriptorMatcher::BRUTEFORCE_HAMMING;
+    auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
 #endif 
 
-	auto matcher = cv::DescriptorMatcher::create(descriptor_type);
     std::vector<std::vector<cv::DMatch>> knn_matches;
     matcher->knnMatch(descriptor_model, descriptor_test, knn_matches, 2);
 
@@ -110,8 +109,13 @@ void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
     auto [keypoint_model, descriptor_model] = keypoint_compute(image_model, param_model);
     auto [keypoint_test, descriptor_test] = keypoint_compute(image_test, test_param);
 
+#if CV_MAJOR_VERSION < 3
+    auto matcher = cv::DescriptorMatcher::create("NORM_HAMMING");
+#else
     auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
-    std::vector<std::vector<cv::DMatch>> knn_matches;
+#endif
+ 
+	std::vector<std::vector<cv::DMatch>> knn_matches;
     matcher->knnMatch(descriptor_model, descriptor_test, knn_matches, 2);
 
     const float ratio_thresh = 0.75f;
