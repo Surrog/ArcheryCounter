@@ -68,8 +68,12 @@ std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& im
     std::vector<cv::KeyPoint> keypoint;
     keypoint.reserve(param.nfeature);
     cv::Mat descriptor;
+#if CV_MAJOR_VERSION < 3
+    orb->detect(img, keypoint);
+    orb->compute(img, keypoint, descriptor);
+#else
     orb->detectAndCompute(img, cv::noArray(), keypoint, descriptor, false);
-
+#endif
     return {std::move(keypoint), std::move(descriptor)};
 }
 
@@ -78,7 +82,13 @@ std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test
     auto [keypoint_model, descriptor_model] = keypoint_compute(image_model, val);
     auto [keypoint_test, descriptor_test] = keypoint_compute(image_test, val);
 
-    auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
+#if CV_MAJOR_VERSION < 3
+    auto descriptor_type = cv::NORM_HAMMING;
+#else
+    auto descriptor_type = cv::DescriptorMatcher::BRUTEFORCE_HAMMING;
+#endif 
+
+	auto matcher = cv::DescriptorMatcher::create(descriptor_type);
     std::vector<std::vector<cv::DMatch>> knn_matches;
     matcher->knnMatch(descriptor_model, descriptor_test, knn_matches, 2);
 
