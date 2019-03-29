@@ -50,8 +50,13 @@ struct ORB_Param
 
 std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& img, const ORB_Param& param)
 {
-    auto orb = cv::ORB::create(param.nfeature);
+#if CV_MAJOR_VERSION < 3
+    auto orb = cv::ORB::create("ORB");
+#else
+	auto orb = cv::ORB::create();
+#endif
 
+	orb->setMaxFeatures(param.nfeature);
     orb->setEdgeThreshold(param.edgeThreshold);
     orb->setNLevels(param.nlevels);
     orb->setFastThreshold(param.fastThreshold);
@@ -68,7 +73,7 @@ std::pair<std::vector<cv::KeyPoint>, cv::Mat> keypoint_compute(const cv::Mat& im
 
 std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test, const ORB_Param& val)
 {
-	auto [keypoint_model, descriptor_model] = keypoint_compute(image_model, val);
+    auto [keypoint_model, descriptor_model] = keypoint_compute(image_model, val);
     auto [keypoint_test, descriptor_test] = keypoint_compute(image_test, val);
 
     auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
@@ -82,10 +87,15 @@ std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test
 
 void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
 {
-	ORB_Param param_model, test_param;
+    ORB_Param param_model, test_param;
     param_model.nfeature = 10000;
 
-	auto [keypoint_model, descriptor_model] = keypoint_compute(image_model, param_model);
+    test_param.nfeature = 10000;
+    // test_param.nlevels = 16;
+    test_param.WTA_K = 4;
+    test_param.edgeThreshold = 100;
+
+    auto [keypoint_model, descriptor_model] = keypoint_compute(image_model, param_model);
     auto [keypoint_test, descriptor_test] = keypoint_compute(image_test, test_param);
 
     auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
@@ -97,7 +107,7 @@ void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
 
     cv::Mat img_matches;
 
-    //cv::drawKeypoints(image_model, keypoint_model, img_matches, cv::Scalar(0, 255, 0));
+    // cv::drawKeypoints(image_model, keypoint_model, img_matches, cv::Scalar(0, 255, 0));
     cv::drawKeypoints(image_test, keypoint_test, img_matches, cv::Scalar(0, 255, 0));
     // drawMatches(image_model, keypoint_model, image_test, keypoint_test, filtered_matches, img_matches);
 
@@ -119,6 +129,7 @@ int main(int argc, char** argv)
     }
 
     cv::copyMakeBorder(image_model, image_model, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(255));
+    // cv::blur(image_test, image_test, cv::Size(5, 5));
     // cv::threshold(image_model, image_model, 255 / 2, 255, cv::THRESH_BINARY);
     // cv::threshold(image_test, image_test, 255 / 2, 255, cv::THRESH_BINARY);
 
