@@ -27,6 +27,27 @@ std::vector<cv::DMatch> filter_match(const std::vector<cv::KeyPoint>& keypoint_m
     return result;
 }
 
+cv::Mat filter_white(const cv::Mat& img)
+{
+    cv::Mat pretreat = img.clone();
+    cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
+    cv::inRange(pretreat, cv::Scalar(0, 0, 170), cv::Scalar(220, 25, 255), pretreat);
+    return pretreat;
+}
+
+cv::Mat pretreatment(const cv::Mat& img)
+{
+    cv::Mat pretreated = img.clone();
+    cv::copyMakeBorder(pretreated, pretreated, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(255));
+
+    pretreated = filter_white(pretreated);
+
+    //cv::GaussianBlur(pretreated, pretreated, cv::Size(15, 15), 1.5, 1.5);
+    //cv::erode(pretreated, pretreated, cv::Mat());
+    //cv::dilate(pretreated, pretreated, cv::Mat());
+    return pretreated;
+}
+
 struct ORB_Param
 {
     int nfeature = 500;
@@ -86,7 +107,7 @@ std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test
     auto matcher = cv::DescriptorMatcher::create("NORM_HAMMING");
 #else
     auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
-#endif 
+#endif
 
     std::vector<std::vector<cv::DMatch>> knn_matches;
     matcher->knnMatch(descriptor_model, descriptor_test, knn_matches, 2);
@@ -98,6 +119,16 @@ std::size_t test_orb_param(const cv::Mat& image_model, const cv::Mat& image_test
 
 void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
 {
+    cv::namedWindow("pretreat model", cv::WINDOW_NORMAL);
+    cv::imshow("pretreat model", image_model);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+
+    cv::namedWindow("pretreat test", cv::WINDOW_NORMAL);
+    cv::imshow("pretreat test", image_test);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+
     ORB_Param param_model, test_param;
     param_model.nfeature = 10000;
 
@@ -114,47 +145,49 @@ void keypoint_approach(const cv::Mat& image_model, const cv::Mat& image_test)
 #else
     auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
 #endif
- 
-	std::vector<std::vector<cv::DMatch>> knn_matches;
+
+    std::vector<std::vector<cv::DMatch>> knn_matches;
     matcher->knnMatch(descriptor_model, descriptor_test, knn_matches, 2);
 
     const float ratio_thresh = 0.75f;
     std::vector<cv::DMatch> filtered_matches = filter_match(keypoint_model, keypoint_test, knn_matches, ratio_thresh);
 
-    cv::Mat img_matches;
+    cv::Mat img_keypoint_model, img_keypoint_test, img_keypoint_matches;
 
-    // cv::drawKeypoints(image_model, keypoint_model, img_matches, cv::Scalar(0, 255, 0));
-    cv::drawKeypoints(image_test, keypoint_test, img_matches, cv::Scalar(0, 255, 0));
-    // drawMatches(image_model, keypoint_model, image_test, keypoint_test, filtered_matches, img_matches);
+    cv::drawKeypoints(image_model, keypoint_model, img_keypoint_model, cv::Scalar(0, 255, 0));
+    cv::drawKeypoints(image_test, keypoint_test, img_keypoint_test, cv::Scalar(0, 255, 0));
+    cv::drawMatches(image_model, keypoint_model, image_test, keypoint_test, filtered_matches, img_keypoint_matches);
 
-    cv::namedWindow("Display Image", cv::WINDOW_NORMAL);
-    cv::imshow("Display Image", img_matches);
+    cv::namedWindow("Keypoint model", cv::WINDOW_NORMAL);
+    cv::imshow("Keypoint model", img_keypoint_model);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+
+    cv::namedWindow("Keypoint test", cv::WINDOW_NORMAL);
+    cv::imshow("Keypoint test", img_keypoint_test);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+
+    cv::namedWindow("Keypoint matches", cv::WINDOW_NORMAL);
+    cv::imshow("Keypoint matches", img_keypoint_matches);
     cv::waitKey(0);
     cv::destroyAllWindows();
 }
 
-void hough_approach(const cv::Mat& img)
+std::vector<cv::Vec4i> hough_approach(const cv::Mat& img)
 {
-    cv::Mat pretreat = img.clone();
-    cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
-    cv::inRange(pretreat, cv::Scalar(0, 0, 170), cv::Scalar(220, 25, 255), pretreat);
-
-    // cv::GaussianBlur(pretreat, pretreat, cv::Size(15, 15), 1.5, 1.5);
-    // cv::erode(pretreat, pretreat, cv::Mat());
-    // cv::dilate(pretreat, pretreat, cv::Mat());
-
     // cv::namedWindow("pretreat", cv::WINDOW_NORMAL);
-    // cv::imshow("pretreat", pretreat);
+    // cv::imshow("pretreat", img);
     // cv::waitKey(0);
     // cv::destroyAllWindows();
 
     double hysteresis_threshold1 = 0;
-    double hysteresis_threshold2 = 25;
+    double hysteresis_threshold2 = 0;
     int aperture_size = 5;
     bool gradient = false;
     cv::Mat canny_output;
 
-    cv::Canny(pretreat, canny_output, hysteresis_threshold1, hysteresis_threshold2, aperture_size, gradient);
+    cv::Canny(img, canny_output, hysteresis_threshold1, hysteresis_threshold2, aperture_size, gradient);
 
     cv::namedWindow("Canny", cv::WINDOW_NORMAL);
     cv::imshow("Canny", canny_output);
@@ -169,19 +202,127 @@ void hough_approach(const cv::Mat& img)
     // cv::waitKey(0);
     // cv::destroyAllWindows();
 
-    cv::Mat display = img.clone();
     std::vector<cv::Vec4i> lines;
     cv::HoughLinesP(canny_output, lines, 1, CV_PI / 180, 100, 0, 0);
 
-    for(const auto& v : lines)
+    return lines;
+}
+
+struct bound
+{
+    std::size_t ibegin = 0;
+    int best_max = 0;
+    std::size_t iend = 0;
+    int best_min = 0;
+
+    int quality() const { return best_max + -best_min; }
+};
+
+bound find_histo_bound(const std::vector<int>& histo)
+{
+    bound result;
+    for(std::size_t i = 0; i < histo.size() - 1; i++)
     {
-        cv::line(display, cv::Point(v[0], v[1]), cv::Point(v[2], v[3]), cv::Scalar(0, 0, 255), 1, 8);
+        int diff = histo[i] - histo[i + 1];
+        if(diff < result.best_min)
+        {
+            result.ibegin = i + 1;
+            result.best_min = diff;
+        }
+        if(diff > result.best_max)
+        {
+            result.iend = i;
+            result.best_max = diff;
+        }
+    }
+    return result;
+}
+
+struct line_bound
+{
+    std::size_t ibegin;
+    std::size_t iend;
+    std::size_t size;
+};
+
+line_bound find_longest_line(cv::Mat& img)
+{
+    line_bound result {0, 0, 0};
+    std::size_t max = 0;
+
+    std::size_t ibegin = 0;
+    std::size_t current = 0;
+
+    uint8_t* arr = img.ptr<uint8_t>(0, 0);
+    std::size_t iend = img.cols;
+    for(std::size_t i = 0; i < iend; i++)
+    {
+        if(arr[i] > 0)
+        {
+            if(current == 0)
+            {
+                ibegin = i;
+                current++;
+            }
+            else
+            {
+                current++;
+            }
+        }
+        else
+        {
+            if(current > result.size)
+            {
+                result.size = current;
+                result.ibegin = ibegin;
+                result.iend = i;
+            }
+            current = 0;
+            ibegin = 0;
+        }
+    }
+    if(current > result.size)
+    {
+        result.size = current;
+        result.ibegin = ibegin;
+        result.iend = iend;
     }
 
-    cv::namedWindow("HoughLinesP", cv::WINDOW_NORMAL);
-    cv::imshow("HoughLinesP", display);
-    cv::waitKey(0);
-    cv::destroyAllWindows();
+    return result;
+}
+
+std::vector<std::array<int, 4>> histogram_approach(const cv::Mat& img)
+{
+    const std::size_t row_size = img.rows;
+    std::vector<std::array<int, 4>> result;
+
+    std::vector<line_bound> horz_histo;
+    horz_histo.resize(row_size);
+
+    for(std::size_t i = 0; i < row_size; i++)
+    {
+        horz_histo[i] = find_longest_line(img.row(i));
+    }
+
+    auto minmax = std::minmax_element(horz_histo.begin(), horz_histo.end(),
+        [](const line_bound& lval, const line_bound& rval) { return lval.size < rval.size; });
+
+    auto threshold = (minmax.second->size * 89) / 100;
+
+    auto upper_b = std::find_if(
+        horz_histo.begin(), horz_histo.end(), [threshold](const line_bound& v) { return v.size > threshold; });
+
+    auto lower_b = std::find_if(
+        horz_histo.rbegin(), horz_histo.rend(), [threshold](const line_bound& v) { return v.size > threshold; });
+
+    std::size_t upper_i = std::distance(horz_histo.begin(), upper_b);
+    std::size_t lower_i = std::distance(horz_histo.rbegin(), lower_b);
+
+    result.push_back({int(upper_b->ibegin), int(upper_i), int(upper_b->iend), int(upper_i)});
+    //result.push_back({int(left_i), int(upper_i), int(left_i), int(lower_i)});
+    //result.push_back({int(left_i), int(lower_i), int(right_i), int(lower_i)});
+    //result.push_back({int(right_i), int(upper_i), int(right_i), int(lower_i)});
+    return result;
 }
 
 int main(int argc, char** argv)
@@ -195,11 +336,22 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    cv::copyMakeBorder(image_model, image_model, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(255));
+    // cv::copyMakeBorder(image_model, image_model, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(255));
     // cv::threshold(image_model, image_model, 255 / 2, 255, cv::THRESH_BINARY);
     // cv::threshold(image_test, image_test, 255 / 2, 255, cv::THRESH_BINARY);
 
-    // keypoint_approach(image_model, image_test);
-    hough_approach(image_test);
+    // keypoint_approach(pretreatment(image_model), pretreatment(image_test));
+    // auto result = hough_approach(pretreatment(image_test));
+    auto result = histogram_approach(pretreatment(image_test));
+    for(const auto& v : result)
+    {
+        cv::line(image_test, cv::Point(v[0], v[1]), cv::Point(v[2], v[3]), cv::Scalar(0, 0, 255), 5, 8);
+    }
+
+    cv::namedWindow("HoughLinesP", cv::WINDOW_NORMAL);
+    cv::imshow("HoughLinesP", image_test);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+
     return 0;
 }
