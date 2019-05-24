@@ -245,7 +245,7 @@ struct line_bound
     std::size_t size;
 };
 
-line_bound find_longest_line(cv::Mat& img)
+line_bound find_longest_line(const cv::Mat& img)
 {
     line_bound result {0, 0, 0};
     std::size_t max = 0;
@@ -253,7 +253,7 @@ line_bound find_longest_line(cv::Mat& img)
     std::size_t ibegin = 0;
     std::size_t current = 0;
 
-    uint8_t* arr = img.ptr<uint8_t>(0, 0);
+    const uint8_t* arr = img.ptr<uint8_t>(0, 0);
     std::size_t iend = img.cols;
     for(std::size_t i = 0; i < iend; i++)
     {
@@ -332,7 +332,7 @@ int main(int argc, char** argv)
 
     if(!image_model.data || !image_test.data)
     {
-        printf("No image data \n");
+        printf("No image data\n");
         return -1;
     }
 
