@@ -2,9 +2,10 @@
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <stdio.h>
+#include "sources.hpp"
 
-constexpr const char* model = R".(C:\Users\fancel\Documents\ArcheryCounter\Images\model\cleaned.jpg).";
-constexpr const char* test = R".(C:\Users\fancel\Documents\ArcheryCounter\Images\20190325_193217.jpg).";
+constexpr const char* model = IMAGE_TEST_DIR R".(\model\cleaned.jpg).";
+constexpr const char* test = IMAGE_TEST_DIR R".(\20190325_193217.jpg).";
 
 template <typename PointT> auto euclideanDistance(const PointT& lval, const PointT& rval)
 {
@@ -293,13 +294,13 @@ line_bound find_longest_line(const cv::Mat& img)
 
 std::vector<std::array<int, 4>> histogram_approach(const cv::Mat& img)
 {
-    const std::size_t row_size = img.rows;
+    const int row_size = img.rows;
     std::vector<std::array<int, 4>> result;
 
     std::vector<line_bound> horz_histo;
     horz_histo.resize(row_size);
 
-    for(std::size_t i = 0; i < row_size; i++)
+    for(int i = 0; i < row_size; i++)
     {
         horz_histo[i] = find_longest_line(img.row(i));
     }

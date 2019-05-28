@@ -1,0 +1,6 @@
+#ifndef SOURCES_HPP
+#define SOURCES_HPP
+
+#define IMAGE_TEST_DIR R".(@IMAGE_DIRECTORY@)."
+
+#endif //!SOURCES_HPP

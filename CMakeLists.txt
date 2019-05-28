@@ -15,9 +15,16 @@ set(OpenCV_DIR "${PROJECT_SOURCE_DIR}/bin" CACHE PATH "The directory where OpenC
 find_package( OpenCV REQUIRED )
 include_directories( ${OpenCV_INCLUDE_DIRS} )
 
+set(IMAGE_DIRECTORY "${PROJECT_SOURCE_DIR}/Images/")
+
+configure_file( "${PROJECT_SOURCE_DIR}/sources.hpp.in"
+				"${PROJECT_SOURCE_DIR}/sources.hpp")
+
+
 # sources in the resolver_server directory
 set (SOURCES 
 	${PROJECT_SOURCE_DIR}/main.cpp
+	${PROJECT_SOURCE_DIR}/sources.hpp
 	)
 
 add_executable(ArcheryCounter ${SOURCES})
