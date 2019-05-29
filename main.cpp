@@ -1,11 +1,12 @@
+#include "sources.hpp"
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <stdio.h>
-#include "sources.hpp"
 
 constexpr const char* model = IMAGE_TEST_DIR R".(\model\cleaned.jpg).";
-constexpr const char* test = IMAGE_TEST_DIR R".(\20190325_193217.jpg).";
+constexpr const char* test = IMAGE_TEST_DIR R".(\20190325_193820.jpg).";
 
 template <typename PointT> auto euclideanDistance(const PointT& lval, const PointT& rval)
 {
@@ -32,7 +33,15 @@ cv::Mat filter_white(const cv::Mat& img)
 {
     cv::Mat pretreat = img.clone();
     cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
-    cv::inRange(pretreat, cv::Scalar(0, 0, 170), cv::Scalar(220, 25, 255), pretreat);
+    cv::inRange(pretreat, cv::Scalar(0, 0, 0), cv::Scalar(220, 25, 255), pretreat);
+    return pretreat;
+}
+
+cv::Mat filter_yellow(const cv::Mat& img)
+{
+    cv::Mat pretreat = img.clone();
+    cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
+    cv::inRange(pretreat, cv::Scalar(110, 120, 190), cv::Scalar(150, 180, 255), pretreat);
     return pretreat;
 }
 
@@ -41,11 +50,9 @@ cv::Mat pretreatment(const cv::Mat& img)
     cv::Mat pretreated = img.clone();
     cv::copyMakeBorder(pretreated, pretreated, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(255));
 
-    pretreated = filter_white(pretreated);
-
-    //cv::GaussianBlur(pretreated, pretreated, cv::Size(15, 15), 1.5, 1.5);
-    //cv::erode(pretreated, pretreated, cv::Mat());
-    //cv::dilate(pretreated, pretreated, cv::Mat());
+    cv::GaussianBlur(pretreated, pretreated, cv::Size(15, 15), 1.5, 1.5);
+    cv::erode(pretreated, pretreated, cv::Mat());
+    cv::dilate(pretreated, pretreated, cv::Mat(), cv::Point(-1, -1), 3);
     return pretreated;
 }
 
@@ -190,7 +197,7 @@ std::vector<cv::Vec4i> hough_approach(const cv::Mat& img)
 
     cv::Canny(img, canny_output, hysteresis_threshold1, hysteresis_threshold2, aperture_size, gradient);
 
-    cv::namedWindow("Canny", cv::WINDOW_NORMAL);
+    cv::namedWindow("Canny", cv::WINDOW_KEEPRATIO);
     cv::imshow("Canny", canny_output);
     cv::waitKey(0);
     cv::destroyAllWindows();
@@ -294,6 +301,11 @@ line_bound find_longest_line(const cv::Mat& img)
 
 std::vector<std::array<int, 4>> histogram_approach(const cv::Mat& img)
 {
+    cv::namedWindow("img", cv::WINDOW_KEEPRATIO);
+    cv::imshow("img", img);
+    cv::waitKey(0);
+    cv::destroyAllWindows();
+
     const int row_size = img.rows;
     std::vector<std::array<int, 4>> result;
 
@@ -308,22 +320,43 @@ std::vector<std::array<int, 4>> histogram_approach(const cv::Mat& img)
     auto minmax = std::minmax_element(horz_histo.begin(), horz_histo.end(),
         [](const line_bound& lval, const line_bound& rval) { return lval.size < rval.size; });
 
-    auto threshold = (minmax.second->size * 89) / 100;
+    auto upper_threshold = minmax.second->size;
 
-    auto upper_b = std::find_if(
-        horz_histo.begin(), horz_histo.end(), [threshold](const line_bound& v) { return v.size > threshold; });
-
-    auto lower_b = std::find_if(
-        horz_histo.rbegin(), horz_histo.rend(), [threshold](const line_bound& v) { return v.size > threshold; });
+    auto upper_b = std::find_if(horz_histo.begin(), horz_histo.end(),
+        [upper_threshold](const line_bound& v) { return v.size >= upper_threshold; });
 
     std::size_t upper_i = std::distance(horz_histo.begin(), upper_b);
-    std::size_t lower_i = std::distance(horz_histo.rbegin(), lower_b);
+    std::size_t lower_i = upper_i + minmax.second->size;
+    upper_i *= 0.95;
+    lower_i *= 1.05;
+    upper_b->ibegin *= 0.95;
+    upper_b->iend *= 1.05;
 
     result.push_back({int(upper_b->ibegin), int(upper_i), int(upper_b->iend), int(upper_i)});
-    //result.push_back({int(left_i), int(upper_i), int(left_i), int(lower_i)});
-    //result.push_back({int(left_i), int(lower_i), int(right_i), int(lower_i)});
-    //result.push_back({int(right_i), int(upper_i), int(right_i), int(lower_i)});
+    result.push_back({int(upper_b->ibegin), int(upper_i), int(upper_b->ibegin), int(lower_i)});
+    result.push_back({int(upper_b->iend), int(upper_i), int(upper_b->iend), int(lower_i)});
+    result.push_back({int(upper_b->ibegin), int(lower_i), int(upper_b->iend), int(lower_i)});
+
     return result;
+}
+
+std::vector<cv::Vec3f> detect_circle_approach(const cv::Mat& img)
+{
+    cv::Mat gray = img;
+    //cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+    //cv::GaussianBlur(gray, gray, cv::Size(15, 15), 1.5, 1.5);
+    cv::namedWindow("gray", cv::WINDOW_KEEPRATIO);
+    cv::imshow("gray", gray);
+    cv::waitKey(0);
+
+    std::vector<cv::Vec3f> circles;
+    cv::HoughCircles(gray, circles, cv::HOUGH_GRADIENT, 2, 150, 180, 100);
+
+    int upper_row = img.rows * .65;
+    int lower_row = img.rows * .35;
+    int upper_col = img.cols * .65;
+    int lower_col = img.cols * .35;
+    return circles;
 }
 
 int main(int argc, char** argv)
@@ -341,16 +374,32 @@ int main(int argc, char** argv)
     // cv::threshold(image_model, image_model, 255 / 2, 255, cv::THRESH_BINARY);
     // cv::threshold(image_test, image_test, 255 / 2, 255, cv::THRESH_BINARY);
 
-    // keypoint_approach(pretreatment(image_model), pretreatment(image_test));
-    // auto result = hough_approach(pretreatment(image_test));
-    auto result = histogram_approach(pretreatment(image_test));
+    /*keypoint_approach(filter_white(pretreatment(image_model)), filter_white(pretreatment(image_test)));
+    auto result = hough_approach(filter_white(pretreatment(image_test)));
+    */
+    //auto result = filter_yellow(pretreatment(image_test));
+    //cv::namedWindow("pretreat", cv::WINDOW_KEEPRATIO);
+    //cv::imshow("pretreat", result);
+    //cv::waitKey(0);
+
+    /*auto result = histogram_approach(filter_white(pretreatment(image_test)));
     for(const auto& v : result)
     {
         cv::line(image_test, cv::Point(v[0], v[1]), cv::Point(v[2], v[3]), cv::Scalar(0, 0, 255), 5, 8);
     }
+*/
+    std::vector<cv::Vec3f> circles = detect_circle_approach(filter_yellow(pretreatment(image_test)));
 
-    cv::namedWindow("HoughLinesP", cv::WINDOW_NORMAL);
-    cv::imshow("HoughLinesP", image_test);
+    for(const auto& v : circles)
+    {
+        cv::Point center(cvRound(v[0]), cvRound(v[1]));
+        int radius = cvRound(v[2]);
+        cv::circle(image_test, center, 3, cv::Scalar(0, 255, 0), -1);
+        cv::circle(image_test, center, radius, cv::Scalar(0, 0, 255), 3, 8, 0);
+    }
+
+    cv::namedWindow("Output", cv::WINDOW_KEEPRATIO);
+    cv::imshow("Output", image_test);
     cv::waitKey(0);
     cv::destroyAllWindows();
 
