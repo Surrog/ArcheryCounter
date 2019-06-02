@@ -6,7 +6,7 @@
 #include <stdio.h>
 
 constexpr const char* model = IMAGE_TEST_DIR R".(\model\cleaned.jpg).";
-constexpr const char* test = IMAGE_TEST_DIR R".(\20190325_193820.jpg).";
+constexpr const char* test = IMAGE_TEST_DIR R".(\20190325_195801.jpg).";
 
 template <typename PointT> auto euclideanDistance(const PointT& lval, const PointT& rval)
 {
@@ -41,7 +41,31 @@ cv::Mat filter_yellow(const cv::Mat& img)
 {
     cv::Mat pretreat = img.clone();
     cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
-    cv::inRange(pretreat, cv::Scalar(110, 120, 190), cv::Scalar(150, 180, 255), pretreat);
+    cv::inRange(pretreat, cv::Scalar(132, 64, 0), cv::Scalar(142, 255, 255), pretreat);
+    return pretreat;
+}
+
+cv::Mat filter_red(const cv::Mat& img)
+{
+    cv::Mat pretreat = img.clone();
+    cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
+    cv::inRange(pretreat, cv::Scalar(164, 64, 0), cv::Scalar(172, 255, 255), pretreat);
+    return pretreat;
+}
+
+cv::Mat filter_blue(const cv::Mat& img)
+{
+    cv::Mat pretreat = img.clone();
+    cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
+    cv::inRange(pretreat, cv::Scalar(24, 64, 0), cv::Scalar(32, 255, 255), pretreat);
+    return pretreat;
+}
+
+cv::Mat filter_black(const cv::Mat& img)
+{
+    cv::Mat pretreat = img.clone();
+    cv::cvtColor(pretreat, pretreat, cv::COLOR_RGB2HSV_FULL);
+    cv::inRange(pretreat, cv::Scalar(128, 16, 32), cv::Scalar(192, 52, 96), pretreat);
     return pretreat;
 }
 
@@ -197,7 +221,7 @@ std::vector<cv::Vec4i> hough_approach(const cv::Mat& img)
 
     cv::Canny(img, canny_output, hysteresis_threshold1, hysteresis_threshold2, aperture_size, gradient);
 
-    cv::namedWindow("Canny", cv::WINDOW_KEEPRATIO);
+    cv::namedWindow("Canny", cv::WINDOW_NORMAL);
     cv::imshow("Canny", canny_output);
     cv::waitKey(0);
     cv::destroyAllWindows();
@@ -301,7 +325,7 @@ line_bound find_longest_line(const cv::Mat& img)
 
 std::vector<std::array<int, 4>> histogram_approach(const cv::Mat& img)
 {
-    cv::namedWindow("img", cv::WINDOW_KEEPRATIO);
+    cv::namedWindow("img", cv::WINDOW_NORMAL);
     cv::imshow("img", img);
     cv::waitKey(0);
     cv::destroyAllWindows();
@@ -340,23 +364,92 @@ std::vector<std::array<int, 4>> histogram_approach(const cv::Mat& img)
     return result;
 }
 
-std::vector<cv::Vec3f> detect_circle_approach(const cv::Mat& img)
+cv::Point center_of_mass(std::vector<cv::Point>& list)
 {
-    cv::Mat gray = img;
-    //cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-    //cv::GaussianBlur(gray, gray, cv::Size(15, 15), 1.5, 1.5);
-    cv::namedWindow("gray", cv::WINDOW_KEEPRATIO);
-    cv::imshow("gray", gray);
+    double mean_x = 0;
+    double mean_y = 0;
+    for(auto& p : list)
+    {
+        mean_x += double(p.x) / list.size();
+        mean_y += double(p.y) / list.size();
+    }
+    return cv::Point(int(mean_x), int(mean_y));
+}
+
+std::vector<cv::Point>
+cleanup_center_points(std::vector<cv::Point> points, const cv::Mat& img)
+{
+    std::ptrdiff_t erase_count = 0;
+    cv::RotatedRect ellipse;
+    do
+    {
+        ellipse = cv::fitEllipse(points);
+
+        auto tmp = img.clone();
+        cv::drawContours(tmp, std::vector<std::vector<cv::Point>> {points}, 0, cv::Scalar(255, 0, 0), 3);
+        cv::ellipse(tmp, ellipse, cv::Scalar(0, 255, 0), 3);
+        cv::namedWindow("Cleanup", cv::WINDOW_NORMAL);
+        cv::imshow("Cleanup", tmp);
+        cv::waitKey(0);
+        cv::destroyAllWindows();
+
+        auto lower_threshold = ellipse.size.width * 0.45;
+        auto upper_threshold = ellipse.size.width * .59;
+
+        auto it = std::remove_if(points.begin(), points.end(),
+            [center = ellipse.center, lower_threshold, upper_threshold](const cv::Point& p) {
+                auto dis = euclideanDistance(p, cv::Point(center));
+                return dis < lower_threshold || dis > upper_threshold;
+            });
+        erase_count = std::distance(it, points.end());
+        points.erase(it, points.end());
+    } while(erase_count > 0 && points.size());
+    return points;
+}
+
+std::pair<std::vector<cv::Point>, cv::RotatedRect> detect_circle_approach(
+    const cv::Mat& pretreat, const cv::Mat& original)
+{
+    cv::namedWindow("gray", cv::WINDOW_NORMAL);
+    cv::imshow("gray", pretreat);
     cv::waitKey(0);
 
-    std::vector<cv::Vec3f> circles;
-    cv::HoughCircles(gray, circles, cv::HOUGH_GRADIENT, 2, 150, 180, 100);
+    // std::vector<cv::KeyPoint> result;
+    // cv::HoughCircles(gray, circles, cv::HOUGH_GRADIENT, 2, 150, 180, 100);
 
-    int upper_row = img.rows * .65;
-    int lower_row = img.rows * .35;
-    int upper_col = img.cols * .65;
-    int lower_col = img.cols * .35;
-    return circles;
+    std::vector<std::vector<cv::Point>> contours;
+    findContours(pretreat, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
+    std::vector<cv::Point> result;
+
+    for(auto& v : contours)
+    {
+        if(v.size() > result.size())
+        {
+            if(std::all_of(v.begin(), v.end(), [](const cv::Point& v) { return v.x > -1 && v.y > -1; }))
+            {
+                result = std::move(v);
+            }
+        }
+    }
+
+    auto kernel_center = center_of_mass(result);
+    auto threshold = kernel_center.x * kernel_center.y / 8000;
+
+    for(auto& v : contours)
+    {
+        if(v.size() > 5 && euclideanDistance(v[0], kernel_center) < threshold)
+        {
+            result.insert(result.end(), v.begin(), v.end());
+        }
+    }
+
+    result = cleanup_center_points(std::move(result), original);
+
+	cv::RotatedRect rect;
+    if(result.size())
+        rect = cv::fitEllipse(result);
+
+    return {result, rect};
 }
 
 int main(int argc, char** argv)
@@ -377,10 +470,10 @@ int main(int argc, char** argv)
     /*keypoint_approach(filter_white(pretreatment(image_model)), filter_white(pretreatment(image_test)));
     auto result = hough_approach(filter_white(pretreatment(image_test)));
     */
-    //auto result = filter_yellow(pretreatment(image_test));
-    //cv::namedWindow("pretreat", cv::WINDOW_KEEPRATIO);
-    //cv::imshow("pretreat", result);
-    //cv::waitKey(0);
+    // auto result = filter_yellow(pretreatment(image_test));
+    // cv::namedWindow("pretreat", cv::WINDOW_NORMAL);
+    // cv::imshow("pretreat", result);
+    // cv::waitKey(0);
 
     /*auto result = histogram_approach(filter_white(pretreatment(image_test)));
     for(const auto& v : result)
@@ -388,17 +481,16 @@ int main(int argc, char** argv)
         cv::line(image_test, cv::Point(v[0], v[1]), cv::Point(v[2], v[3]), cv::Scalar(0, 0, 255), 5, 8);
     }
 */
-    std::vector<cv::Vec3f> circles = detect_circle_approach(filter_yellow(pretreatment(image_test)));
+    //auto [contours, ellipse] = detect_circle_approach(filter_yellow(pretreatment(image_test)), image_test);
+    //auto [contours, ellipse] = detect_circle_approach(filter_red(pretreatment(image_test)), image_test);
+    //auto [contours, ellipse] = detect_circle_approach(filter_blue(pretreatment(image_test)), image_test);
+    auto [contours, ellipse] = detect_circle_approach(filter_black(pretreatment(image_test)), image_test);
 
-    for(const auto& v : circles)
-    {
-        cv::Point center(cvRound(v[0]), cvRound(v[1]));
-        int radius = cvRound(v[2]);
-        cv::circle(image_test, center, 3, cv::Scalar(0, 255, 0), -1);
-        cv::circle(image_test, center, radius, cv::Scalar(0, 0, 255), 3, 8, 0);
-    }
+    cv::drawContours(
+        image_test, std::vector<std::vector<cv::Point>> {std::move(contours)}, 0, cv::Scalar(255, 0, 0), 3);
+    cv::ellipse(image_test, ellipse, cv::Scalar(0, 255, 0), 3);
 
-    cv::namedWindow("Output", cv::WINDOW_KEEPRATIO);
+    cv::namedWindow("Output", cv::WINDOW_NORMAL);
     cv::imshow("Output", image_test);
     cv::waitKey(0);
     cv::destroyAllWindows();
