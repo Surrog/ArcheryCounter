@@ -396,9 +396,11 @@ cleanup_center_points(std::vector<cv::Point> points, const cv::Mat& img)
         auto lower_threshold = ellipse.size.width * 0.45;
         auto upper_threshold = ellipse.size.width * .59;
 
+		cv::Point center = ellipse.center;
+
         auto it = std::remove_if(points.begin(), points.end(),
-            [center = ellipse.center, lower_threshold, upper_threshold](const cv::Point& p) {
-                auto dis = euclideanDistance(p, cv::Point(center));
+            [center, lower_threshold, upper_threshold](const cv::Point& p) {
+                auto dis = euclideanDistance(p, center);
                 return dis < lower_threshold || dis > upper_threshold;
             });
         erase_count = std::distance(it, points.end());
