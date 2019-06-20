@@ -5,6 +5,8 @@ build_script:
 - cmd: >-
     choco install opencv --params="'/Environment'"
     
+    refreshenv
+    
     dir C:\tools\opencv
     
     dir C:\tools\opencv\sources
