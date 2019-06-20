@@ -25,6 +25,8 @@ configure_file( "${PROJECT_SOURCE_DIR}/sources.hpp.in"
 set (SOURCES 
 	${PROJECT_SOURCE_DIR}/main.cpp
 	${PROJECT_SOURCE_DIR}/sources.hpp
+	${PROJECT_SOURCE_DIR}/colour_filters.hpp
+	${PROJECT_SOURCE_DIR}/colour_filters.cpp
 	)
 
 add_executable(ArcheryCounter ${SOURCES})
