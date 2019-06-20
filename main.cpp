@@ -508,7 +508,13 @@ std::size_t find_weakest_element(const std::vector<cv::RotatedRect>& ellipses)
     auto mratios = std::accumulate(ratios.begin(), ratios.end(), 0.) / ratios.size();
     for(std::size_t i = 0; i < ellipses.size(); i++)
     {
-        distances[i] = std::abs(mratios - ellipses[i].size.aspectRatio());
+#if CV_MAJOR_VERSION < 3
+        double aspect = ellipses[i].size.width / static_cast<double>(ellipses[i].size.height);
+#else //! CV_MAJOR_VERSION > 3
+        double aspect = ellipses[i].size.aspectRatio();
+#endif // CV_MAJOR_VERSION <> 3
+
+        distances[i] = std::abs(mratios - aspect);
     }
     max = std::minmax_element(distances.begin(), distances.begin() + 3).second;
     if(*max > 0.01)
@@ -684,7 +690,7 @@ int main(int argc, char** argv)
     std::transform(target.begin(), target.end(), target_contours.begin(), [](const cv::RotatedRect& rect) {
         std::vector<cv::Point> result;
         cv::Size2f size(rect.size.width / 2.f, rect.size.height / 2.f);
-        cv::ellipse2Poly(rect.center, size, rect.angle, 0, 360, 1, result);
+        cv::ellipse2Poly(rect.center, size, static_cast<int>(rect.angle), 0, 360, 1, result);
         return result;
     });
 
@@ -742,7 +748,7 @@ int main(int argc, char** argv)
     {
         cv::line(display_line, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), cv::Scalar(0, 255, 0), 3,
 #if CV_MAJOR_VERSION < 3
-            cv::FILLED
+            CV_AA
 #else // CV_MAJOR_VERSION >= 3
             cv::LINE_AA
 #endif // CV_MAJOR_VERSION <>= 3

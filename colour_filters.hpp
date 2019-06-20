@@ -15,4 +15,4 @@ cv::Mat filter_black(const cv::Mat& img);
 
 cv::Mat filter_arrow(const cv::Mat& img, const std::array<cv::Mat, 5>& target_filled, bool debug = false);
 
-#endif COLOUR_FILTERS_HPP
+#endif //COLOUR_FILTERS_HPP
