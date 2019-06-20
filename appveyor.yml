@@ -3,7 +3,7 @@ image:
 clone_folder: C:\project\archery_counter
 build_script:
 - cmd: >-
-    choco install opencv /InstallationPath C:\project\archery_counter\opencv
+    choco /InstallationPath C:\project\archery_counter\opencv install opencv
 
     mkdir build
 
