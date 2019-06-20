@@ -7,6 +7,8 @@ build_script:
     
     dir C:\tools\opencv
     
+    dir C:\tools\opencv\sources
+    
     dir C:\tools\opencv\build
     
     dir C:\tools\opencv\build\bin
