@@ -6,12 +6,14 @@ build_script:
     choco install opencv
     
     dir C:\tools\opencv\build
+    
+    dir C:\tools\opencv\build\bin
 
     mkdir build
 
     cd build
     
-    cmake C:\project\archery_counter -G "Visual Studio 15" -D OpenCV_DIR=C:\tools\opencv\build\bin
+    cmake C:\project\archery_counter -G "Visual Studio 15" -D OpenCV_DIR=C:\tools\opencv\build
     
     cmake --build .
 
