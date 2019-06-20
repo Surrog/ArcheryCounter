@@ -5,6 +5,8 @@ build_script:
 - cmd: >-
     choco install opencv
     
+    dir C:\tools\opencv
+    
     dir C:\tools\opencv\build
     
     dir C:\tools\opencv\build\bin
