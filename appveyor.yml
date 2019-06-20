@@ -7,9 +7,9 @@ build_script:
     
     refreshenv
     
-    $env:OpenCV_DIR
+    $env:OPENCV_DIR
     
-    cd $env:OpenCV_DIR
+    cd $env:OPENCV_DIR
     
     dir .
     
