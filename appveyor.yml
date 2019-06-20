@@ -3,13 +3,13 @@ image:
 clone_folder: C:\project\archery_counter
 build_script:
 - cmd: >-
-    choco /InstallationPath C:\project\archery_counter\opencv install opencv
+    choco install opencv
 
     mkdir build
 
     cd build
     
-    cmake C:\project\archery_counter -G "Visual Studio 15" -D OpenCV_DIR=C:\project\archery_counter\opencv\bin
+    cmake C:\project\archery_counter -G "Visual Studio 15" -D OpenCV_DIR=C:\tools\opencv\bin
     
     cmake --build .
 
