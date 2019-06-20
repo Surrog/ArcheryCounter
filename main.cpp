@@ -309,10 +309,10 @@ std::vector<std::array<int, 4>> histogram_approach(const cv::Mat& img)
 
     std::size_t upper_i = std::distance(horz_histo.begin(), upper_b);
     std::size_t lower_i = upper_i + minmax.second->size;
-    upper_i *= 0.95;
-    lower_i *= 1.05;
-    upper_b->ibegin *= 0.95;
-    upper_b->iend *= 1.05;
+    upper_i *= static_cast<std::size_t>(0.95);
+    lower_i *= static_cast<std::size_t>(1.05);
+    upper_b->ibegin *= static_cast<std::size_t>(0.95);
+    upper_b->iend *= static_cast<std::size_t>(1.05);
 
     result.push_back({int(upper_b->ibegin), int(upper_i), int(upper_b->iend), int(upper_i)});
     result.push_back({int(upper_b->ibegin), int(upper_i), int(upper_b->ibegin), int(lower_i)});
@@ -480,7 +480,8 @@ std::size_t find_weakest_element(const std::vector<cv::RotatedRect>& ellipses)
     auto mcenter = center_of_mass(centers);
     for(std::size_t i = 0; i < ellipses.size(); i++)
     {
-        distances[i] = euclideanDistance(cv::Point2f(mcenter), ellipses[i].center);
+        distances[i] = euclideanDistance(
+            cv::Point2f(static_cast<float>(mcenter.x), static_cast<float>(mcenter.y)), ellipses[i].center);
     }
     auto max = std::minmax_element(distances.begin(), distances.begin() + 3).second;
     if(*max > 20)
@@ -497,8 +498,13 @@ std::size_t find_weakest_element(const std::vector<cv::RotatedRect>& ellipses)
     bad_score[std::distance(distances.begin(), max)]++;
 
     std::vector<double> ratios(ellipses.size());
-    std::transform(ellipses.begin(), ellipses.end(), ratios.begin(),
-        [](const cv::RotatedRect& e) { return e.size.aspectRatio(); });
+    std::transform(ellipses.begin(), ellipses.end(), ratios.begin(), [](const cv::RotatedRect& e) {
+#if CV_MAJOR_VERSION < 3
+        return e.size.width / static_cast<double>(e.size.height);
+#else //! CV_MAJOR_VERSION > 3
+            return e.size.aspectRatio();
+#endif // CV_MAJOR_VERSION <> 3
+    });
     auto mratios = std::accumulate(ratios.begin(), ratios.end(), 0.) / ratios.size();
     for(std::size_t i = 0; i < ellipses.size(); i++)
     {
@@ -734,7 +740,13 @@ int main(int argc, char** argv)
     auto display_line = image_test.clone();
     for(const auto& l : lines)
     {
-        cv::line(display_line, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), cv::Scalar(0, 255, 0), 3, cv::LINE_AA);
+        cv::line(display_line, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), cv::Scalar(0, 255, 0), 3,
+#if CV_MAJOR_VERSION < 3
+            cv::FILLED
+#else // CV_MAJOR_VERSION >= 3
+            cv::LINE_AA
+#endif // CV_MAJOR_VERSION <>= 3
+        );
     }
     cv::namedWindow("line detected", cv::WINDOW_NORMAL);
     cv::imshow("line detected", display_line);
