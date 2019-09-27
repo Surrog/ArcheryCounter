@@ -26,8 +26,17 @@ configure_file( "${PROJECT_SOURCE_DIR}/sources.hpp.in"
 set (SOURCES 
 	${PROJECT_SOURCE_DIR}/main.cpp
 	${PROJECT_SOURCE_DIR}/sources.hpp
+	${PROJECT_SOURCE_DIR}/math_utils.hpp
 	${PROJECT_SOURCE_DIR}/colour_filters.hpp
 	${PROJECT_SOURCE_DIR}/colour_filters.cpp
+	${PROJECT_SOURCE_DIR}/keypoint_approach.hpp
+	${PROJECT_SOURCE_DIR}/keypoint_approach.cpp
+	${PROJECT_SOURCE_DIR}/hough_approach.hpp
+	${PROJECT_SOURCE_DIR}/hough_approach.cpp
+	${PROJECT_SOURCE_DIR}/histo_approach.hpp
+	${PROJECT_SOURCE_DIR}/histo_approach.cpp
+	${PROJECT_SOURCE_DIR}/ellispes_approach.hpp
+	${PROJECT_SOURCE_DIR}/ellispes_approach.cpp
 	)
 
 add_executable(ArcheryCounter ${SOURCES})
