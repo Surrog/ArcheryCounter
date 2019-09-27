@@ -1,4 +1,5 @@
 #include "keypoint_approach.hpp"
+#include <memory>
 
 std::vector<cv::DMatch> filter_match(const std::vector<cv::KeyPoint>& keypoint_model,
     const std::vector<cv::KeyPoint>& keypoint_test, const std::vector<std::vector<cv::DMatch>>& matches,
