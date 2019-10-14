@@ -6,6 +6,7 @@ include_directories("${PROJECT_SOURCE_DIR}")
 
 if (WIN32)
 add_definitions(/std:c++latest)
+add_definitions(/permissive-)
 else (WIN32)
 add_definitions(-std=c++17)
 endif(WIN32)
