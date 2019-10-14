@@ -84,3 +84,17 @@ cv::Mat filter_arrow(const cv::Mat& img, const std::array<cv::Mat, 5>& target_fi
 
     return colours[0];
 }
+
+std::array<cv::Mat, 5> filter_image(const cv::Mat& pretreat)
+{
+    std::array<cv::Mat, 5> result;
+    std::array<std::future<cv::Mat>, 5> async_result {std::async(filter_yellow, pretreat),
+        std::async(filter_red, pretreat), std::async(filter_blue, pretreat), std::async(filter_black, pretreat),
+        std::async(filter_white, pretreat)};
+
+    for(std::size_t i = 0; i < result.size(); i++)
+    {
+        result[i] = async_result[i].get();
+    }
+    return result;
+}

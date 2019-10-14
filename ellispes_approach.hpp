@@ -13,7 +13,11 @@ std::pair<std::vector<cv::Point>, cv::RotatedRect> detect_circle_approach(
 
 std::size_t find_weakest_element(const std::vector<cv::RotatedRect>& ellipses);
 
-std::array<cv::RotatedRect, 5> compute_final_ellipses(
+std::array<cv::RotatedRect, 5> compute_final_ellipses_by_linear_interpolation(
     const std::array<cv::RotatedRect, 3>& ellipses, std::size_t ignored_index);
+
+
+std::array<cv::RotatedRect, 5> find_target_ellipses(const cv::Mat& img, bool debug);
+
 
 #endif //! HISTO_APPROACH_HPP

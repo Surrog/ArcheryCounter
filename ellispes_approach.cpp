@@ -1,5 +1,7 @@
 #include "ellispes_approach.hpp"
 #include "math_utils.hpp"
+#include "pretreatment.hpp"
+#include "colour_filters.hpp"
 
 #include <numeric>
 
@@ -185,7 +187,7 @@ std::size_t find_weakest_element(const std::vector<cv::RotatedRect>& ellipses)
     return bad_score.size();
 }
 
-std::array<cv::RotatedRect, 5> compute_final_ellipses(
+std::array<cv::RotatedRect, 5> compute_final_ellipses_by_linear_interpolation(
     const std::array<cv::RotatedRect, 3>& ellipses, std::size_t ignored_index)
 {
     std::array<cv::RotatedRect, 5> result = {};
@@ -247,4 +249,69 @@ std::array<cv::RotatedRect, 5> compute_final_ellipses(
     }
 
     return result;
+}
+
+std::array<cv::RotatedRect, 5> find_target_ellipses(const cv::Mat& img, bool debug)
+{
+    cv::Mat pretreat = pretreatment(img);
+    std::array<cv::Mat, 5> filtered_images = filter_image(pretreat);
+    std::array<bool, 5> agregate_contour {true, true, true, true, false};
+    std::array<bool, 5> debug_contour {false, false, false, false, false};
+
+    std::vector<std::future<std::pair<std::vector<cv::Point>, cv::RotatedRect>>> async_ellipse_process;
+    async_ellipse_process.reserve(filtered_images.size());
+    for(std::size_t i = 0; i < 3; i++)
+    {
+        if(debug_contour[i])
+        {
+            async_ellipse_process.emplace_back(std::async(
+                std::launch::deferred, detect_circle_approach, filtered_images[i], img, agregate_contour[i], true));
+        }
+        else
+        {
+            async_ellipse_process.emplace_back(
+                std::async(detect_circle_approach, filtered_images[i], img, agregate_contour[i], false));
+        }
+    }
+
+    std::vector<cv::RotatedRect> ellipses;
+    std::vector<std::vector<cv::Point>> contours;
+    ellipses.reserve(async_ellipse_process.size());
+    contours.reserve(async_ellipse_process.size());
+    for(auto& async_p : async_ellipse_process)
+    {
+        auto pair = async_p.get();
+        if(pair.first.size())
+        {
+            ellipses.emplace_back(std::move(pair.second));
+            contours.emplace_back(std::move(pair.first));
+        }
+    }
+
+    if(debug)
+    {
+        auto tmp = img.clone();
+        cv::drawContours(tmp, contours, -1, cv::Scalar(255, 0, 0), 3);
+        unsigned char shade = 32;
+        for(const auto& e : ellipses)
+        {
+            cv::circle(tmp, e.center, 10, cv::Scalar(0, 0, shade), 6);
+            cv::ellipse(tmp, e, cv::Scalar(0, 255, 0), 3);
+            shade += 32;
+        }
+
+        cv::namedWindow("Output", cv::WINDOW_NORMAL);
+        cv::imshow("Output", tmp);
+        cv::waitKey(0);
+        cv::destroyAllWindows();
+    }
+
+    auto value = find_weakest_element(ellipses);
+
+    if(debug)
+    {
+        std::cout << "weakest " << value << '\n';
+    }
+
+    return compute_final_ellipses_by_linear_interpolation({ellipses[0], ellipses[1], ellipses[2]}, value);
 }
