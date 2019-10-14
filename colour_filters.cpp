@@ -1,4 +1,5 @@
 #include "colour_filters.hpp"
+#include <future>
 
 cv::Mat filter_white(const cv::Mat& img)
 {
