@@ -3,8 +3,6 @@
 #include "ellispes_approach.hpp"
 #include "sources.hpp"
 #include <algorithm>
-#include <execution>
-#include <future>
 #include <iostream>
 #include <opencv2/opencv.hpp>
 
