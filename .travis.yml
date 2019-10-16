@@ -9,13 +9,13 @@ matrix:
       addons:
         apt:
           sources:
-            - llvm-toolchain-xenial-9
+            - llvm-toolchain-xenial-8
           packages:
-            - clang-9
+            - clang-8
             - cppcheck
             - libopencv-dev
       env:
-        - MATRIX_EVAL="CC=clang-9 && CXX=clang++-9"
+        - MATRIX_EVAL="CC=clang-8 && CXX=clang++-8"
 
 before_install:
     - eval "${MATRIX_EVAL}"
