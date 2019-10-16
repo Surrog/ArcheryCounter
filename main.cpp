@@ -3,8 +3,10 @@
 #include "ellispes_approach.hpp"
 #include "sources.hpp"
 #include <algorithm>
-#include <iostream>
 #include <opencv2/opencv.hpp>
+
+#include <iostream>
+
 
 constexpr const char* model = IMAGE_TEST_DIR R".(\model\cleaned.jpg).";
 constexpr const char* test = IMAGE_TEST_DIR R".(\20190325_204137.jpg).";
