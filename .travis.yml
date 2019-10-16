@@ -11,11 +11,11 @@ matrix:
           sources:
             - ubuntu-toolchain-r-test
           packages:
-            - clang-3.9
+            - clang-9.0
             - cppcheck
             - libopencv-dev
       env:
-        - MATRIX_EVAL="CC=clang-3.9 && CXX=clang++-3.9"
+        - MATRIX_EVAL="CC=clang-9.0 && CXX=clang++-9.0"
 
 before_install:
     - eval "${MATRIX_EVAL}"
