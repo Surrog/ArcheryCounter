@@ -13,7 +13,7 @@ struct arrows_position
 };
 
 arrows_position find_arrows(
-    const cv::Mat& image_test, const cv::Mat& image_test_gray, const std::array<cv::Mat, 5>& target_ring_mask)
+    const cv::Mat& image_test, const cv::Mat& image_test_gray, const std::array<cv::Mat, 10>& target_ring_mask)
 {
 
     return {};

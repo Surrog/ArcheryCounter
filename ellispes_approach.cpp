@@ -5,6 +5,9 @@
 #include <future>
 #include <numeric>
 
+namespace ellipses
+{
+
 std::vector<cv::Point> cleanup_center_points(std::vector<cv::Point> points, const cv::Mat& img, bool debug)
 {
     std::ptrdiff_t erase_count = 0;
@@ -187,10 +190,10 @@ std::size_t find_weakest_element(const std::vector<cv::RotatedRect>& ellipses)
     return bad_score.size();
 }
 
-std::array<cv::RotatedRect, 5> compute_final_ellipses_by_linear_interpolation(
+std::array<cv::RotatedRect, 10> compute_final_ellipses_by_linear_interpolation(
     const std::array<cv::RotatedRect, 3>& ellipses, std::size_t ignored_index)
 {
-    std::array<cv::RotatedRect, 5> result = {};
+    std::array<cv::RotatedRect, 10> result = {};
 
     auto sample_size = ellipses.size();
     if(ignored_index < ellipses.size())
@@ -242,16 +245,17 @@ std::array<cv::RotatedRect, 5> compute_final_ellipses_by_linear_interpolation(
 
     for(std::size_t i = 0; i < result.size(); i++)
     {
-        cv::Point2f center(float(centerx_coef * i + centerx_constant), float(centery_coef * i + centery_constant));
-        cv::Size2f size(float(width_coef * i + width_constant), float(height_coef * i + height_constant));
-        float angle = float(angle_coef * i + angle_constant);
+        auto x = i * 0.5 - 0.5;
+        cv::Point2f center(float(centerx_coef * x + centerx_constant), float(centery_coef * x + centery_constant));
+        cv::Size2f size(float(width_coef * x + width_constant), float(height_coef * x + height_constant));
+        float angle = float(angle_coef * x + angle_constant);
         result[i] = cv::RotatedRect(center, size, angle);
     }
 
     return result;
 }
 
-std::array<cv::RotatedRect, 5> find_target_ellipses(const cv::Mat& img, bool debug)
+std::array<cv::RotatedRect, 10> find_target(const cv::Mat& img, bool debug)
 {
     cv::Mat pretreat = pretreatment(img);
     std::array<cv::Mat, 5> filtered_images = filter_image(pretreat);
@@ -314,4 +318,7 @@ std::array<cv::RotatedRect, 5> find_target_ellipses(const cv::Mat& img, bool deb
     }
 
     return compute_final_ellipses_by_linear_interpolation({ellipses[0], ellipses[1], ellipses[2]}, value);
+}
+
+
 }
