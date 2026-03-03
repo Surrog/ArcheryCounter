@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libopencv-dev clang-tools
+
+      - name: Build with scan-build
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          mkdir build && cd build
+          cmake ..
+          scan-build cmake --build . -- -j2
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenCV
+        run: choco install opencv --params="'/Environment'" -y
+
+      - name: Build
+        shell: cmd
+        run: |
+          refreshenv
+          mkdir build
+          cd build
+          cmake .. -G "Visual Studio 17 2022"
+          cmake --build . --config Release
