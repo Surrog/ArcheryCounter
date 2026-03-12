@@ -15,24 +15,23 @@ Pod::Spec.new do |s|
     "ios/ArcheryCounterBridge/*.{h,m,mm}",
     # Platform-independent C++ entry point
     "cpp/*.{hpp,cpp}",
-    # Algorithm files (project root) — exclude main.cpp and unused approaches
-    "ellispes_approach.{hpp,cpp}",
-    "colour_filters.{hpp,cpp}",
-    "pretreatment.{hpp,cpp}",
-    "math_utils.hpp",
-    "NN_approach.hpp",
+    # Algorithm files — exclude main.cpp and unused approaches
+    "native/ellispes_approach.{hpp,cpp}",
+    "native/colour_filters.{hpp,cpp}",
+    "native/pretreatment.{hpp,cpp}",
+    "native/math_utils.hpp",
+    "native/NN_approach.hpp",
   ]
 
   s.pod_target_xcconfig = {
-    # The repo root must be on the search path so that
-    # #include "ellispes_approach.hpp" resolves from cpp/ArcheryCounterModule.cpp
-    # and from ios/ArcheryCounterBridge/RCTArcheryCounter.mm.
-    "HEADER_SEARCH_PATHS"          => '"$(PODS_TARGET_SRCROOT)" "$(PODS_TARGET_SRCROOT)/cpp"',
+    "HEADER_SEARCH_PATHS"          => '"$(PODS_TARGET_SRCROOT)/native" "$(PODS_TARGET_SRCROOT)/cpp"',
     "CLANG_CXX_LANGUAGE_STANDARD"  => "c++17",
     "CLANG_CXX_LIBRARY"            => "libc++",
     # std::async on iOS uses GCD/libc++ — no extra linker flags needed.
   }
 
   s.dependency "React-Core"
-  s.dependency "OpenCV2", "~> 4.8"
+  # OpenCV-Dynamic-Framework ships as an xcframework with both device + simulator slices.
+  # OpenCV2 (4.3) only has device slices and breaks simulator builds.
+  s.dependency "OpenCV-Dynamic-Framework", "~> 4.10"
 end

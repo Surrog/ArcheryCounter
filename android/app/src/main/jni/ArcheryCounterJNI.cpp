@@ -3,9 +3,9 @@
 #include "ArcheryCounterModule.hpp"
 
 // JNI function name must match: Java_<package>_<class>_<method>
-// Package: com.helloworld  Class: ArcheryCounterModule  Method: nativeProcessImage
+// Package: com.archerycounter  Class: ArcheryCounterModule  Method: nativeProcessImage
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_helloworld_ArcheryCounterModule_nativeProcessImage(
+Java_com_archerycounter_ArcheryCounterModule_nativeProcessImage(
     JNIEnv* env, jobject /* thiz */, jstring imagePath)
 {
     const char* path = env->GetStringUTFChars(imagePath, nullptr);

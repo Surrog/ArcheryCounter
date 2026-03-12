@@ -1,6 +1,62 @@
-# Specify filepatterns you want git to ignore.
-bin/*
-sources.hpp
-build/*
-node_modules/*
+# ── C++ build ────────────────────────────────────────────────
+native/bin/
+native/build/
+native/sources.hpp
+
+# ── macOS ────────────────────────────────────────────────────
+.DS_Store
+
+# ── Xcode ────────────────────────────────────────────────────
+ios/build/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata
+*.xccheckout
+*.moved-aside
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+**/.xcode.env.local
+
+# ── CocoaPods ────────────────────────────────────────────────
+ios/Pods/
+/vendor/bundle/
+
+# ── Android ──────────────────────────────────────────────────
+android/app/build/
+android/build/
+.gradle/
+local.properties
+*.iml
+*.hprof
+.cxx/
+*.keystore
+!android/app/debug.keystore
+.kotlin/
+.idea/
+
+# ── Node / React Native ──────────────────────────────────────
+node_modules/
+npm-debug.log
+yarn-error.log
+*.jsbundle
+.metro-health-check*
+/coverage
+
+# ── Yarn ─────────────────────────────────────────────────────
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# ── Logs ─────────────────────────────────────────────────────
 *.log

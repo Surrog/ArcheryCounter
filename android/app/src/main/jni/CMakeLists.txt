@@ -30,17 +30,17 @@ add_library(
     SHARED
     ArcheryCounterJNI.cpp
     ${CPP_ROOT}/cpp/ArcheryCounterModule.cpp
-    ${CPP_ROOT}/ellispes_approach.cpp
-    ${CPP_ROOT}/colour_filters.cpp
-    ${CPP_ROOT}/pretreatment.cpp
+    ${CPP_ROOT}/native/ellispes_approach.cpp
+    ${CPP_ROOT}/native/colour_filters.cpp
+    ${CPP_ROOT}/native/pretreatment.cpp
 )
 
 target_include_directories(
     archerycounter_jni
     PRIVATE
     ${OPENCV_INCLUDE_DIR}
-    ${CPP_ROOT}        # resolves "ellispes_approach.hpp", "math_utils.hpp", etc.
-    ${CPP_ROOT}/cpp    # resolves "ArcheryCounterModule.hpp"
+    ${CPP_ROOT}/native  # resolves "ellispes_approach.hpp", "math_utils.hpp", etc.
+    ${CPP_ROOT}/cpp     # resolves "ArcheryCounterModule.hpp"
 )
 
 target_link_libraries(
