@@ -5,6 +5,7 @@ on:
   pull_request:
 
 jobs:
+  # ── Linux: static analysis + build + tests ──────────────────────────────────
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -15,15 +16,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang libopencv-dev clang-tools
 
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          mkdir native/build && cd native/build
+          cmake ..
+
       - name: Build with scan-build
         env:
           CC: clang
           CXX: clang++
         run: |
-          mkdir build && cd build
-          cmake ..
+          cd native/build
           scan-build cmake --build . -- -j2
 
+      - name: Run tests
+        run: |
+          cd native/build
+          ctest --output-on-failure
+
+  # ── Windows: build only ──────────────────────────────────────────────────────
   windows:
     runs-on: windows-latest
     steps:
@@ -36,7 +50,13 @@ jobs:
         shell: cmd
         run: |
           refreshenv
-          mkdir build
-          cd build
+          mkdir native\build
+          cd native\build
           cmake .. -G "Visual Studio 17 2022"
           cmake --build . --config Release
+
+      - name: Run tests
+        shell: cmd
+        run: |
+          cd native\build
+          ctest -C Release --output-on-failure

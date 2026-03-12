@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.2)
+cmake_minimum_required (VERSION 3.10)
 
 project (archerycounter)
 
@@ -48,3 +48,21 @@ set (SOURCES
 
 add_executable(ArcheryCounter ${SOURCES})
 target_link_libraries( ArcheryCounter ${OpenCV_LIBS} Threads::Threads)
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+enable_testing()
+
+add_executable(test_target_detection
+    tests/test_target_detection.cpp
+    ${PROJECT_SOURCE_DIR}/ellispes_approach.cpp
+    ${PROJECT_SOURCE_DIR}/colour_filters.cpp
+    ${PROJECT_SOURCE_DIR}/pretreatment.cpp
+)
+target_include_directories(test_target_detection PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_target_detection ${OpenCV_LIBS} Threads::Threads)
+# std::filesystem requires stdc++fs on GCC < 9; harmless on Clang / MSVC / GCC 9+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9.0")
+    target_link_libraries(test_target_detection stdc++fs)
+endif()
+
+add_test(NAME target_detection COMMAND test_target_detection)
