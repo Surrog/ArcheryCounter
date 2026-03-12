@@ -2,3 +2,5 @@
 bin/*
 sources.hpp
 build/*
+node_modules/*
+*.log
