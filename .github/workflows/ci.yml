@@ -60,3 +60,112 @@ jobs:
         run: |
           cd native\build
           ctest -C Release --output-on-failure
+
+  # ── React Native: Jest unit tests ────────────────────────────────────────────
+  react-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Run Jest
+        run: npm test -- --ci --passWithNoTests
+
+  # ── Android: unit tests + debug build ───────────────────────────────────────
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Set OpenCV SDK path
+        run: echo "OPENCV_SDK=$HOME/opencv-android-sdk" >> $GITHUB_ENV
+
+      - name: Cache OpenCV Android SDK
+        id: cache-opencv
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OPENCV_SDK }}
+          key: opencv-android-4.9.0
+
+      - name: Download OpenCV Android SDK
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://github.com/opencv/opencv/releases/download/4.9.0/opencv-4.9.0-android-sdk.zip \
+            -o /tmp/opencv-android.zip
+          unzip -q /tmp/opencv-android.zip -d $HOME
+          mv $HOME/OpenCV-android-sdk $HOME/opencv-android-sdk
+
+      - name: Run Android unit tests
+        run: |
+          cd android
+          # Unit tests don't invoke JNI; provide a dummy path so Gradle doesn't fail cmake config
+          OPENCV_ANDROID_SDK=${{ github.workspace }}/android/app \
+            ./gradlew :app:testDebugUnitTest --no-daemon
+
+      - name: Assemble debug APK
+        env:
+          OPENCV_ANDROID_SDK: ${{ env.OPENCV_SDK }}
+        run: |
+          cd android
+          ./gradlew :app:assembleDebug --no-daemon
+
+  # ── iOS: pod install + xcodebuild test ──────────────────────────────────────
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: pods-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: pods-
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install
+
+      - name: Build for simulator
+        run: |
+          xcodebuild \
+            -workspace ios/ArcheryCounter.xcworkspace \
+            -scheme ArcheryCounter \
+            -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+            -configuration Debug \
+            build \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty || true

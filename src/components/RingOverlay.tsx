@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
 import Svg, { Ellipse, G } from 'react-native-svg';
 import type { RingEllipse } from '../NativeArcheryCounter';
+import { computeLetterboxTransform } from '../letterboxTransform';
 
 interface Props {
   rings: RingEllipse[];
@@ -40,34 +41,7 @@ export function RingOverlay({ rings, imageNaturalWidth, imageNaturalHeight }: Pr
 
   const transform = useMemo(() => {
     if (!viewSize.width || !viewSize.height) return null;
-
-    const imageAspect = imageNaturalWidth / imageNaturalHeight;
-    const viewAspect = viewSize.width / viewSize.height;
-
-    let renderedWidth: number;
-    let renderedHeight: number;
-    let offsetX: number;
-    let offsetY: number;
-
-    if (imageAspect > viewAspect) {
-      // Image is wider than the view — letterbox top and bottom
-      renderedWidth = viewSize.width;
-      renderedHeight = viewSize.width / imageAspect;
-      offsetX = 0;
-      offsetY = (viewSize.height - renderedHeight) / 2;
-    } else {
-      // Image is taller — pillarbox left and right
-      renderedHeight = viewSize.height;
-      renderedWidth = viewSize.height * imageAspect;
-      offsetX = (viewSize.width - renderedWidth) / 2;
-      offsetY = 0;
-    }
-
-    return {
-      scale: renderedWidth / imageNaturalWidth,
-      offsetX,
-      offsetY,
-    };
+    return computeLetterboxTransform(imageNaturalWidth, imageNaturalHeight, viewSize.width, viewSize.height);
   }, [viewSize, imageNaturalWidth, imageNaturalHeight]);
 
   const handleLayout = (e: LayoutChangeEvent) => {

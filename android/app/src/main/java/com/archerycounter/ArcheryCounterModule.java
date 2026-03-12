@@ -72,7 +72,7 @@ public class ArcheryCounterModule extends ReactContextBaseJavaModule {
      * - content://    →  copy to cache, return cache path
      *   (required for Android 10+ scoped storage and some gallery providers)
      */
-    private String resolveToFilePath(String imageUri) throws Exception {
+    String resolveToFilePath(String imageUri) throws Exception {
         if (imageUri.startsWith("file://")) {
             return imageUri.substring(7);
         }
