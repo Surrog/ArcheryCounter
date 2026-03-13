@@ -15,7 +15,7 @@ export function decodeBase64Jpeg(base64: string): ImageBuffer {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
   const jpeg = require('jpeg-js') as typeof import('jpeg-js');
-  const { data, width, height } = jpeg.decode(bytes, { useTrichromaticQuantization: false });
+  const { data, width, height } = jpeg.decode(bytes);
   return { rgba: new Uint8Array(data.buffer), width, height };
 }
 
