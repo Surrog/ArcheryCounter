@@ -23,9 +23,6 @@ target 'ArcheryCounter' do
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
 
-  # Local native module: compiles the C++ OpenCV algorithm files + iOS bridge
-  pod 'ArcheryCounterNative', :path => '../'
-
   post_install do |installer|
     react_native_post_install(
       installer,

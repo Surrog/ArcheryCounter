@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
-import ArcheryCounter from '../NativeArcheryCounter';
+import ArcheryCounter from '../ArcheryCounter';
 import { useArcheryScorer } from '../useArcheryScorer';
 
 jest.mock('react-native-image-picker', () => ({

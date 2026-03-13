@@ -1,4 +1,4 @@
-import type { RingEllipse } from '../NativeArcheryCounter';
+import type { RingEllipse } from '../ArcheryCounter';
 
 const mockRings: RingEllipse[] = Array.from({ length: 10 }, (_, i) => ({
   centerX: 500,

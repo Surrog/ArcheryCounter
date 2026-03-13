@@ -84,30 +84,6 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
-        externalNativeBuild {
-            cmake {
-                // ANDROID_STL=c++_shared is required because both std::async (used in
-                // colour_filters.cpp and ellispes_approach.cpp) and the OpenCV .so both
-                // link libc++. Using c++_shared avoids ODR violations between them.
-                def opencvSdk = System.getenv("OPENCV_ANDROID_SDK") ?: "/Users/francoisancel/Documents/OpenCV-android-sdk"
-                arguments "-DANDROID_STL=c++_shared",
-                          "-DOPENCV_ANDROID_SDK=${opencvSdk}"
-                abiFilters "arm64-v8a", "armeabi-v7a"
-            }
-        }
-    }
-    externalNativeBuild {
-        cmake {
-            path "src/main/jni/CMakeLists.txt"
-            version "3.22.1"
-        }
-    }
-    sourceSets {
-        main {
-            // Package libopencv_java4.so for all ABI into the APK
-            def opencvSdk = System.getenv("OPENCV_ANDROID_SDK") ?: "/Users/francoisancel/Documents/OpenCV-android-sdk"
-            jniLibs.srcDirs = ["${opencvSdk}/sdk/native/libs"]
-        }
     }
     signingConfigs {
         debug {
@@ -141,7 +117,4 @@ dependencies {
         implementation jscFlavor
     }
 
-    testImplementation "junit:junit:4.13.2"
-    testImplementation "org.mockito:mockito-core:5.11.0"
-    testImplementation "org.robolectric:robolectric:4.12.2"
 }

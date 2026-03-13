@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import { launchImageLibrary } from 'react-native-image-picker';
-import ArcheryCounter, { RingEllipse } from './NativeArcheryCounter';
+import ArcheryCounter, { RingEllipse } from './ArcheryCounter';
 
 export interface ScorerState {
   imageUri: string | null;
@@ -27,7 +27,9 @@ export function useArcheryScorer() {
   const pickAndProcess = useCallback(async () => {
     const pickerResult = await launchImageLibrary({
       mediaType: 'photo',
-      includeBase64: false,
+      includeBase64: true,
+      maxWidth: 1200,
+      maxHeight: 1200,
     });
 
     if (pickerResult.didCancel || !pickerResult.assets?.[0]) return;
@@ -40,7 +42,7 @@ export function useArcheryScorer() {
     setState({ ...initialState, loading: true });
 
     try {
-      const rings = await ArcheryCounter.processImage(uri);
+      const rings = await ArcheryCounter.processImage(uri, asset.base64!);
       setState({ imageUri: uri, rings, imageWidth, imageHeight, loading: false, error: null });
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
