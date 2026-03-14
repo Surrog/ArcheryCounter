@@ -8,7 +8,8 @@
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
-    "visualize": "ts-node --transpile-only --project tsconfig.scripts.json scripts/visualize.ts"
+    "visualize": "ts-node --transpile-only --project tsconfig.scripts.json scripts/visualize.ts",
+    "annotate": "ts-node --transpile-only --project tsconfig.scripts.json scripts/annotate.ts"
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.84.1",
