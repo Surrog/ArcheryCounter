@@ -133,20 +133,33 @@ interface TargetResult {
 
 **Goal:** Replace the current luminance-transition-based ring detection with colour-zone-boundary detection guided by the per-image calibration. Detect where adjacent colour zones meet along each ray.
 
-
 **Approach:**
 - Cast N=360 rays from centre, capped at the boundary polygon.
 - Along each ray, classify each pixel to its nearest colour zone using the calibration.
 - Find the first pixel where the classification changes between adjacent zones (gold→red, red→blue, blue→black, black→white). These transitions correspond to ring boundaries 2/3, 4/5, 6/7, 8/9 (the colour-change boundaries).
 - The dividing lines within each zone (e.g., rings 9 and 10 within gold) are detected as the midpoint between the inner and outer colour transitions of that zone, OR as a luminance minimum (the thin black printed divider).
 
+**Special case — ring 10 (bullseye / innermost ring):**
+
+Ring 10 is the most critical ring for scoring and also the hardest to detect reliably:
+- It has **no inner colour transition** — the gold zone simply converges toward the target centre.
+- It is the most **arrow-damaged** region: heavy arrow traffic tears and discolours the paper precisely where ring 10 needs to be measured.
+- Its inner boundary (the X-ring printed line) is a very thin circle and may be faint or absent on worn targets.
+
+Detection strategy for ring 10's inner boundary:
+1. Look for the X-ring printed luminance minimum within the gold zone along each ray.
+2. If no clear minimum is found, use the ring-width extrapolation from Phase 4 (linear regression on detected inner-zone boundaries) to predict the ring 10 inner radius at that angle.
+3. The detected/extrapolated ring 10 inner boundary must be annotatable — it is a full spline ring in the annotation tool, not a single point.
+
 **Tasks:**
 
 - [ ] **P3-T1** Write `classifyPixelZone(hsv: [h,s,v], cal: ColourCalibration): Zone | null` — returns 'gold' | 'red' | 'blue' | 'black' | 'white' | null (hay/outside) using nearest-zone HSV distance.
 - [ ] **P3-T2** Write `detectColourTransitions(rgba, width, height, cx, cy, cal, boundary): number[][]` — for each of 360 rays, returns the distances at which colour-zone transitions occur (4 major transitions + midpoints for minor dividers).
 - [ ] **P3-T3** Write `detectZoneDivider(ray: RayPixels, zoneStart: number, zoneEnd: number): number` — find the luminance minimum between two zone-boundary distances; fall back to the midpoint if no clear minimum found.
-- [ ] **P3-T4** Replace the existing `collectRingPoints` function with the colour-guided transition detection from P3-T2/T3.
-- [ ] **P3-T5** Ensure the output is still a 360×10 radial profile (`number[][]`) for compatibility with the spline conversion (Phase 6).
+- [ ] **P3-T4** Write `detectRing10Inner(ray: RayPixels, goldStart: number, goldMid: number): number` — scan for the X-ring luminance minimum between centre and `goldMid`; fall back to Phase 4 linear regression estimate if no minimum found.
+- [ ] **P3-T5** Replace the existing `collectRingPoints` function with the colour-guided transition detection from P3-T2/T3/T4.
+- [ ] **P3-T6** Ensure the output is still a 360×10 radial profile (`number[][]`) for compatibility with the spline conversion (Phase 6).
+- [ ] **P3-T7** In Phase 5 annotation tool: render ring 10's spline with a visually distinct style (thicker stroke, gold fill at low opacity) and ensure its K control points are draggable independently of the centre handle.
 
 ---
 
@@ -156,15 +169,16 @@ interface TargetResult {
 
 **Approach (in order of preference):**
 
-1. **Black-line detection:** WA targets print a thin black ring at the outer boundary of ring 1 (the outermost scoring line). Along each ray, after passing through black zone and white zone, look for a second luminance minimum outward from the black zone group — this is the outer edge of ring 1.
-2. **Extrapolation fallback:** Using the measured ring width `w` (derived from reliably detected inner rings whose radii follow the WA 1:2:…:10 ratio), place ring 1 outer boundary at `10w` from centre and ring 1/2 divider at `9.5w`. Ring 2/black boundary is at `8w` (already detected by colour transition in Phase 3).
+1. **Black-line detection:** WA targets print a thin black ring at the outer boundary of ring 1 (the outermost scoring line). Along each ray, after passing through the black zone and white zone, look for a luminance minimum outward from the black zone group — this is the outer edge of ring 1.
+2. **Per-ray linear regression fallback:** The ring width is not constant across angles — perspective and paper deformation cause the apparent ring width to vary by direction. Rather than applying a single global `w`, fit a linear model **per ray**: using the reliably detected boundaries of the inner rings (gold outer, red outer, blue outer — i.e., the colour-change transitions at distances r₃, r₅, r₇, r₉ from centre), fit `r(n) = a·n + b` where `n` is the ring index. Extrapolate to `n=1` and `n=2` to get per-ray estimates of rings 1 and 2. This captures the per-direction stretching caused by oblique viewing angle and surface deformation.
 
 **Tasks:**
 
 - [ ] **P4-T1** Write `detectOutermostBlackLine(ray: RayPixels, blackZoneEnd: number, boundaryDist: number): number | null` — scan outward from the black zone end, find the first luminance minimum before the boundary; return the distance or null if not found.
-- [ ] **P4-T2** Write `extrapolateWhiteRings(radialProfile: number[][], cx: number, cy: number): void` — compute `w` from inner ring spacing, fill in rings 1 and 2 distances for any ray where `detectOutermostBlackLine` returned null.
-- [ ] **P4-T3** Integrate P4-T1 and P4-T2 into the ray-by-ray loop from Phase 3, completing all 10 ring boundaries.
-- [ ] **P4-T4** Add visual validation in `scripts/visualize.ts`: overlay the detected white ring boundaries on the report images. Confirm correct placement on all test images.
+- [ ] **P4-T2** Write `fitRingRadiusModel(knownBoundaries: { ringIdx: number, dist: number }[]): (n: number) => number` — fits a linear regression `r(n) = a·n + b` through the known ring boundary distances for one ray; returns a function that predicts the boundary distance for any ring index.
+- [ ] **P4-T3** Write `extrapolateWhiteRings(radialProfile: number[][], knownBoundariesPerRay: number[][][]): void` — for each ray, call `fitRingRadiusModel` using the 4 reliably detected colour-transition boundaries, then use the model to fill in rings 1 and 2 for any ray where `detectOutermostBlackLine` returned null.
+- [ ] **P4-T4** Integrate P4-T1 through P4-T3 into the ray-by-ray loop from Phase 3, completing all 10 ring boundaries.
+- [ ] **P4-T5** Add visual validation in `scripts/visualize.ts`: overlay the detected white ring boundaries on the report images. Confirm correct placement on all test images.
 
 ---
 
