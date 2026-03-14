@@ -122,6 +122,22 @@ PCA on a partial arc systematically underestimates the major axis and produces a
 incorrect angle. `cleanupContourPoints` then filters out valid far-field points,
 making the problem worse.
 
+### 3e. Real-world target deformation
+
+Archery targets in actual use are physically deformed in two ways that any
+reconstruction algorithm must account for:
+
+- **Hay bale mounting**: targets are pinned to a hay bale which may have a slight
+  convex bulge. This creates a barrel-distortion-like effect where the apparent
+  ring widths increase toward the centre of the image.
+- **Arrow damage**: repeated arrow impacts compress and wrinkle the target paper
+  around the bullseye. This bunches up the inner rings, making them appear narrower
+  than the outer rings even in the undistorted image plane.
+
+Both effects mean the ring boundaries in real photos are **not** uniformly spaced,
+even for a perfectly head-on shot. Any approach that assumes equal physical ring
+widths (e.g., Algorithm D) will introduce systematic error on well-used targets.
+
 ---
 
 ## 4. Candidate algorithms
@@ -147,6 +163,21 @@ contours, filter to those that are roughly elliptical, and look for a group of n
 concentric ellipses. The archery target has a distinctive set of 3–5 nested
 colour-boundary contours.
 
+**Arrow interference**: Arrows embedded in the target produce many small, thin,
+elongated contours concentrated at the centre of the image. These can be filtered
+out reliably by three criteria applied before the nested-ellipse matching step:
+1. **Minimum area** — ring contours span hundreds of pixels in diameter; arrow shaft
+   contours are narrow and small regardless of length.
+2. **Ellipticity score** — arrows produce near-linear or very high-aspect-ratio
+   contours (aspect ratio ≫ 3); ring boundaries have aspect ratios close to 1 for
+   head-on shots and at most ~2–3 for steep oblique angles.
+3. **Morphological closing** — a closing step before edge detection fills the
+   arrow-punctured holes in the colour zones, suppressing the spurious contours they
+   would otherwise generate at the tip/shaft entry points.
+
+In practice, filtering by `area > threshold` and `aspect_ratio < 3` eliminates
+virtually all arrow contours before ring matching.
+
 **Pros**: Robust to lighting changes (edges are relative, not absolute HSV values).
 Does not depend on specific colours at all — works with any colour target.
 **Cons**: Edge detection and contour finding are non-trivial in pure TypeScript.
@@ -171,7 +202,9 @@ Computationally heavier.
 
 **Pros**: Does not depend on absolute color values; tolerates partial coverage and
 occlusion; naturally produces one ellipse per ring boundary; the concentric structure
-becomes a signal rather than a constraint.
+becomes a signal rather than a constraint. Crucially, it *measures* ring positions
+from the actual image rather than computing them from a physical model, so it is
+robust to the real-world target deformations described in §3e.
 **Cons**: Center estimate must be at least roughly correct. Requires implementing
 ray-casting + transition detection + per-ring ellipse fitting — moderate complexity.
 
@@ -194,12 +227,19 @@ Given detected ellipses for yellow, red, blue:
 Two unknowns (center + w) can be solved from any two detected rings. The third
 provides a consistency check. No regression needed.
 
+**Physical deformation caveat**: Real-world targets deviate from the equal-width
+assumption in two important ways (see §3e): hay bale mounting creates a convex bulge
+that distorts apparent ring spacing, and repeated arrow impacts compress and wrinkle
+the inner rings. Both effects are progressive and unpredictable — a heavily used
+target can have inner rings appearing 20–30% narrower than the equal-width model
+predicts. Algorithm D should therefore be used only as a **coarse initial estimate
+or sanity check**, not as the primary ring reconstruction method on its own.
 
-**Pros**: Physically grounded; one good detection is sufficient to reconstruct all
-rings; eliminates runaway extrapolation.
-**Cons**: Only valid for standard WA targets. Target size and camera distance must
-vary, but the *ratio* is always fixed. Requires knowing which ring each colour
-detection corresponds to.
+**Pros**: Physically grounded; one good color detection is sufficient to bootstrap
+an estimate; eliminates runaway linear extrapolation.
+**Cons**: Only valid for standard WA targets. The equal-width assumption breaks down
+on used targets (hay bale distortion, arrow damage). Requires knowing which ring each
+colour detection corresponds to. Should not be used as the sole reconstruction path.
 
 ---
 
@@ -234,27 +274,33 @@ failure point:
    Add per-image adaptive re-centering: measure the median hue of the found blob and
    re-threshold ± 20 hue units around it, then re-run detection.
 
-2. **Replace linear regression with fixed-ratio reconstruction** (Algorithm D)
-   Use the known 1:3.5:5.5 radius ratios for yellow:red:blue to solve for ring width
-   and center directly. Fall back to regression only when all three are found.
+2. **Use fixed-ratio reconstruction as a bootstrap only** (Algorithm D, limited role)
+   Use the 1:3.5:5.5 radius ratios to derive an initial center estimate and ring-width
+   scale from whatever colour detections succeeded. Do not use this as the final ring
+   layout — pass the estimate to step 3 instead. Given the real-world deformation
+   described in §3e, fixed ratios are only reliable to within ~20–30% on used targets.
 
 ### Tier 2 — Accuracy improvements
 
-3. **Replace PCA with direct algebraic ellipse fit** (Algorithm E)
-   Fitzgibbon / Halir-Flusser fit. Especially improves accuracy on partial arcs
-   (partial lighting, rings cut at image boundary).
+3. **Radial profile sampling as primary ring reconstruction** (Algorithm C)
+   Use the center estimate from step 2 as the seed, then cast radial rays to directly
+   measure where each ring boundary actually falls in the image. This replaces both
+   the linear interpolation and the fixed-ratio model with a measurement-based
+   approach, and is inherently robust to hay bale distortion and arrow damage because
+   it reads the actual pixel transitions rather than assuming any physical model.
 
-4. **Radial profile validation pass** (Algorithm C, validation step only)
-   After fitting ellipses, cast radial rays from the estimated center and check that
-   colour transitions occur at the expected radii. Use this to score and re-rank
-   candidate ellipses rather than relying on the "weakest element" heuristic.
+4. **Replace PCA with direct algebraic ellipse fit** (Algorithm E)
+   Fitzgibbon / Halir-Flusser fit on the radial transition points collected in step 3.
+   Especially improves accuracy on partial arcs (partial lighting, rings cut at image
+   boundary).
 
 ### Tier 3 — Full robustness
 
-5. **Full radial-profile primary detection** (Algorithm C)
-   Use radial ray sampling as the *primary* detection path (not just validation).
-   This makes the algorithm lighting-independent and removes the dependency on HSV
-   thresholds entirely.
+5. **Contour-based verification pass** (Algorithm B, validation step only)
+   After fitting ellipses via radial profiling, verify that the fitted boundaries
+   coincide with actual edges in the gradient image. Arrows are handled by the area
+   and aspect-ratio filters described in §4 Algorithm B. This step can also detect
+   cases where the radial profile is misled by background clutter.
 
 ---
 
@@ -264,14 +310,16 @@ failure point:
 |--------|-------|------------|
 | Wider + standard HSV thresholds | Failures 2a (colour miss) | Low — tune constants |
 | Adaptive per-image threshold re-centering | Remaining 2a cases | Low-Medium |
-| Fixed-ratio ring reconstruction (Algorithm D) | Failure 2b (bad extrapolation) | Medium |
-| Fitzgibbon ellipse fit (Algorithm E) | Failure 2b + partial arcs | Medium |
-| Radial-profile validation | All failure modes | Medium-High |
-| Full radial-profile detection | All failure modes, any lighting | High |
+| Fixed-ratio bootstrap (Algorithm D, limited) | Initial center/scale estimate | Medium |
+| Radial-profile ring measurement (Algorithm C) | Failures 2b + deformation robustness | Medium-High |
+| Fitzgibbon ellipse fit (Algorithm E) | Partial arc accuracy | Medium |
+| Contour verification pass (Algorithm B) | All failure modes + arrow robustness | High |
 
-The quickest path to getting all 10 images correct is: **fix HSV thresholds first**,
-then **replace linear regression with fixed-ratio reconstruction**. Together these
-address the two root causes behind 6 of 10 failures.
+The quickest path to getting all 10 images correct is: **fix HSV thresholds** (Tier 1
+step 1), then **replace linear interpolation with radial profile sampling** (Tier 2
+step 3). Fixed-ratio reconstruction (Algorithm D) alone is not recommended as a
+replacement for interpolation because it assumes undistorted equal-width rings, which
+does not hold for targets in active use.
 
 ---
 

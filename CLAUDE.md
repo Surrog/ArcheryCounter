@@ -52,17 +52,24 @@ npx react-native run-android
 `findTarget(rgba, width, height)` — the main entry point:
 
 1. **Pretreatment** — Gaussian blur (15×15, σ=1.5) + erode×1 + dilate×3, applied per R/G/B channel
-2. **Color filtering** — three binary masks via HSV thresholding (yellow, red, blue rings)
-3. **Blob detection** — BFS flood-fill to find the largest blob per color; nearby blobs are aggregated
-4. **Ellipse fitting** — boundary pixels extracted, outliers cleaned, PCA fit (closed-form 2×2 eigenvalue)
-5. **Weakest element** — the most deviant of the 3 detected ellipses is discarded
-6. **Linear interpolation** — least-squares regression extrapolates all 10 ring ellipses
+2. **Adaptive colour detection** — two-pass HSV filtering (wide range → adaptive re-centering around
+   measured median hue) for yellow, red, and blue zones; returns `ColorBlob | null` per colour
+3. **Centre + scale bootstrap** — mean of blob centroids = target centre; ring-width `w` from
+   blob mean-radii ÷ WA zone centroid ratios (yellow 1.33w, red 3.11w, blue 5.07w)
+4. **Radial profile sampling** — 360 rays from the bootstrap centre; luminance transitions along
+   each ray are detected and matched to the 10 expected ring boundaries
+5. **Fitzgibbon ellipse fit** — Halir-Flusser (1998) constrained algebraic fit on each ring's
+   transition points; concentric centre forced from bootstrap; outlier fits rejected and filled by
+   linear interpolation; rings sorted by width ascending
 
 Returns `EllipseData[10]` — **index 0 = innermost (bullseye), index 9 = outermost**.
 
 ### HSV convention
 
-The thresholds were calibrated with OpenCV's `COLOR_RGB2HSV_FULL` applied to a BGR-loaded image (R↔B channels swapped). `rgbToHsvFull(r, g, b)` replicates this by internally using `b` as "R" and `r` as "B". See `docs/research.md` for details.
+Uses standard RGB→HSV conversion (H 0–360°, S/V 0–1). The old BGR-as-RGB quirk (`rgbToHsvFull`)
+has been removed. Wide initial ranges (yellow 20–70°, red 0–18°+342–360°, blue 190–245°) are
+adaptively re-centred per image around the measured median hue. See `docs/research.md` §3 for
+the old failure modes and §5 for the new algorithm rationale.
 
 ### Image loading
 
@@ -79,6 +86,6 @@ The thresholds were calibrated with OpenCV's `COLOR_RGB2HSV_FULL` applied to a B
 ## Key Design Notes
 
 - Ring index 0 = innermost (bullseye), index 9 = outermost. Scoring: 10 = bullseye, 1 = outermost, 0 = miss.
-- The outer 4 rings (black, white) are extrapolated, never directly detected — only yellow, red, blue are detected from color.
+- Yellow, red, and blue zones anchor the scale estimate; all 10 ring boundaries are measured via radial profiling (not extrapolated from colour blobs alone).
 - `ArcheryCounterModule.java` (Android) still exists for RN module registration boilerplate but no longer loads a JNI library.
 - Algorithm tests in `src/__tests__/targetDetection.test.ts` run against real photos in `images/` and take ~45 s each in pure JS; the Jest timeout is set to 120 s per test.

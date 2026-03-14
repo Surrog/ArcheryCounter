@@ -17,20 +17,61 @@ describe('findTarget', () => {
     expect(result.success).toBe(true);
     expect(result.rings).toHaveLength(10);
 
+    // --- Basic sanity ---
     for (const ring of result.rings) {
       expect(ring.width).toBeGreaterThan(0);
       expect(ring.height).toBeGreaterThan(0);
-      expect(ring.centerX).toBeGreaterThanOrEqual(0);
-      expect(ring.centerX).toBeLessThanOrEqual(width);
-      expect(ring.centerY).toBeGreaterThanOrEqual(0);
-      expect(ring.centerY).toBeLessThanOrEqual(height);
     }
 
-    // All centers within 100 px of ring[0] center
+    // Target centre must be well inside the image (at least 5% margin from every edge)
+    const margin = 0.05;
+    expect(result.rings[0].centerX).toBeGreaterThan(width  * margin);
+    expect(result.rings[0].centerX).toBeLessThan(width  * (1 - margin));
+    expect(result.rings[0].centerY).toBeGreaterThan(height * margin);
+    expect(result.rings[0].centerY).toBeLessThan(height * (1 - margin));
+
+    // All centers coincide (forced concentric) — within 2 px of ring[0]
     const { centerX: ox, centerY: oy } = result.rings[0];
     for (const ring of result.rings) {
-      const d = Math.hypot(ring.centerX - ox, ring.centerY - oy);
-      expect(d).toBeLessThanOrEqual(100);
+      expect(Math.hypot(ring.centerX - ox, ring.centerY - oy)).toBeLessThanOrEqual(2);
     }
+
+    // --- Ring size / scale ---
+    const shortSide = Math.min(width, height);
+
+    // Bullseye must be at least 5% of the short image side
+    expect(result.rings[0].width).toBeGreaterThan(shortSide * 0.05);
+
+    // Outermost ring: must be visible (≥ 20% of short side) and not overblown (< 150%)
+    expect(result.rings[9].width).toBeGreaterThan(shortSide * 0.20);
+    expect(result.rings[9].width).toBeLessThan(shortSide * 1.50);
+
+    // --- Monotone growth (both axes, strictly) ---
+    for (let i = 0; i < result.rings.length - 1; i++) {
+      expect(result.rings[i].width).toBeLessThan(result.rings[i + 1].width);
+      expect(result.rings[i].height).toBeLessThan(result.rings[i + 1].height);
+    }
+
+    // Consecutive width ratio must be meaningful: each ring at least 5% wider
+    // than its predecessor (theoretical WA minimum is ~1.11 for the outer pair).
+    // Upper bound 3× prevents runaway extrapolation artefacts.
+    for (let i = 0; i < result.rings.length - 1; i++) {
+      const ratio = result.rings[i + 1].width / result.rings[i].width;
+      expect(ratio).toBeGreaterThan(1.05);
+      expect(ratio).toBeLessThan(3.0);
+    }
+
+    // --- Aspect ratio ---
+    const aspectRatios = result.rings.map(r => r.width / r.height);
+
+    // No ring should be extremely elongated (steep angles still < 3:1)
+    for (const ar of aspectRatios) {
+      expect(ar).toBeLessThan(3);
+    }
+
+    // All rings are projections of concentric circles → they share the same AR.
+    // Allow up to 0.8 spread to tolerate imperfect Fitzgibbon fits on partial arcs.
+    const arSpread = Math.max(...aspectRatios) - Math.min(...aspectRatios);
+    expect(arSpread).toBeLessThan(0.8);
   }, 60000);
 });
