@@ -1,340 +1,194 @@
-# Archery Target Detection — Research Notes
+# ArcheryCounter — Research Notes
+
+## §1 Why ellipses and quadrilaterals are wrong
+
+### 1.1 The physical reality
+
+An archery target face is a flat, printed piece of paper mounted on a hay bale. In an ideal photo it would be perfectly flat and at a known angle to the camera. In practice:
+
+- **Gravity sag** — the face bows between its pin attachment points; the centre (where arrows accumulate and the paper weakens) sags more than the edges.
+- **Arrow damage** — each arrow piercing the face tears and ripples the paper around the hole, especially near the centre where density is highest.
+- **Edge curl** — unclipped outer edges fold forward; corners are the worst offenders.
+- **Rain / humidity** — a wet target dries unevenly, leaving creases and waves across the full face.
+- **Stacking** — targets bolted on the same bale can overlap and push adjacent faces out of plane.
+
+The resulting shape in a photo is a **non-planar surface** projected through a camera. It is not a plane; therefore its image is not a projective transform of the canonical flat target.
+
+### 1.2 Why ellipses fail for rings
+
+If the target were perfectly flat and tilted, the printed circles (rings) would project as **exact conics** (ellipses under normal perspective). The current algorithm assumes this and fits one ellipse per ring.
+
+The assumption breaks in two ways:
+
+| Failure mode | Effect |
+|---|---|
+| Surface bowing / curvature | Circle → curve that is *wider* than the fitted ellipse at the belly of the bow, narrower at the edges |
+| Arrow-induced ripple near centre | Innermost rings are most deformed; outer rings (away from arrows) are relatively stable |
+| Edge curl at corners | Outermost ring appears squashed or folded back |
+
+The inner rings (bullseye, 9-ring) are the *most important* for scoring and also the *most deformed* — an ellipse fit there is doubly unreliable.
+
+### 1.3 Why a quadrilateral fails for the boundary
+
+The target boundary is a rectangle in 3D space. Under pure perspective projection it maps to a quadrilateral. In practice:
+
+- Each corner is pinned independently; if one pin sits higher than another, the edge between them curves.
+- A bowing face means the edges between corners are **concave or convex curves**, not straight lines.
+- Heavy rain causes the bottom edge to sag significantly.
+
+A 4-vertex polygon cannot represent a curved boundary.
 
 ---
 
-## 1. Current algorithm summary
+## §2 Candidate representations
 
-`findTarget` runs this pipeline:
+### 2.1 Radial profile (polar boundary sampling)
 
-```
-pretreat (Gaussian blur 15×15 + erode×1 + dilate×3)
-    │
-    ├─ applyColorFilter(yellow) ─┐
-    ├─ applyColorFilter(red)     ├─ aggregateBlobs → extractBoundary → cleanupContourPoints → fitEllipsePCA
-    └─ applyColorFilter(blue)   ─┘
-              │
-       3 RotatedRect (yellow, red, blue)
-              │
-       findWeakestElement → discard worst
-              │
-       linearInterpolateTo10Rings (least-squares on 2–3 anchor points)
-              │
-       EllipseData[10]
-```
+**Representation:** For each of N uniformly-spaced angles θᵢ from the target centre, store the distance rᵢⱼ at which the image crosses each of the J ring boundaries. This gives an N × J matrix.
 
-HSV thresholds (HSV_FULL 0-255, with a BGR-as-RGB channel swap):
+**Strengths:**
+- Zero geometric assumptions — works for any ring shape.
+- Natural fit for the algorithm's existing radial sampling (Phase 4 in `targetDetection.ts`).
+- Scoring an arrow: compute its distance from centre at the relevant angle, compare to rᵢⱼ for that angle → exact ring assignment.
 
-| Color  | H range  | Range width |
-|--------|----------|-------------|
-| Yellow | 136 – 140 | 4           |
-| Red    | 168 – 171 | 3           |
-| Blue   | 24  – 32  | 8           |
+**Weaknesses:**
+- Storage: 360 × 10 = 3 600 values per image.
+- Manual annotation is impractical — you cannot drag 3 600 points.
+- Interpolation artefacts if N is small.
 
----
+**Verdict:** Good as an *internal algorithm representation* for detection; not suitable as a ground-truth annotation format.
 
-## 2. Observed failure modes
+### 2.2 Free-form closed spline rings
 
-Diagnostic output from `scripts/diag.ts` run on all 10 test images:
+**Representation:** Each ring boundary is a closed **Catmull-Rom** (or cubic B-spline) curve defined by K control points (K ≈ 8–16). The curve interpolates or approximates the control points and closes on itself.
 
-### 2a. Complete color-detection miss → all rings identical
+**Strengths:**
+- Far more expressive than an ellipse; can represent any smooth closed curve.
+- K ≈ 12 gives 120 values per image (vs 3 600 for full radial), easily stored as JSON.
+- Annotation is practical: drag 12 points per ring.
+- Scoring: standard point-in-closed-curve test (ray casting or winding number).
 
-Three images produce all 10 rings with identical geometry:
+**Weaknesses:**
+- A fold or sharp crease requires many control points to capture; a spline stays smooth.
+- The algorithm must detect where to place the initial control points automatically.
 
-| Image | cx | cy | w | h | Symptom |
-|-------|----|----|---|---|---------|
-| 20190325_193217.jpg | 307.8 | 598.6 | 201.8 | 180.3 | all rings same |
-| 20190325_202607.jpg | 292.2 | 602.0 | 282.7 | 261.7 | all rings same |
-| 20190325_204137.jpg | 298.6 | 588.9 | 265.4 | 237.7 | all rings same |
+**Verdict:** Best candidate for the **annotation ground-truth format** and as a scoring primitive. Replaces ellipses in both the annotation tool and the test suite.
 
-**Root cause**: When only 1 of the 3 color masks succeeds, `linearInterpolateTo10Rings`
-receives n=1 valid anchor. With a single point, the least-squares denominator
-`xSq = n·xxSum − xSum²` equals zero, so every regression function degenerates to
-`() => constant`. All 10 rings collapse to the single detected ellipse.
+### 2.3 Homography-based canonical scoring
 
-### 2b. Degenerate inner ring → bad extrapolation inward
+**Representation:** A 3×3 projective matrix H that maps image coordinates to a canonical circular target (e.g., 500 px radius, concentric circles at WA standard ratios).
 
-Three images produce a near-zero or wildly distorted bullseye:
+**Strengths:**
+- Under H, rings are perfect concentric circles → scoring is `distance_from_centre / ring_radius`.
+- Handles arbitrary camera angle (pure perspective) perfectly.
+- Only 8 degrees of freedom (H is defined up to scale).
 
-| Image | ring[0] w | ring[0] h | ring[0] ar | Note |
-|-------|-----------|-----------|------------|------|
-| 20190325_193820.jpg | 84.4 | 23.5 | 3.59 | very elongated |
-| 20190325_195129.jpg |  4.6 |  1.0 | 4.62 | effectively a point |
-| 20190325_195801.jpg |  8.4 |  1.0 | 8.43 | effectively a point |
+**Weaknesses:**
+- Only corrects **perspective**, not surface deformation. A bowed target still produces non-circular rings in canonical space.
+- Requires knowing correspondences: at least 4 points whose canonical positions are known (e.g., the four outermost ring intersections at cardinal directions).
+- Automatic detection of those correspondences is as hard as the current ring detection.
 
-**Root cause**: Linear regression over yellow (x=0), red (x=1), blue (x=2) then
-evaluates at `x = −0.5` for ring 0. When the yellow ellipse itself is a poor fit
-(partial detection, wrong blob, or only 1–2 anchors), the extrapolated bullseye is
-either extremely small or highly eccentric.
+**Verdict:** Theoretically elegant for flat targets at an angle. In practice, surface deformation limits accuracy exactly where it matters most. Useful as a **pre-processing step** (rectify the image before ring detection) rather than a complete solution.
 
-### 2c. Tests pass despite wrong results
+### 2.4 Color-zone segmentation (direct colour scoring)
 
-The current Jest tests only check:
-- `success: true`
-- `rings.length === 10`
-- Each ring has positive dimensions and in-bounds center
-- All centers within 100 px of ring[0]
+**Representation:** Instead of storing ring *boundaries*, classify each image pixel as belonging to a colour zone: gold (9–10), red (7–8), blue (5–6), black (3–4), white (1–2), or background.
 
-Failure modes 2a and 2b both satisfy all four conditions (identical rings are 0 px
-apart from each other; near-zero rings still have w > 0 after `Math.max(1, ...)` in
-the interpolation). **The test suite gives false confidence.**
+**Scoring:** To score an arrow at pixel p, look up the colour zone at p (or average a small neighbourhood around the arrow tip).
 
----
+**Strengths:**
+- Completely bypasses the geometry problem. Colour is printed on the target; deformation moves the colour with the paper — no modelling needed.
+- Extremely robust: a bowed, creased, folded face still has its correct colours.
+- The algorithm already has colour blob detection (Phase 2 in `targetDetection.ts`); extending it to full segmentation is natural.
+- No ring boundary needed for scoring — just colour at the arrow point.
 
-## 3. Root cause analysis
+**Weaknesses:**
+- Colour accuracy depends on lighting. Mixed light (sun + shadow across the face) shifts apparent hue.
+- Worn or dirty targets lose saturation; older targets fade to similar hues.
+- Does not give a boundary representation — hard to display ring overlays from colour alone.
+- The X-ring (innermost gold subdivision, 10 vs X) has no distinct colour; requires geometry.
 
-### 3a. HSV thresholds are too narrow and too brittle
+**Verdict:** The most robust approach for **direct arrow scoring**. Should be primary scoring signal, with geometry as a fallback for ambiguous colours (worn targets) and for the X-ring.
 
-A range of 3–4 HSV_FULL hue units (out of 0–255) leaves almost no tolerance for:
+### 2.5 Thin-plate spline warp (non-rigid rectification)
 
-- Exposure variation (bright sun vs. overcast / indoor)
-- White-balance differences between cameras
-- JPEG compression artifacts (DCT ringing near color edges)
-- Target aging / fading / different print batches
+**Representation:** A thin-plate spline (TPS) mapping from image coordinates to canonical circular coordinates, estimated from M control-point correspondences (M ≈ 20–40; e.g., ring boundary intersections at multiple angles).
 
-### 3b. The BGR-as-RGB convention multiplies fragility
+**Strengths:**
+- Handles **arbitrary smooth surface deformation**, not just perspective.
+- Under the TPS warp, rings become concentric circles; scoring is trivial.
+- Mathematically minimises bending energy — the smoothest warp consistent with correspondences.
 
-The thresholds were calibrated by running OpenCV's `COLOR_RGB2HSV_FULL` on a
-BGR-loaded image (R↔B channels swapped). `rgbToHsvFull` replicates this by
-internally swapping R and B before converting. The thresholds are therefore only
-valid for images decoded through exactly that same BGR path. Any other decoder
-(libjpeg/Jimp decodes as RGB) that doesn't have the same quirk requires a different
-calibration.
+**Weaknesses:**
+- Requires M correspondences; estimating them automatically is the hard part.
+- TPS fitting is O(M³) and involves solving a linear system — feasible but non-trivial in pure JS.
+- Extrapolates poorly outside the convex hull of control points.
 
-In practice this means: the thresholds were hand-tuned on a handful of images taken
-with one specific phone, in one specific lighting condition, decoded in one specific
-way. They do not generalise.
-
-### 3c. Linear interpolation assumes equal ring spacing
-
-The least-squares line is fit to 3 points at x = 0, 1, 2 (yellow, red, blue rings),
-then extrapolated to x = −0.5 … 4.5 to produce the 10 output rings. This model
-assumes all ring ellipses grow at a constant rate, which is only approximately true
-when the target is viewed head-on. Any perspective or radial distortion breaks the
-linearity — and even without distortion, the extrapolation to both ends (bullseye and
-outer white rings) amplifies any error in the 3 anchor fits.
-
-### 3d. PCA ellipse fit is fragile for partial blobs
-
-The boundary pixels fed into `fitEllipsePCA` come from the aggregated color blob.
-When lighting causes only part of a ring to match the color threshold (e.g., one side
-of the red ring is in shadow), the boundary is a partial arc, not a complete ellipse.
-PCA on a partial arc systematically underestimates the major axis and produces an
-incorrect angle. `cleanupContourPoints` then filters out valid far-field points,
-making the problem worse.
-
-### 3e. Real-world target deformation
-
-Archery targets in actual use are physically deformed in two ways that any
-reconstruction algorithm must account for:
-
-- **Hay bale mounting**: targets are pinned to a hay bale which may have a slight
-  convex bulge. This creates a barrel-distortion-like effect where the apparent
-  ring widths increase toward the centre of the image.
-- **Arrow damage**: repeated arrow impacts compress and wrinkle the target paper
-  around the bullseye. This bunches up the inner rings, making them appear narrower
-  than the outer rings even in the undistorted image plane.
-
-Both effects mean the ring boundaries in real photos are **not** uniformly spaced,
-even for a perfectly head-on shot. Any approach that assumes equal physical ring
-widths (e.g., Algorithm D) will introduce systematic error on well-used targets.
+**Verdict:** Most general solution; worth pursuing once robust automatic control-point detection exists. For now, better suited as a **future direction**.
 
 ---
 
-## 4. Candidate algorithms
+## §3 Recommended approach
 
-### Algorithm A — Wider adaptive HSV thresholds
+### 3.1 For scoring (production algorithm)
 
-**Idea**: Replace the fixed narrow thresholds with a two-pass approach:
-1. Apply a generous initial range (e.g., yellow H ± 15 units instead of ± 2)
-2. If the largest blob covers less than a minimum area, widen the range and retry
-3. Use the found blob's actual HSV centroid to re-centre the threshold for that image
+**Primary: colour-zone classification at the arrow point.**
 
-**Pros**: Minimal code change; keeps the existing pipeline structure.
-**Cons**: Still fundamentally HSV-threshold-based; will still fail when the target
-color genuinely falls outside the range (e.g., faded targets, unusual lighting).
-Does not fix the linear extrapolation problem. Does not fix PCA on partial arcs.
+1. Detect the arrow tip location in the image (separate problem; see §4).
+2. Sample HSV colour in a small region around the tip.
+3. Classify into gold / red / blue / black / white zone → assign score range.
+4. Use measured ring geometry (radial profile) to disambiguate within a zone (e.g., 9 vs 10, both gold).
 
----
+This is robust to all paper deformations because it reads the printed information directly.
 
-### Algorithm B — Contour hierarchy (nested contour approach)
+### 3.2 For ring boundary display and annotation ground truth
 
-**Idea**: Compute a Canny-like edge image over the full colour image, find all
-contours, filter to those that are roughly elliptical, and look for a group of nested
-concentric ellipses. The archery target has a distinctive set of 3–5 nested
-colour-boundary contours.
+**Free-form closed splines (§2.2) with K ≈ 12 control points per ring.**
 
-**Arrow interference**: Arrows embedded in the target produce many small, thin,
-elongated contours concentrated at the centre of the image. These can be filtered
-out reliably by three criteria applied before the nested-ellipse matching step:
-1. **Minimum area** — ring contours span hundreds of pixels in diameter; arrow shaft
-   contours are narrow and small regardless of length.
-2. **Ellipticity score** — arrows produce near-linear or very high-aspect-ratio
-   contours (aspect ratio ≫ 3); ring boundaries have aspect ratios close to 1 for
-   head-on shots and at most ~2–3 for steep oblique angles.
-3. **Morphological closing** — a closing step before edge detection fills the
-   arrow-punctured holes in the colour zones, suppressing the spurious contours they
-   would otherwise generate at the tip/shaft entry points.
+- Replace ellipses in the annotation tool with draggable spline control points.
+- Replace ellipses in the algorithm output (`EllipseData`) with `SplineRing` (K control points + interpolation type).
+- Keep the radial profile as the internal detection representation (it already is); convert to spline for storage and display.
+- For automated detection, distribute K control points uniformly in angle from the centre and initialise each one from the radial profile sample at that angle.
 
-In practice, filtering by `area > threshold` and `aspect_ratio < 3` eliminates
-virtually all arrow contours before ring matching.
+### 3.3 For target boundary display
 
-**Pros**: Robust to lighting changes (edges are relative, not absolute HSV values).
-Does not depend on specific colours at all — works with any colour target.
-**Cons**: Edge detection and contour finding are non-trivial in pure TypeScript.
-Matching nested contours to the archery target geometry requires additional heuristics.
-Computationally heavier.
+**Multi-segment polygon (8 points per edge, 32 total) or a 4-anchor spline.**
+
+- Replace the 4-vertex quadrilateral with a cubic spline through 4 corner anchors + 1–2 midpoint handles per edge (12–16 total control points).
+- This can represent a bowing edge (concave/convex) and corner curl.
+- For automated detection: fit the 4 corners first (existing `fitQuadrilateral`), then detect midpoint deviations from straight edges using edge detection along the boundary.
 
 ---
 
-### Algorithm C — Radial profile sampling
+## §4 Open problems (not yet addressed)
 
-**Idea**:
-1. **Coarse center estimate** — use the existing colour-blob centroids (or their
-   average if multiple colors are found) to get an approximate target center.
-2. **Radial rays** — cast N rays (e.g., 180) from that center outward.
-3. **Sample & detect transitions** — along each ray, read pixel hues and detect
-   step changes (hue-gradient crossings). Each transition is a candidate ring boundary.
-4. **Cluster transitions by radius** — at each expected ring boundary, the transitions
-   across all rays should cluster at a consistent radius. Fit an ellipse to the
-   clustered points.
-5. **Validate with color pattern** — the sequence of colours inward → outward should
-   follow white → black → blue → red → yellow.
+### 4.1 Arrow detection
 
-**Pros**: Does not depend on absolute color values; tolerates partial coverage and
-occlusion; naturally produces one ellipse per ring boundary; the concentric structure
-becomes a signal rather than a constraint. Crucially, it *measures* ring positions
-from the actual image rather than computing them from a physical model, so it is
-robust to the real-world target deformations described in §3e.
-**Cons**: Center estimate must be at least roughly correct. Requires implementing
-ray-casting + transition detection + per-ring ellipse fitting — moderate complexity.
+The current algorithm detects ring boundaries but not arrow locations. Scoring requires both. Arrow detection is a distinct computer-vision problem:
 
----
+- **Shaft segmentation:** The arrow shaft is a thin, high-contrast line entering the target. Hough line detection or oriented gradient filtering could locate it.
+- **Tip localisation:** The tip is where the shaft meets the target face. Defined as the endpoint of the detected shaft segment closest to the target centre.
+- **Multiple arrows:** A real end has 3–6 arrows; the algorithm must find all tips simultaneously.
 
-### Algorithm D — Fixed physical ring ratios
+### 4.2 X-ring (10 vs X)
 
-**Idea**: All World Archery targets have rings with equal width — meaning the outer
-radius of ring k is proportional to k (1× ring_width for ring 10, 10× for ring 1).
-Once any one ring's ellipse is known, all others follow directly from this fixed
-ratio, without regression.
+The inner gold ring is subdivided into the 10-ring and X-ring (for tiebreaking). They are the same colour; distinction requires geometric measurement. A reliable centre estimate + the innermost spline ring boundary (§3.2) would handle this.
 
-Given detected ellipses for yellow, red, blue:
-- Yellow ring = rings 9 + 10 combined zone: mean radius ≈ 1.5 × w
-- Red ring = rings 7 + 8: mean radius ≈ 3.5 × w
-- Blue ring = rings 5 + 6: mean radius ≈ 5.5 × w
+### 4.3 Lighting normalisation
 
-(where w = single ring width in pixels)
+Colour-zone classification (§3.1) is sensitive to colour temperature and shadows cast by arrows. Adaptive white-balance correction (e.g., using the white ring as a reference) before colour classification would improve robustness.
 
-Two unknowns (center + w) can be solved from any two detected rings. The third
-provides a consistency check. No regression needed.
+### 4.4 Camera calibration / lens distortion
 
-**Physical deformation caveat**: Real-world targets deviate from the equal-width
-assumption in two important ways (see §3e): hay bale mounting creates a convex bulge
-that distorts apparent ring spacing, and repeated arrow impacts compress and wrinkle
-the inner rings. Both effects are progressive and unpredictable — a heavily used
-target can have inner rings appearing 20–30% narrower than the equal-width model
-predicts. Algorithm D should therefore be used only as a **coarse initial estimate
-or sanity check**, not as the primary ring reconstruction method on its own.
-
-**Pros**: Physically grounded; one good color detection is sufficient to bootstrap
-an estimate; eliminates runaway linear extrapolation.
-**Cons**: Only valid for standard WA targets. The equal-width assumption breaks down
-on used targets (hay bale distortion, arrow damage). Requires knowing which ring each
-colour detection corresponds to. Should not be used as the sole reconstruction path.
+Wide-angle phone cameras introduce barrel distortion, which warps the apparent shape of the target. Correcting for lens distortion before any geometric processing (using the phone's camera calibration data, available on iOS/Android) would reduce ring detection error, especially near image edges.
 
 ---
 
-### Algorithm E — Fitzgibbon direct algebraic ellipse fit (replaces PCA)
+## §5 Algorithm migration history
 
-**Idea**: Replace `fitEllipsePCA` with the Fitzgibbon-Pilu-Fisher (1996) constrained
-algebraic fit. It minimises the sum of squared algebraic distances subject to the
-ellipse constraint `4ac − b² = 1`, making it robust to non-uniform point distribution
-around the arc. Halir & Flusser (1998) provide a numerically stable formulation that
-avoids the generalised eigenvalue problem.
-
-**Pros**: Drop-in replacement for PCA; handles partial arcs correctly; better-conditioned
-for skewed point distributions; ~6×6 linear algebra, fast.
-**Cons**: Requires a 6×6 SVD or eigenvalue solve (can be implemented without external
-libraries); slightly more code than PCA.
-
----
-
-## 5. Recommendation
-
-No single change is sufficient. The recommended approach combines fixes at each
-failure point:
-
-### Tier 1 — Quick wins (fix the immediate failures)
-
-1. **Widen and de-quirk HSV thresholds** (Algorithm A)
-   Correct the BGR-as-RGB swap so the thresholds are expressed in standard RGB→HSV
-   space, and widen ranges significantly:
-   - Yellow: H 25–40° (standard 0-360°, map accordingly)
-   - Red: H 0–12° **and** H 348–360° (wraps around)
-   - Blue: H 195–235°
-   Add per-image adaptive re-centering: measure the median hue of the found blob and
-   re-threshold ± 20 hue units around it, then re-run detection.
-
-2. **Use fixed-ratio reconstruction as a bootstrap only** (Algorithm D, limited role)
-   Use the 1:3.5:5.5 radius ratios to derive an initial center estimate and ring-width
-   scale from whatever colour detections succeeded. Do not use this as the final ring
-   layout — pass the estimate to step 3 instead. Given the real-world deformation
-   described in §3e, fixed ratios are only reliable to within ~20–30% on used targets.
-
-### Tier 2 — Accuracy improvements
-
-3. **Radial profile sampling as primary ring reconstruction** (Algorithm C)
-   Use the center estimate from step 2 as the seed, then cast radial rays to directly
-   measure where each ring boundary actually falls in the image. This replaces both
-   the linear interpolation and the fixed-ratio model with a measurement-based
-   approach, and is inherently robust to hay bale distortion and arrow damage because
-   it reads the actual pixel transitions rather than assuming any physical model.
-
-4. **Replace PCA with direct algebraic ellipse fit** (Algorithm E)
-   Fitzgibbon / Halir-Flusser fit on the radial transition points collected in step 3.
-   Especially improves accuracy on partial arcs (partial lighting, rings cut at image
-   boundary).
-
-### Tier 3 — Full robustness
-
-5. **Contour-based verification pass** (Algorithm B, validation step only)
-   After fitting ellipses via radial profiling, verify that the fitted boundaries
-   coincide with actual edges in the gradient image. Arrows are handled by the area
-   and aspect-ratio filters described in §4 Algorithm B. This step can also detect
-   cases where the radial profile is misled by background clutter.
-
----
-
-## 6. Implementation priority and estimated impact
-
-| Change | Fixes | Complexity |
-|--------|-------|------------|
-| Wider + standard HSV thresholds | Failures 2a (colour miss) | Low — tune constants |
-| Adaptive per-image threshold re-centering | Remaining 2a cases | Low-Medium |
-| Fixed-ratio bootstrap (Algorithm D, limited) | Initial center/scale estimate | Medium |
-| Radial-profile ring measurement (Algorithm C) | Failures 2b + deformation robustness | Medium-High |
-| Fitzgibbon ellipse fit (Algorithm E) | Partial arc accuracy | Medium |
-| Contour verification pass (Algorithm B) | All failure modes + arrow robustness | High |
-
-The quickest path to getting all 10 images correct is: **fix HSV thresholds** (Tier 1
-step 1), then **replace linear interpolation with radial profile sampling** (Tier 2
-step 3). Fixed-ratio reconstruction (Algorithm D) alone is not recommended as a
-replacement for interpolation because it assumes undistorted equal-width rings, which
-does not hold for targets in active use.
-
----
-
-## 7. Test suite improvements needed
-
-The current tests pass even when results are wrong. New assertions needed:
-
-- Ring widths must be **strictly increasing** (ring[i].width < ring[i+1].width)
-- Successive ring width ratios must be within a reasonable range of the expected
-  physical ratio (e.g., each ring ~10% wider than the previous, ± some tolerance)
-- Bullseye (ring[0]) must have a realistic minimum size relative to the image
-  (e.g., > 1% of image width)
-- No two consecutive rings should have identical geometry (catches the degenerate
-  constant-regression case)
-
----
-
-*Last updated: 2026-03-13*
+| Phase | Representation | Status |
+|---|---|---|
+| v1 | Native C++ / OpenCV (RotatedRect ellipse fit) | Removed (see `docs/plan.md`) |
+| v2 | Pure-TS ellipse fit (Fitzgibbon/Halir-Flusser) + 4-point quad boundary | Current (`targetDetection.ts`) |
+| v3 (proposed) | Radial profile detection → spline ring output + 12-point boundary spline | Next |
+| v4 (future) | Colour-zone scoring + TPS warp for canonical space | Future |
