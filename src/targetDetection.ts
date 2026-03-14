@@ -1,7 +1,7 @@
 // New archery target detection pipeline.
 // See docs/research.md and docs/plan.md for design notes.
 
-interface Pixel { x: number; y: number }
+export interface Pixel { x: number; y: number }
 
 interface RotatedRect {
   center: Pixel;
@@ -18,6 +18,12 @@ export interface EllipseData {
 
 export interface ArcheryResult {
   rings: EllipseData[];
+  /**
+   * The 4 corners of the target paper boundary as a quadrilateral in image pixels.
+   * Ordered: top-left, top-right, bottom-right, bottom-left (in the paper's
+   * principal-axis frame — visually a perspective-projected rectangle).
+   */
+  paperBoundary?: [Pixel, Pixel, Pixel, Pixel];
   success: boolean;
   error?: string;
 }
@@ -483,13 +489,17 @@ function detectTransitions(samples: RaySample[], minStrength = 0.07): Transition
 function collectRingPoints(
   rgba: Uint8Array, width: number, height: number,
   cx: number, cy: number, w0: number, N = 360,
+  toleranceFactor = 0.4,
+  boundaryDists?: number[],
 ): Pixel[][] {
   const transitionPoints: Pixel[][] = Array.from({ length: 10 }, () => []);
-  const tolerance = w0 * 0.4, maxDist = w0 * 11;
+  const tolerance = w0 * toleranceFactor;
 
   for (let i = 0; i < N; i++) {
     const theta = (i / N) * 2 * Math.PI;
     const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    // Cap search distance at the detected target-paper boundary for this ray.
+    const maxDist = boundaryDists ? boundaryDists[i] : w0 * 11.5;
     const samples = sampleRay(rgba, width, height, cx, cy, theta, 1.0, maxDist);
     const transitions = detectTransitions(samples);
 
@@ -798,6 +808,114 @@ function interpolateMissingRings(rings: (RotatedRect | null)[]): RotatedRect[] {
 }
 
 // ---------------------------------------------------------------------------
+// Quadrilateral fitting — rectangular paper boundary
+// ---------------------------------------------------------------------------
+
+/**
+ * Fits a perspective-projected rectangle to a set of boundary points.
+ *
+ * Uses four fixed axis-aligned diagonal projections (x+y, x−y) to locate the
+ * four corners.  For any convex quadrilateral — including a perspective-
+ * projected rectangle at any orientation — the four corners are exactly the
+ * points that are most extreme in these four directions:
+ *
+ *   TL → min(x + y)   (upper-left  in image coords, y-down)
+ *   TR → max(x − y)   (upper-right)
+ *   BR → max(x + y)   (lower-right)
+ *   BL → min(x − y)   (lower-left)
+ *
+ * No PCA rotation is needed: rotating the coordinate frame by the PCA angle
+ * would work for a perfectly uniform point distribution but is biased when
+ * boundary points are denser on some sides (e.g. when the image crops the
+ * top of the target), causing the PCA angle to deviate and picking the wrong
+ * corners.  The unrotated diagonal projections are parameter-free and robust.
+ *
+ * Returns [topLeft, topRight, bottomRight, bottomLeft] in image coordinates,
+ * or null if there are fewer than 4 points.
+ */
+function fitQuadrilateral(pts: Pixel[]): [Pixel, Pixel, Pixel, Pixel] | null {
+  if (pts.length < 4) return null;
+
+  let tlS =  Infinity, trS = -Infinity;
+  let brS = -Infinity, blS =  Infinity;
+  let tl = pts[0], tr = pts[0], br = pts[0], bl = pts[0];
+
+  for (const p of pts) {
+    const pp = p.x + p.y;   // sum  → selects TL (min) and BR (max)
+    const pm = p.x - p.y;   // diff → selects TR (max) and BL (min)
+    if (pp < tlS) { tlS = pp; tl = p; }
+    if (pm > trS) { trS = pm; tr = p; }
+    if (pp > brS) { brS = pp; br = p; }
+    if (pm < blS) { blS = pm; bl = p; }
+  }
+
+  return [tl, tr, br, bl];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b — Target paper boundary scan
+// ---------------------------------------------------------------------------
+
+interface BoundaryScan {
+  /** Per-ray distance from (cx,cy) to the last non-background pixel. */
+  dists: number[];
+  /** Last non-background pixel per ray — used for ring[9] ellipse fitting. */
+  points: Pixel[];
+}
+
+/**
+ * Scans N rays from (cx, cy) starting at `startRadius`, walking outward until
+ * hitting hay-bale background (H∈[15°,65°], S>0.25) or the image edge.
+ *
+ * Starting past the colour zones (≥4w from centre) avoids confusion with the
+ * yellow and red zones which share a similar hue range to hay bale.  The black
+ * zone (very dark, low S) is not hay-bale and is traversed transparently.
+ *
+ * Returns the boundary distance for each ray; rays that reach the image edge
+ * without crossing hay bale record the image-edge distance as their limit.
+ */
+function scanTargetBoundary(
+  rgba: Uint8Array, width: number, height: number,
+  cx: number, cy: number,
+  startRadius: number,
+  N = 360,
+): BoundaryScan {
+  const dists: number[] = new Array(N).fill(0);
+  const points: Pixel[] = [];
+
+  for (let i = 0; i < N; i++) {
+    const theta = (i / N) * 2 * Math.PI;
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    let lastValidD = startRadius;
+
+    for (let d = Math.max(1, Math.round(startRadius)); ; d++) {
+      const x = cx + d * cosT, y = cy + d * sinT;
+      if (x < 0 || x >= width || y < 0 || y >= height) {
+        dists[i] = lastValidD;
+        break;
+      }
+      const pidx = (Math.round(y) * width + Math.round(x)) * 4;
+      const [h, s] = rgbToHsv(rgba[pidx], rgba[pidx + 1], rgba[pidx + 2]);
+      // Hay bale: brownish-yellow, saturated.  Intentionally exclude the V<0.15
+      // criterion so the black scoring zone (dark, not hay bale) is passed through.
+      const isBackground = s > 0.25 && h >= 15 && h <= 65;
+      if (isBackground) {
+        dists[i] = lastValidD;
+        break;
+      }
+      lastValidD = d;
+    }
+
+    points.push({
+      x: Math.round(cx + lastValidD * cosT),
+      y: Math.round(cy + lastValidD * sinT),
+    });
+  }
+
+  return { dists, points };
+}
+
+// ---------------------------------------------------------------------------
 // Main findTarget function
 // ---------------------------------------------------------------------------
 
@@ -825,8 +943,25 @@ export function findTarget(
       return { rings: [], success: false, error: 'Invalid bootstrap estimate' };
     }
 
-    // Phase 3 — radial-profile ring measurement from original image
-    const transitionPoints = collectRingPoints(rgba, width, height, cx, cy, w);
+    // Phase 2b — Detect target paper boundary.
+    // Start scanning from 4×w (past yellow+red zones) so hay-bale hue range
+    // is not confused with the yellow scoring zone.  Per-ray distances cap all
+    // subsequent ring searches, preventing ellipses from extending beyond the
+    // rectangular white target border.
+    const N_RAYS = 360;
+    const boundary = scanTargetBoundary(
+      rgba, width, height, cx, cy, Math.max(w * 4, 20), N_RAYS,
+    );
+    if (process.env.DEBUG_RINGS) {
+      const medD = arrayMedian(boundary.dists);
+      console.error(`[debug] boundary median dist=${medD.toFixed(1)} min=${Math.min(...boundary.dists).toFixed(1)} max=${Math.max(...boundary.dists).toFixed(1)}`);
+    }
+
+    // Phase 3 — radial-profile ring measurement from original image,
+    // capped at the target paper boundary for each ray direction.
+    const transitionPoints = collectRingPoints(
+      rgba, width, height, cx, cy, w, N_RAYS, 0.4, boundary.dists,
+    );
 
     // Phase 4 — Fitzgibbon algebraic ellipse fit per ring.
     // Rings of a circular target are concentric in image projection — force the
@@ -844,6 +979,75 @@ export function findTarget(
       return { ...r, center: { x: cx, y: cy } };
     });
 
+    // Phase 4b — Refine w from the successfully fitted rings, then retry any null
+    // rings with the refined scale.  The bootstrap w0 can be off by 20-35% when
+    // colour blobs are contaminated; the fitted ring radii give a better estimate.
+    const wSamples = fitted
+      .map((r, k) => (r ? r.width / (2 * (k + 1)) : null))
+      .filter((v): v is number => v !== null);
+    if (wSamples.length >= 3) {
+      const wRefined = arrayMedian(wSamples);
+      const relErr = Math.abs(wRefined - w) / Math.max(w, wRefined);
+      if (process.env.DEBUG_RINGS) console.error(`[debug] w=${w.toFixed(2)} wRefined=${wRefined.toFixed(2)} relErr=${relErr.toFixed(3)} nulls=${fitted.filter(r=>!r).length}`);
+      if (relErr > 0.08) {
+        // Re-search only the null rings using the refined scale + wider tolerance.
+        const nullIndices = fitted
+          .map((r, k) => (r === null ? k : null))
+          .filter((k): k is number => k !== null);
+        if (nullIndices.length > 0) {
+          const refined = collectRingPoints(
+            rgba, width, height, cx, cy, wRefined, N_RAYS, 0.65, boundary.dists,
+          );
+          for (const k of nullIndices) {
+            if (refined[k].length < 6) { if (process.env.DEBUG_RINGS) console.error(`[debug] ring[${k}] only ${refined[k].length} pts`); continue; }
+            const r = fitEllipseFitzgibbon(refined[k]);
+            if (!r) { if (process.env.DEBUG_RINGS) console.error(`[debug] ring[${k}] fitz failed`); continue; }
+            const expectedW = 2 * (k + 1) * wRefined;
+            if (process.env.DEBUG_RINGS) console.error(`[debug] ring[${k}] r.w=${r.width.toFixed(1)} expectedW=${expectedW.toFixed(1)} ar=${(r.width/r.height).toFixed(2)}`);
+            if (r.width <= 0 || r.height <= 0) continue;
+            if (r.width / r.height > 6) continue;
+            if (r.width < expectedW * 0.25 || r.width > expectedW * 3.0) continue;
+            fitted[k] = { ...r, center: { x: cx, y: cy } };
+          }
+        }
+      }
+    }
+
+    // Phase 4c — Ring[9] (outermost white ring) boundary fit.
+    // On a WA target the white zone extends to the paper edge, so the
+    // paper boundary IS the outermost ring boundary.  Always attempt a
+    // Fitzgibbon fit on the pre-computed boundary points; prefer the
+    // boundary-derived ellipse over the radial-profile fit when it is
+    // larger (closer to the true paper edge) and well-conditioned.
+    {
+      const ring8r = fitted[8] ? fitted[8].width / 2 : 0;
+      // Keep boundary points that lie outside ring[8] (or at least 10% of
+      // the median boundary distance from centre if ring[8] is unknown).
+      const minInner = ring8r > 0
+        ? ring8r * 1.02
+        : arrayMedian(boundary.dists) * 0.10;
+      const bPts = boundary.points.filter(
+        p => Math.hypot(p.x - cx, p.y - cy) > minInner,
+      );
+      if (process.env.DEBUG_RINGS) {
+        console.error(`[debug] ring[9] boundary pts=${bPts.length} ring8r=${ring8r.toFixed(1)}`);
+      }
+      if (bPts.length >= 6) {
+        const bFit = fitEllipseFitzgibbon(bPts);
+        if (process.env.DEBUG_RINGS && bFit) {
+          console.error(`[debug] ring[9] boundary fit: w=${bFit.width.toFixed(1)} h=${bFit.height.toFixed(1)} ar=${(bFit.width/bFit.height).toFixed(2)}`);
+        }
+        if (bFit && bFit.width / bFit.height < 6) {
+          const currentW = fitted[9]?.width ?? 0;
+          // Prefer boundary fit if it is larger (i.e., closer to the paper edge)
+          // and at least 5% wider than ring[8].
+          if (bFit.width > currentW && bFit.width > (ring8r * 2) * 1.05) {
+            fitted[9] = { ...bFit, center: { x: cx, y: cy } };
+          }
+        }
+      }
+    }
+
     // Interpolate/extrapolate nulls, then sort by width ascending.
     // Physical requirement: outer rings must always be wider than inner rings.
     // Enforce a minimum gap so interpolation artifacts don't produce equal-width
@@ -860,11 +1064,16 @@ export function findTarget(
     }
     const rings = sortedRings;
 
+    // Fit a quadrilateral to the full set of boundary points so the caller
+    // can display the detected target paper edge as a 4-sided polygon.
+    const paperBoundary = fitQuadrilateral(boundary.points) ?? undefined;
+
     return {
       rings: rings.map(r => ({
         centerX: r.center.x, centerY: r.center.y,
         width: r.width, height: r.height, angle: r.angle,
       })),
+      paperBoundary,
       success: true,
     };
   } catch (e) {

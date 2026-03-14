@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadImageNode } from '../src/imageLoader';
-import { findTarget, EllipseData, ArcheryResult } from '../src/targetDetection';
+import { findTarget, EllipseData, ArcheryResult, Pixel } from '../src/targetDetection';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const OUTPUT_PATH = path.resolve(__dirname, '../report.html');
@@ -46,6 +46,7 @@ function renderSvg(
   width: number,
   height: number,
   rings: EllipseData[],
+  paperBoundary?: [Pixel, Pixel, Pixel, Pixel],
 ): string {
   // Draw outermost rings first so inner rings render on top
   const ellipsesSvg = [...rings]
@@ -78,6 +79,14 @@ function renderSvg(
     })
     .join('\n    ');
 
+  // Target paper boundary — dashed lime quadrilateral drawn behind the scoring rings
+  const boundarySvg = paperBoundary
+    ? (() => {
+        const pts = paperBoundary.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+        return `<polygon points="${pts}" fill="none" stroke="#00FF88" stroke-width="3" stroke-dasharray="12 6" opacity="0.85"/>`;
+      })()
+    : '';
+
   // Small marker at the bullseye centre
   const bull = rings[0];
   const bullMarker = bull
@@ -86,29 +95,43 @@ function renderSvg(
 
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="display:block;max-width:100%;height:auto">
     <image href="${base64}" width="${width}" height="${height}"/>
+    ${boundarySvg}
     ${ellipsesSvg}
     ${bullMarker}
   </svg>`;
 }
 
-function renderRingTable(rings: EllipseData[]): string {
+function renderRingTable(rings: EllipseData[], paperBoundary?: [Pixel, Pixel, Pixel, Pixel]): string {
   const rows = rings
     .map((r, i) => {
       const score = 10 - i;
+      const ratio = i > 0 ? (r.width / rings[i - 1].width).toFixed(3) : '—';
       return `<tr>
         <td>${i}</td><td>${score}</td>
         <td>${r.centerX.toFixed(1)}</td><td>${r.centerY.toFixed(1)}</td>
         <td>${r.width.toFixed(1)}</td><td>${r.height.toFixed(1)}</td>
-        <td>${r.angle.toFixed(1)}</td>
+        <td>${r.angle.toFixed(1)}</td><td>${ratio}</td>
       </tr>`;
     })
     .join('\n');
+
+  const boundaryRow = paperBoundary
+    ? paperBoundary.map((p, i) => {
+        const labels = ['TL', 'TR', 'BR', 'BL'];
+        return `<tr style="${i === 0 ? 'border-top:2px solid #00FF88;' : ''}color:#00FF88">
+          <td colspan="2">boundary ${labels[i]}</td>
+          <td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td>
+          <td colspan="4">—</td>
+        </tr>`;
+      }).join('\n')
+    : '';
+
   return `<table>
     <thead><tr>
       <th>Ring</th><th>Score</th><th>cx</th><th>cy</th>
-      <th>width</th><th>height</th><th>angle°</th>
+      <th>width</th><th>height</th><th>angle°</th><th>w-ratio</th>
     </tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${rows}${boundaryRow}</tbody>
   </table>`;
 }
 
@@ -124,13 +147,13 @@ function generateHtml(entries: ImageEntry[]): string {
         : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
 
       const content = result.success
-        ? renderSvg(base64, width, height, result.rings)
+        ? renderSvg(base64, width, height, result.rings, result.paperBoundary)
         : base64
           ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
           : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
 
       const table = result.success
-        ? `<details><summary>Ring data</summary>${renderRingTable(result.rings)}</details>`
+        ? `<details><summary>Ring data</summary>${renderRingTable(result.rings, result.paperBoundary)}</details>`
         : '';
 
       return `

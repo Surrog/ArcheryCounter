@@ -1,10 +1,12 @@
 import { useCallback, useState } from 'react';
 import { launchImageLibrary } from 'react-native-image-picker';
 import ArcheryCounter, { RingEllipse } from './ArcheryCounter';
+import type { Pixel } from './targetDetection';
 
 export interface ScorerState {
   imageUri: string | null;
   rings: RingEllipse[] | null;
+  paperBoundary: [Pixel, Pixel, Pixel, Pixel] | null;
   /** Original pixel dimensions of the image, as reported by the image picker */
   imageWidth: number | null;
   imageHeight: number | null;
@@ -15,6 +17,7 @@ export interface ScorerState {
 const initialState: ScorerState = {
   imageUri: null,
   rings: null,
+  paperBoundary: null,
   imageWidth: null,
   imageHeight: null,
   loading: false,
@@ -42,8 +45,8 @@ export function useArcheryScorer() {
     setState({ ...initialState, loading: true });
 
     try {
-      const rings = await ArcheryCounter.processImage(uri, asset.base64!);
-      setState({ imageUri: uri, rings, imageWidth, imageHeight, loading: false, error: null });
+      const { rings, paperBoundary = null } = await ArcheryCounter.processImage(uri, asset.base64!);
+      setState({ imageUri: uri, rings, paperBoundary, imageWidth, imageHeight, loading: false, error: null });
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       setState({ ...initialState, error: message });

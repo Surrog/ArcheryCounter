@@ -1,11 +1,14 @@
 import React, { useMemo, useState } from 'react';
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
-import Svg, { Ellipse, G } from 'react-native-svg';
+import Svg, { Ellipse, G, Polygon } from 'react-native-svg';
 import type { RingEllipse } from '../NativeArcheryCounter';
+import type { Pixel } from '../targetDetection';
 import { computeLetterboxTransform } from '../letterboxTransform';
 
 interface Props {
   rings: RingEllipse[];
+  /** Detected target paper boundary — 4 corners [TL, TR, BR, BL] in image pixels */
+  paperBoundary?: [Pixel, Pixel, Pixel, Pixel] | null;
   /** Original pixel dimensions of the source image */
   imageNaturalWidth: number;
   imageNaturalHeight: number;
@@ -36,7 +39,7 @@ interface ViewSize {
  * It compensates for the letterboxing that "contain" introduces so that
  * the ellipses are aligned with the actual pixels of the displayed photo.
  */
-export function RingOverlay({ rings, imageNaturalWidth, imageNaturalHeight }: Props) {
+export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNaturalHeight }: Props) {
   const [viewSize, setViewSize] = useState<ViewSize>({ width: 0, height: 0 });
 
   const transform = useMemo(() => {
@@ -53,6 +56,23 @@ export function RingOverlay({ rings, imageNaturalWidth, imageNaturalHeight }: Pr
     <View style={StyleSheet.absoluteFill} onLayout={handleLayout} pointerEvents="none">
       {transform && viewSize.width > 0 && (
         <Svg width={viewSize.width} height={viewSize.height}>
+          {/* Target paper boundary — dashed lime quadrilateral */}
+          {paperBoundary && (() => {
+            const points = paperBoundary
+              .map(p => `${p.x * transform.scale + transform.offsetX},${p.y * transform.scale + transform.offsetY}`)
+              .join(' ');
+            return (
+              <Polygon
+                points={points}
+                fill="none"
+                stroke="#00FF88"
+                strokeWidth={2}
+                strokeDasharray="8 4"
+              />
+            );
+          })()}
+
+          {/* Scoring rings */}
           {rings.map((ring, i) => {
             const cx = ring.centerX * transform.scale + transform.offsetX;
             const cy = ring.centerY * transform.scale + transform.offsetY;
