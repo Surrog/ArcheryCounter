@@ -73,5 +73,35 @@ describe('findTarget', () => {
     // Allow up to 0.8 spread to tolerate imperfect Fitzgibbon fits on partial arcs.
     const arSpread = Math.max(...aspectRatios) - Math.min(...aspectRatios);
     expect(arSpread).toBeLessThan(0.8);
+
+    // --- Boundary containment ---
+    // Use polygon inradius (min distance from centre to each polygon edge) as
+    // a tight bound.  All rings except the outermost (ring[9]) must fit inside;
+    // ring[9] may touch or slightly exceed the inradius (it IS the boundary),
+    // but must stay within the max vertex distance with a small 15% slack.
+    if (result.paperBoundary && result.paperBoundary.points.length >= 3) {
+      const cx = result.rings[0].centerX, cy = result.rings[0].centerY;
+      const pts = result.paperBoundary.points;
+      const n = pts.length;
+
+      function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+        const dx = bx - ax, dy = by - ay;
+        const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
+        return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+      }
+
+      const inradius = Math.min(...pts.map(([ax, ay], i) => {
+        const [bx, by] = pts[(i + 1) % n];
+        return distToSegment(cx, cy, ax, ay, bx, by);
+      }));
+      const maxVertexR = Math.max(...pts.map(([bx, by]) => Math.hypot(bx - cx, by - cy)));
+
+      // Rings 0-8: must stay within inradius (the actual paper boundary)
+      for (const ring of result.rings.slice(0, 9)) {
+        expect(ring.width / 2).toBeLessThan(inradius * 1.15);
+      }
+      // Ring 9: outermost, allowed up to max vertex distance + 15% slack
+      expect(result.rings[9].width / 2).toBeLessThan(maxVertexR * 1.15);
+    }
   }, 60000);
 });

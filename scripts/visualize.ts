@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadImageNode } from '../src/imageLoader';
-import { findTarget, EllipseData, ArcheryResult, Pixel } from '../src/targetDetection';
+import { findTarget, EllipseData, ArcheryResult, TargetBoundary, ColourCalibration, Pixel } from '../src/targetDetection';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const OUTPUT_PATH = path.resolve(__dirname, '../report.html');
@@ -46,7 +46,8 @@ function renderSvg(
   width: number,
   height: number,
   rings: EllipseData[],
-  paperBoundary?: [Pixel, Pixel, Pixel, Pixel],
+  paperBoundary?: TargetBoundary,
+  ringPoints?: Pixel[][],
 ): string {
   // Draw outermost rings first so inner rings render on top
   const ellipsesSvg = [...rings]
@@ -79,10 +80,10 @@ function renderSvg(
     })
     .join('\n    ');
 
-  // Target paper boundary — dashed lime quadrilateral drawn behind the scoring rings
-  const boundarySvg = paperBoundary
+  // Target paper boundary — dashed lime polygon drawn behind the scoring rings
+  const boundarySvg = paperBoundary && paperBoundary.points.length >= 3
     ? (() => {
-        const pts = paperBoundary.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+        const pts = paperBoundary.points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
         return `<polygon points="${pts}" fill="none" stroke="#00FF88" stroke-width="3" stroke-dasharray="12 6" opacity="0.85"/>`;
       })()
     : '';
@@ -93,15 +94,28 @@ function renderSvg(
     ? `<circle cx="${bull.centerX.toFixed(1)}" cy="${bull.centerY.toFixed(1)}" r="5" fill="#FFD700" stroke="#000" stroke-width="1"/>`
     : '';
 
+  // Raw transition points — small dots in each ring's colour, drawn before ellipses
+  const pointsSvg = ringPoints
+    ? ringPoints.map((pts, idx) => {
+        if (pts.length === 0) return '';
+        const color = RING_COLORS[idx] ?? '#00FF00';
+        const stroke = (idx >= 6 && idx <= 7) ? '#fff' : '#000'; // halo for dark rings
+        return pts.map(p =>
+          `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2" fill="${color}" stroke="${stroke}" stroke-width="0.5" opacity="0.75"/>`
+        ).join('');
+      }).join('')
+    : '';
+
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="display:block;max-width:100%;height:auto">
     <image href="${base64}" width="${width}" height="${height}"/>
     ${boundarySvg}
+    ${pointsSvg}
     ${ellipsesSvg}
     ${bullMarker}
   </svg>`;
 }
 
-function renderRingTable(rings: EllipseData[], paperBoundary?: [Pixel, Pixel, Pixel, Pixel]): string {
+function renderRingTable(rings: EllipseData[], paperBoundary?: TargetBoundary): string {
   const rows = rings
     .map((r, i) => {
       const score = 10 - i;
@@ -116,11 +130,10 @@ function renderRingTable(rings: EllipseData[], paperBoundary?: [Pixel, Pixel, Pi
     .join('\n');
 
   const boundaryRow = paperBoundary
-    ? paperBoundary.map((p, i) => {
-        const labels = ['TL', 'TR', 'BR', 'BL'];
+    ? paperBoundary.points.map(([x, y], i) => {
         return `<tr style="${i === 0 ? 'border-top:2px solid #00FF88;' : ''}color:#00FF88">
-          <td colspan="2">boundary ${labels[i]}</td>
-          <td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td>
+          <td colspan="2">boundary v${i}</td>
+          <td>${x.toFixed(0)}</td><td>${y.toFixed(0)}</td>
           <td colspan="4">—</td>
         </tr>`;
       }).join('\n')
@@ -132,6 +145,44 @@ function renderRingTable(rings: EllipseData[], paperBoundary?: [Pixel, Pixel, Pi
       <th>width</th><th>height</th><th>angle°</th><th>w-ratio</th>
     </tr></thead>
     <tbody>${rows}${boundaryRow}</tbody>
+  </table>`;
+}
+
+// Canonical expected hue ranges per zone, for highlighting outliers
+const EXPECTED_HUE: Record<string, [number, number]> = {
+  gold:  [20,  70],
+  red:   [340, 380], // wraps; compare mod 360
+  blue:  [190, 245],
+  black: [0,   360], // any hue, V < 0.3 matters
+  white: [0,   360], // any hue, S < 0.2 matters
+};
+
+const ZONE_COLORS: Record<string, string> = {
+  gold:  '#FFD700',
+  red:   '#E8000D',
+  blue:  '#006CB7',
+  black: '#888888',
+  white: '#FFFFFF',
+};
+
+function renderCalibrationTable(cal: ColourCalibration): string {
+  const zones: (keyof ColourCalibration)[] = ['gold', 'red', 'blue', 'black', 'white'];
+  const rows = zones.map(z => {
+    const [h, s, v] = cal[z];
+    const color = ZONE_COLORS[z];
+    const textColor = z === 'white' || z === 'gold' ? '#000' : '#fff';
+    const swatch = `<span style="display:inline-block;width:16px;height:16px;border-radius:3px;background:${color};border:1px solid #555;vertical-align:middle"></span>`;
+    return `<tr>
+      <td>${swatch} ${z}</td>
+      <td>${h.toFixed(1)}°</td>
+      <td>${s.toFixed(3)}</td>
+      <td>${v.toFixed(3)}</td>
+    </tr>`;
+  }).join('\n');
+
+  return `<table>
+    <thead><tr><th>Zone</th><th>H (corrected)</th><th>S</th><th>V</th></tr></thead>
+    <tbody>${rows}</tbody>
   </table>`;
 }
 
@@ -147,11 +198,14 @@ function generateHtml(entries: ImageEntry[]): string {
         : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
 
       const content = result.success
-        ? renderSvg(base64, width, height, result.rings, result.paperBoundary)
+        ? renderSvg(base64, width, height, result.rings, result.paperBoundary, result.ringPoints)
         : base64
           ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
           : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
 
+      const calibTable = result.success && result.calibration
+        ? `<details><summary>Colour calibration</summary>${renderCalibrationTable(result.calibration)}</details>`
+        : '';
       const table = result.success
         ? `<details><summary>Ring data</summary>${renderRingTable(result.rings, result.paperBoundary)}</details>`
         : '';
@@ -161,6 +215,7 @@ function generateHtml(entries: ImageEntry[]): string {
     <h2>${filename}</h2>
     <p class="status">${statusText}</p>
     <div class="svg-wrapper">${content}</div>
+    ${calibTable}
     ${table}
   </section>`;
     })

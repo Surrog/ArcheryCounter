@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadImageNode } from '../src/imageLoader';
-import { findTarget, EllipseData, ArcheryResult, Pixel } from '../src/targetDetection';
+import { findTarget, EllipseData, ArcheryResult } from '../src/targetDetection';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const OUTPUT_PATH = path.resolve(__dirname, '../annotate.html');
@@ -48,7 +48,7 @@ function generateHtml(entries: ImageEntry[]): string {
     })) : [];
 
     const paperBoundary = result.success && result.paperBoundary
-      ? result.paperBoundary.map(p => [p.x, p.y])
+      ? result.paperBoundary.points
       : null;
 
     return {

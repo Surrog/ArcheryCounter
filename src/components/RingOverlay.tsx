@@ -2,13 +2,13 @@ import React, { useMemo, useState } from 'react';
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
 import Svg, { Ellipse, G, Polygon } from 'react-native-svg';
 import type { RingEllipse } from '../NativeArcheryCounter';
-import type { Pixel } from '../targetDetection';
+import type { TargetBoundary } from '../targetDetection';
 import { computeLetterboxTransform } from '../letterboxTransform';
 
 interface Props {
   rings: RingEllipse[];
-  /** Detected target paper boundary — 4 corners [TL, TR, BR, BL] in image pixels */
-  paperBoundary?: [Pixel, Pixel, Pixel, Pixel] | null;
+  /** Detected target paper boundary polygon in image pixels */
+  paperBoundary?: TargetBoundary | null;
   /** Original pixel dimensions of the source image */
   imageNaturalWidth: number;
   imageNaturalHeight: number;
@@ -57,9 +57,9 @@ export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNatu
       {transform && viewSize.width > 0 && (
         <Svg width={viewSize.width} height={viewSize.height}>
           {/* Target paper boundary — dashed lime quadrilateral */}
-          {paperBoundary && (() => {
-            const points = paperBoundary
-              .map(p => `${p.x * transform.scale + transform.offsetX},${p.y * transform.scale + transform.offsetY}`)
+          {paperBoundary && paperBoundary.points.length >= 3 && (() => {
+            const points = paperBoundary.points
+              .map(([px, py]) => `${px * transform.scale + transform.offsetX},${py * transform.scale + transform.offsetY}`)
               .join(' ');
             return (
               <Polygon

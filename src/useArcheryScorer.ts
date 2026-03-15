@@ -1,12 +1,12 @@
 import { useCallback, useState } from 'react';
 import { launchImageLibrary } from 'react-native-image-picker';
 import ArcheryCounter, { RingEllipse } from './ArcheryCounter';
-import type { Pixel } from './targetDetection';
+import type { TargetBoundary } from './targetDetection';
 
 export interface ScorerState {
   imageUri: string | null;
   rings: RingEllipse[] | null;
-  paperBoundary: [Pixel, Pixel, Pixel, Pixel] | null;
+  paperBoundary: TargetBoundary | null;
   /** Original pixel dimensions of the image, as reported by the image picker */
   imageWidth: number | null;
   imageHeight: number | null;

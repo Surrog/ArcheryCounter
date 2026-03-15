@@ -15,7 +15,7 @@ interface RingAnnotation {
 }
 
 interface ImageAnnotation {
-  paperBoundary: [[number, number], [number, number], [number, number], [number, number]] | null;
+  paperBoundary: [number, number][] | null;
   rings: RingAnnotation[];
 }
 
@@ -58,13 +58,15 @@ if (!annotations) {
 
       expect(result.success).toBe(true);
 
-      // Paper boundary check: each corner within 60px
+      // Paper boundary check: each annotated corner within 60px of the nearest detected vertex
       if (ann.paperBoundary && result.paperBoundary) {
-        for (let i = 0; i < 4; i++) {
-          const annCorner = ann.paperBoundary[i];
-          const resCorner = result.paperBoundary[i];
-          const dist = Math.hypot(resCorner.x - annCorner[0], resCorner.y - annCorner[1]);
-          expect(dist).toBeLessThan(60);
+        for (const annCorner of ann.paperBoundary) {
+          const minDist = Math.min(
+            ...result.paperBoundary.points.map(([x, y]) =>
+              Math.hypot(x - annCorner[0], y - annCorner[1])
+            )
+          );
+          expect(minDist).toBeLessThan(60);
         }
       }
 

@@ -92,20 +92,19 @@ interface TargetResult {
 
 **Goal:** Detect the target paper boundary using the hay-bale colour as the "outside" signal. Output a polygon accurate enough to serve as a mask for all subsequent processing.
 
-**Approach:**
-- Cast N rays from the image centre outward. Along each ray, walk outward until hitting hay-bale colour (H ∈ [15°, 65°], S > 0.2) or the image edge. This gives one boundary point per ray.
-- Fit 4 corner anchors using the existing axis-aligned diagonal projection (`fitQuadrilateral`).
-- Check each edge for curvature: compare the straight line between two adjacent corners to the actual boundary points along that edge. If max deviation > threshold (e.g., 5% of image width), insert a midpoint vertex.
-- Repeat until no edge deviates significantly or 8 vertices are reached.
+**Approach (implemented):**
+- Cast N=360 rays from the image centre outward (starting past the colour zones at `startRadius = max(4w, 20)`). Along each ray, walk outward until hitting hay-bale colour (H ∈ [15°, 65°], S > 0.25, V > 0.20) or the image edge.
+- Apply a circular median filter (±10 rays) to the per-ray distance profile to eliminate single-angle outliers (straw spikes, borderline pixels).
+- Fit a convex hull (Jarvis march gift-wrapping) on the smoothed boundary points, then simplify to ≤8 vertices by repeatedly removing the most-collinear vertex.
 
 **Tasks:**
 
-- [ ] **P1-T1** Extract the existing `scanTargetBoundary` ray-cast logic into a standalone function that returns only `{ points: Pixel[] }` (one point per ray at the hay transition), independent of ring detection.
-- [ ] **P1-T2** Move boundary detection to run before any ring/colour logic in `findTarget`. Pass the resulting mask to all downstream phases.
-- [ ] **P1-T3** Write `fitBoundaryPolygon(points: Pixel[]): TargetBoundary` that: (a) fits 4 corner anchors via axis-aligned diagonal projection, (b) checks each edge for curvature and inserts midpoint vertices where deviation > threshold, up to 8 vertices total.
-- [ ] **P1-T4** Write `pointInPolygon(pt: Pixel, poly: TargetBoundary): boolean` (ray-cast test) — used to mask all downstream pixel access.
-- [ ] **P1-T5** Update `scripts/visualize.ts` to render the new `TargetBoundary` polygon (replace the existing 4-point polygon drawing).
-- [ ] **P1-T6** Visually validate boundary on all 10 test images in `report.html`. Annotate any failures in `images/README.md` (create if absent).
+- [x] **P1-T1** Extract the existing `scanTargetBoundary` ray-cast logic into a standalone function that returns `{ dists: number[], points: Pixel[] }`, independent of ring detection.
+- [x] **P1-T2** Move boundary detection to run before ring detection in `findTarget`. Smoothed distances cap all downstream ring searches.
+- [x] **P1-T3** Write `fitBoundaryPolygon(points: Pixel[]): TargetBoundary` using gift-wrapping convex hull + vertex simplification (≤8 vertices).
+- [x] **P1-T4** Write `pointInPolygon(pt: Pixel, poly: TargetBoundary): boolean` (ray-cast test) — exported for downstream use.
+- [x] **P1-T5** Update `scripts/visualize.ts` to render the `TargetBoundary` polygon (dashed lime overlay).
+- [x] **P1-T6** Visually validated boundary on all 10 test images — all pass.
 
 ---
 
@@ -121,11 +120,11 @@ interface TargetResult {
 
 **Tasks:**
 
-- [ ] **P2-T1** Write `sampleZoneColours(rgba, width, height, cx, cy, approxRingWidth, boundary): RawZoneSamples` — casts 8 rays, samples ~5 pixels per expected zone position per ray, returns raw HSV arrays per zone.
-- [ ] **P2-T2** Write `computeCalibration(samples: RawZoneSamples): ColourCalibration` — takes the median per zone, applies von Kries white-balance correction relative to the white zone sample.
-- [ ] **P2-T3** Integrate `sampleZoneColours` + `computeCalibration` into the `findTarget` pipeline, running after boundary + centre are established.
-- [ ] **P2-T4** Add `calibration: ColourCalibration` to `ArcheryResult` (success branch) and expose it from `ArcheryCounter.processImage`.
-- [ ] **P2-T5** Add calibration data to `scripts/visualize.ts` report (collapsible table per image showing the 5 zone HSV references).
+- [x] **P2-T1** Write `sampleZoneColours(rgba, width, height, cx, cy, w, boundaryDists): RawZoneSamples` — casts 8 rays, samples the midpoint of each ring within each zone (2 samples/zone/ray = 16 total per zone), skips samples beyond the smoothed boundary.
+- [x] **P2-T2** Write `computeCalibration(samples: RawZoneSamples): ColourCalibration` — circular-mean hue + median S/V per zone; von Kries white-balance correction normalises all zones relative to the white zone sample.
+- [x] **P2-T3** Integrated into `findTarget` between boundary scan and ring detection.
+- [x] **P2-T4** `calibration?: ColourCalibration` added to `ArcheryResult` and `ProcessImageResult`; exported from `ArcheryCounter.ts`.
+- [x] **P2-T5** Calibration collapsible table added to `scripts/visualize.ts` report (H/S/V per zone with colour swatches). All 10 images pass.
 
 ---
 
@@ -153,13 +152,15 @@ Detection strategy for ring 10's inner boundary:
 
 **Tasks:**
 
-- [ ] **P3-T1** Write `classifyPixelZone(hsv: [h,s,v], cal: ColourCalibration): Zone | null` — returns 'gold' | 'red' | 'blue' | 'black' | 'white' | null (hay/outside) using nearest-zone HSV distance.
-- [ ] **P3-T2** Write `detectColourTransitions(rgba, width, height, cx, cy, cal, boundary): number[][]` — for each of 360 rays, returns the distances at which colour-zone transitions occur (4 major transitions + midpoints for minor dividers).
-- [ ] **P3-T3** Write `detectZoneDivider(ray: RayPixels, zoneStart: number, zoneEnd: number): number` — find the luminance minimum between two zone-boundary distances; fall back to the midpoint if no clear minimum found.
-- [ ] **P3-T4** Write `detectRing10Inner(ray: RayPixels, goldStart: number, goldMid: number): number` — scan for the X-ring luminance minimum between centre and `goldMid`; fall back to Phase 4 linear regression estimate if no minimum found.
-- [ ] **P3-T5** Replace the existing `collectRingPoints` function with the colour-guided transition detection from P3-T2/T3/T4.
-- [ ] **P3-T6** Ensure the output is still a 360×10 radial profile (`number[][]`) for compatibility with the spline conversion (Phase 6).
+- [x] **P3-T1** Write `classifyPixelZone(hsv, cal): ZoneName | null` — saturation-weighted HSV distance to each calibration reference; returns nearest zone or null if outside threshold.
+- [x] **P3-T2** `detectRingDistancesOnRay` — walks each ray, 5-point mode-smooths zone classifications, detects 4 colour-zone transitions (MIN_STREAK=3 + minimum-distance gate to reject arrow-hole artefacts near centre), returns 10 ring-boundary distances per ray.
+- [x] **P3-T3** `detectZoneDivider` — luminance extremum in a ±0.4w window around expected position; min for colour zones, max for black zone; falls back to expected position.
+- [x] **P3-T4** Gold-zone divider (ring 0 / bullseye outer) detected via `detectZoneDivider` within the confirmed gold zone extent — same mechanism as other within-zone dividers.
+- [x] **P3-T5** `collectRingPointsColourGuided` replaces `collectRingPoints` as primary detector when calibration is available; luminance fallback retained.
+- [x] **P3-T6** Output is `Pixel[][]` (10 arrays), same interface as before; raw points also exposed as `ArcheryResult.ringPoints` and rendered as coloured dots in `report.html`.
 - [ ] **P3-T7** In Phase 5 annotation tool: render ring 10's spline with a visually distinct style (thicker stroke, gold fill at low opacity) and ensure its K control points are draggable independently of the centre handle.
+
+**Notes:** Fixed regression on `20190325_193820.jpg` — arrow-hole pixels near centre (H≈8–14°) were falsely classified as "red". Fixed with 50%-of-expected minimum-distance gate. All 10 images pass; 24/25 tests pass (1 pre-existing mock failure).
 
 ---
 
@@ -174,11 +175,13 @@ Detection strategy for ring 10's inner boundary:
 
 **Tasks:**
 
-- [ ] **P4-T1** Write `detectOutermostBlackLine(ray: RayPixels, blackZoneEnd: number, boundaryDist: number): number | null` — scan outward from the black zone end, find the first luminance minimum before the boundary; return the distance or null if not found.
-- [ ] **P4-T2** Write `fitRingRadiusModel(knownBoundaries: { ringIdx: number, dist: number }[]): (n: number) => number` — fits a linear regression `r(n) = a·n + b` through the known ring boundary distances for one ray; returns a function that predicts the boundary distance for any ring index.
-- [ ] **P4-T3** Write `extrapolateWhiteRings(radialProfile: number[][], knownBoundariesPerRay: number[][][]): void` — for each ray, call `fitRingRadiusModel` using the 4 reliably detected colour-transition boundaries, then use the model to fill in rings 1 and 2 for any ray where `detectOutermostBlackLine` returned null.
-- [ ] **P4-T4** Integrate P4-T1 through P4-T3 into the ray-by-ray loop from Phase 3, completing all 10 ring boundaries.
-- [ ] **P4-T5** Add visual validation in `scripts/visualize.ts`: overlay the detected white ring boundaries on the report images. Confirm correct placement on all test images.
+- [x] **P4-T1** Write `detectOutermostBlackLine(rgba, ..., whiteStart, boundaryDist): number | null` — scan the confirmed white zone outward from `whiteStart`; require V < 0.40 for ≥2 consecutive pixels (printed black circle). Returns distance or null.
+- [x] **P4-T2** Write `fitRingRadiusModel(knownBoundaries: { ringIdx: number, dist: number }[]): (n: number) => number` — OLS linear regression `r(n) = a·n + b` through the known colour-transition distances; returns a predictor for any ring index.
+- [x] **P4-T3** Integrated per-ray into `detectRingDistancesOnRay` (replaces separate `extrapolateWhiteRings`). Detection priority for `result[8]`: (1) `detectOutermostBlackLine`, (2) regression from 4 known transitions, (3) `detectZoneDivider` fallback, (4) `9w` w-based estimate.
+- [x] **P4-T4** Integrated into the Phase 3 ray loop — `result[8]` now uses the full P4 cascade; all 10 images pass.
+- [x] **P4-T5** Visual validation via existing `ringPoints[8]` dots in `report.html` (white dots on each image). All 10 images pass.
+
+**Notes:** All 10 tests pass (10/10 targetDetection, 24/25 total — 1 pre-existing mock failure). Phase 4c override of ring[9] was also fixed in this phase: wrapped in `if (!calibration)` to prevent it overriding the colour-guided boundary fit.
 
 ---
 

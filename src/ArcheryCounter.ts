@@ -1,13 +1,14 @@
 import { findTarget } from './targetDetection';
 import { decodeBase64Jpeg } from './imageLoader';
-import type { EllipseData, Pixel } from './targetDetection';
+import type { EllipseData, TargetBoundary, ColourCalibration, Pixel } from './targetDetection';
 
 export type { EllipseData as RingEllipse };
-export type { Pixel };
+export type { Pixel, TargetBoundary, ColourCalibration };
 
 export interface ProcessImageResult {
   rings: EllipseData[];
-  paperBoundary?: [Pixel, Pixel, Pixel, Pixel];
+  paperBoundary?: TargetBoundary;
+  calibration?: ColourCalibration;
 }
 
 const ArcheryCounter = {
@@ -15,7 +16,7 @@ const ArcheryCounter = {
     const { rgba, width, height } = decodeBase64Jpeg(base64);
     const result = findTarget(rgba, width, height);
     if (!result.success) throw new Error(result.error ?? 'Detection failed');
-    return { rings: result.rings, paperBoundary: result.paperBoundary };
+    return { rings: result.rings, paperBoundary: result.paperBoundary, calibration: result.calibration };
   },
 };
 
