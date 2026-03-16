@@ -196,20 +196,18 @@ Detection strategy for ring 10's inner boundary:
 
 **Sub-tasks — Catmull-Rom primitives (shared by annotation tool and algorithm):**
 
-- [ ] **P5-T1** Write `evalCatmullRom(p0, p1, p2, p3, t): [number, number]` — evaluates one segment at parameter t ∈ [0,1].
-- [ ] **P5-T2** Write `sampleClosedSpline(points: [number, number][], nSamples: number): [number, number][]` — samples a closed Catmull-Rom spline evenly. Used for rendering and point-in-ring tests.
-- [ ] **P5-T3** Write `pointInClosedSpline(pt, points): boolean` — winding number test using a polygon approximation sampled from the spline (N=60 samples is sufficient).
-- [ ] **P5-T4** Write `ellipseToSplinePoints(cx, cy, rx, ry, angleDeg, K=12): [number, number][]` — samples a rotated ellipse at K evenly-spaced angles to produce K control points; used as the initial spline approximation from the existing ellipse output.
+- [x] **P5-T1** `evalCatmullRom` — in `src/spline.ts`
+- [x] **P5-T2** `sampleClosedSpline` — in `src/spline.ts`
+- [x] **P5-T3** `pointInClosedSpline` — in `src/spline.ts` (ray-cast on N=60 polygon approximation)
+- [x] **P5-T4** `ellipseToSplinePoints` — in `src/spline.ts`; also inlined in annotate HTML
 
-**Sub-tasks — Annotation tool:**
-
-- [ ] **P5-T5** In `scripts/annotate.ts` data model: change `rings` from `EllipseData[]` to `{ points: [number,number][] }[]` (K control points per ring). On load, convert existing ellipse output to control points using `ellipseToSplinePoints`.
-- [ ] **P5-T6** Replace the rx/ry/rot per-ring handles with K draggable control point handles per ring. Each control point is a small circle; dragging it moves that point.
-- [ ] **P5-T7** Render the Catmull-Rom spline for each ring in the SVG overlay using `sampleClosedSpline` (polyline through sampled points).
-- [ ] **P5-T8** Replace the 4-corner boundary handles with N-vertex handles (one handle per vertex of `TargetBoundary`). Support adding/removing vertices (right-click or dedicated UI button).
-- [ ] **P5-T9** Update the `Export JSON` function to write `SplineRing[]` format (array of `{ points: [[x,y],...] }`) and `TargetBoundary` format.
-- [ ] **P5-T10** Update the `Load JSON` function to read the new format, with a migration shim for old ellipse-based annotations.
-- [ ] **P5-T11** Re-run `npm run annotate` to regenerate `annotate.html` and validate visually.
+- [x] **P5-T5** `scripts/annotate.ts` data model: rings are `{ points: [number,number][] }[]` (K=12). Detected ellipses converted via `ellipseToSplinePoints` at build time.
+- [x] **P5-T6** K=12 draggable control point handles per ring (small color-coded circles; ring[0] labeled with ring index).
+- [x] **P5-T7** Catmull-Rom splines rendered as SVG `<path>` via `sampleClosedSpline(pts, 120)`.
+- [x] **P5-T8** N-vertex boundary handles. Ctrl+click on boundary edge to add vertex; Shift+click on vertex to remove (min 3).
+- [x] **P5-T9** Export writes `{ rings: [{points: [[x,y],...]}], paperBoundary: [[x,y],...] }`.
+- [x] **P5-T10** Load JSON includes migration shim: old `{centerX, width, height, angle}` format converted to spline points.
+- [x] **P5-T11** `npm run annotate` → 10/10 passed, `annotate.html` generated.
 
 ---
 

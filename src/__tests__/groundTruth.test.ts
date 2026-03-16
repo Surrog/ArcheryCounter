@@ -3,27 +3,36 @@ import * as fs from 'fs';
 import { loadImageNode } from '../imageLoader';
 import { findTarget } from '../targetDetection';
 
-const ANNOTATIONS_PATH = path.resolve(__dirname, '../../annotations.json');
+const ANNOTATIONS_PATH = path.resolve(__dirname, '../../images/annotate.json');
 const IMAGES_DIR = path.resolve(__dirname, '../../images');
 
-interface RingAnnotation {
-  centerX: number;
-  centerY: number;
-  width: number;
-  height: number;
-  angle: number;
+interface SplineRing {
+  points: [number, number][];
 }
 
 interface ImageAnnotation {
   paperBoundary: [number, number][] | null;
-  rings: RingAnnotation[];
+  rings: SplineRing[];
 }
 
 interface AnnotationsFile {
   [filename: string]: ImageAnnotation;
 }
 
-// Try to load annotations.json
+function splineCentroid(ring: SplineRing): [number, number] {
+  const n = ring.points.length;
+  const cx = ring.points.reduce((s, p) => s + p[0], 0) / n;
+  const cy = ring.points.reduce((s, p) => s + p[1], 0) / n;
+  return [cx, cy];
+}
+
+function splineRadius(ring: SplineRing): number {
+  const [cx, cy] = splineCentroid(ring);
+  const radii = ring.points.map(([x, y]) => Math.hypot(x - cx, y - cy));
+  return radii.reduce((s, r) => s + r, 0) / radii.length;
+}
+
+// Try to load annotate.json
 let annotations: AnnotationsFile | null = null;
 try {
   if (fs.existsSync(ANNOTATIONS_PATH)) {
@@ -36,13 +45,11 @@ try {
     }
   }
 } catch (e) {
-  // If reading/parsing fails, treat as no annotations
   annotations = null;
 }
 
 if (!annotations) {
-  test('No annotations yet — run `npm run annotate`, annotate images, and export annotations.json', () => {
-    // Always passing placeholder
+  test('No annotations yet — run `npm run annotate`, annotate images, and export to images/annotate.json', () => {
     expect(true).toBe(true);
   });
 } else {
@@ -72,21 +79,18 @@ if (!annotations) {
 
       // Center distance for ring[0] within 25px
       if (ann.rings.length > 0 && result.rings.length > 0) {
-        const annCenter = ann.rings[0];
+        const [annCx, annCy] = splineCentroid(ann.rings[0]);
         const resCenter = result.rings[0];
-        const centerDist = Math.hypot(
-          resCenter.centerX - annCenter.centerX,
-          resCenter.centerY - annCenter.centerY,
-        );
+        const centerDist = Math.hypot(resCenter.centerX - annCx, resCenter.centerY - annCy);
         expect(centerDist).toBeLessThan(25);
       }
 
-      // Ring width within 15% for each ring
+      // Ring radius within 15% for each ring
       const minLen = Math.min(ann.rings.length, result.rings.length);
       for (let i = 0; i < minLen; i++) {
-        const annWidth = ann.rings[i].width;
-        const resWidth = result.rings[i].width;
-        const relError = Math.abs(resWidth - annWidth) / annWidth;
+        const annRadius = splineRadius(ann.rings[i]);
+        const resRadius = result.rings[i].width / 2;
+        const relError = Math.abs(resRadius - annRadius) / annRadius;
         expect(relError).toBeLessThan(0.15);
       }
     },

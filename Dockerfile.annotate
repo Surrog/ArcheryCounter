@@ -1,0 +1,19 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies first (layer cache)
+COPY package*.json ./
+RUN npm ci --ignore-scripts
+
+# Copy source needed by the annotate script
+COPY tsconfig.scripts.json ./
+COPY scripts/ ./scripts/
+COPY src/ ./src/
+
+# images/ is mounted at runtime as a volume
+EXPOSE 3737
+
+ENV NO_BROWSER=1
+
+CMD ["npx", "ts-node", "--transpile-only", "--project", "tsconfig.scripts.json", "scripts/annotate.ts"]
