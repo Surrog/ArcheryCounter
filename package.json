@@ -9,7 +9,9 @@
     "start": "react-native start",
     "test": "jest",
     "visualize": "ts-node --transpile-only --project tsconfig.scripts.json scripts/visualize.ts",
-    "annotate": "ts-node --transpile-only --project tsconfig.scripts.json scripts/annotate.ts"
+    "annotate": "ts-node --transpile-only --project tsconfig.scripts.json scripts/annotate.ts",
+    "dump-annotations": "ts-node --transpile-only --project tsconfig.scripts.json scripts/dump-annotations.ts",
+    "seed-from-parquet": "ts-node --transpile-only --project tsconfig.scripts.json scripts/seed-from-parquet.ts"
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.84.1",
@@ -24,6 +26,7 @@
     "@babel/core": "^7.25.2",
     "@babel/preset-env": "^7.25.3",
     "@babel/runtime": "^7.25.0",
+    "@dsnp/parquetjs": "^1.8.7",
     "@react-native-community/cli": "^20.1.2",
     "@react-native-community/cli-platform-android": "20.1.0",
     "@react-native-community/cli-platform-ios": "20.1.0",
