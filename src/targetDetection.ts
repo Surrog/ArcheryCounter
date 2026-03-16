@@ -782,7 +782,8 @@ function detectRingDistancesOnRay(
   cal: ColourCalibration,
 ): (number | null)[] {
   const result: (number | null)[] = Array(10).fill(null);
-  result[9] = boundaryDist;
+  // result[9] is deduced from regression below — boundaryDist is the paper edge
+  // (slightly beyond the outermost scoring line) and is used only as a clamp.
 
   // Walk from d=2 outward, classify each pixel.
   const zones: (ZoneName | null)[] = [];
@@ -814,41 +815,52 @@ function detectRingDistancesOnRay(
   });
 
   // Detect the 4 colour-zone transitions independently.
-  // Requires a streak of MIN_STREAK consecutive pixels in the new zone AND a
-  // minimum distance gate to reject near-centre artefacts (arrow holes, wear)
-  // that can briefly match the next zone's colour.
-  // Expected transitions: gold→red ≈2w, red→blue ≈4w, blue→black ≈6w, black→white ≈8w.
-  // Gate: must be at least 0.7×expected distance from centre.
+  // Requires a streak of MIN_STREAK_PER_TRANSITION consecutive pixels in the
+  // new zone AND a minimum distance gate to reject near-centre artefacts.
+  //
+  // Detect the 4 reliable colour-zone transitions: gold→red, red→blue,
+  // blue→black, black→white.  These are committed to result[1,3,5,7].
+  // The white zone MIDDLE boundary (result[8]) is NOT directly detected —
+  // it is deduced from regression over all reliably-detected rings.
+  //
+  // Arrow-shaft / reflection rejection (applies to all 4 transitions):
+  //   1. MIN_STREAK: must see N consecutive pixels of the new zone.
+  //   2. MIN_ZONE_WIDTH: the new zone must span ≥ this many total pixels.
+  //      Real zones are ~1w wide; shafts/reflections are typically < 0.3w.
   const SEQUENCE: ZoneName[] = ['gold', 'red', 'blue', 'black', 'white'];
-  const MIN_STREAK = 3;
-  const TRANSITION_EXPECTED_W = [2, 4, 6, 8]; // ×w multiples for each transition
+  const TRANSITION_EXPECTED_W = [2, 4, 6, 8];
+  const MIN_STREAK     = 10;
+  const MIN_ZONE_WIDTH = Math.round(w * 0.4);
   const transitionDist: (number | null)[] = Array(4).fill(null);
 
   for (let ti = 0; ti < 4; ti++) {
     const fromZone = SEQUENCE[ti], toZone = SEQUENCE[ti + 1];
-    const minD = TRANSITION_EXPECTED_W[ti] * w * 0.5; // min distance gate (50% of expected)
-    let sawFrom = false, streakTo = 0;
+    const minD = TRANSITION_EXPECTED_W[ti] * w * 0.5;
+    let sawFrom = false, streakTo = 0, streakStart = -1;
     for (let i = 0; i < smooth.length; i++) {
       const z = smooth[i];
-      if (z === fromZone) { sawFrom = true; streakTo = 0; }
+      if (z === fromZone) { sawFrom = true; streakTo = 0; streakStart = -1; }
       else if (sawFrom && z === toZone) {
+        if (streakTo === 0) streakStart = i;
         streakTo++;
         if (streakTo >= MIN_STREAK) {
-          const transD = dArr[i - MIN_STREAK + 1];
+          const transD = dArr[streakStart];
           if (transD >= minD) {
+            let zoneWidth = streakTo;
+            for (let j = i + 1; j < smooth.length && smooth[j] === toZone; j++) zoneWidth++;
+            if (zoneWidth < MIN_ZONE_WIDTH) { streakTo = 0; streakStart = -1; continue; }
             transitionDist[ti] = transD;
             break;
           }
-          // Below minimum distance — keep scanning (reset streak, wait for the real transition)
-          streakTo = 0;
+          streakTo = 0; streakStart = -1;
         }
       } else if (sawFrom && z !== null) {
-        streakTo = 0; // reset on recognised non-transition zone; ignore null (noise)
+        streakTo = 0; streakStart = -1;
       }
     }
   }
 
-  // Map transitions to ring indices: [1, 3, 5, 7]
+  // Map the 4 colour transitions to ring indices [1, 3, 5, 7].
   result[1] = transitionDist[0];
   result[3] = transitionDist[1];
   result[5] = transitionDist[2];
@@ -860,22 +872,30 @@ function detectRingDistancesOnRay(
     if (smooth[i] === 'gold') { goldStart = dArr[i]; break; }
   }
 
-  // Zone extents derived from transition distances.
+  // Zone extents for the 3 colour zones + black zone.
+  // The black zone upper bound is estimated from early regression (ring indices
+  // 1,3,5 + boundary anchor at 9) since transitionDist[3] no longer exists.
+  // Black zone upper bound: use detected black→white transition if available,
+  // otherwise fall back to a fixed 2.5w offset from the blue→black transition.
+  const blackZoneEnd = transitionDist[3] != null
+    ? transitionDist[3]
+    : transitionDist[2] != null
+      ? Math.min(boundaryDist * 0.97, transitionDist[2] + 2.5 * w)
+      : Math.min(boundaryDist * 0.97, 8.5 * w);
+
   const zoneExtent: ([number, number] | null)[] = [
     transitionDist[0] != null ? [goldStart, transitionDist[0]] : null,
     transitionDist[0] != null && transitionDist[1] != null ? [transitionDist[0], transitionDist[1]] : null,
     transitionDist[1] != null && transitionDist[2] != null ? [transitionDist[1], transitionDist[2]] : null,
-    transitionDist[2] != null && transitionDist[3] != null ? [transitionDist[2], transitionDist[3]] : null,
-    transitionDist[3] != null ? [transitionDist[3], boundaryDist] : null,
+    transitionDist[2] != null ? [transitionDist[2], blackZoneEnd] : null,
   ];
 
   // Within-zone dividers: [ringIdx, seqIdx, expectedW×multiple, findMin]
-  // Note: ring[8] (white divider) is handled separately below via P4 detection.
   const DIVIDER_CFG: [number, number, number, boolean][] = [
-    [0, 0, 1, true ],  // gold divider  ≈1w  (bullseye outer)
+    [0, 0, 1, true ],  // gold divider  ≈1w
     [2, 1, 3, true ],  // red divider   ≈3w
     [4, 2, 5, true ],  // blue divider  ≈5w
-    [6, 3, 7, false],  // black divider ≈7w  (white printed line → max)
+    [6, 3, 7, false],  // black divider ≈7w  (bright printed line → luminance max)
   ];
   const searchHalf = 0.4 * w;
 
@@ -894,62 +914,32 @@ function detectRingDistancesOnRay(
     );
   }
 
-  // P4-T3: White ring divider (result[8]) — the printed black circle at the
-  // outer edge of ring 1.  Detection priority:
-  //   1. detectOutermostBlackLine: scan the confirmed white zone for a dark streak
-  //   2. fitRingRadiusModel: linear regression from 4 known colour transitions
-  //   3. detectZoneDivider fallback (luminance min within white zone)
-  //   4. w-based estimate (9w), capped at boundaryDist
+  // Rings 8 and 9 (white zone middle and outer) are deduced from regression.
+  // The paper boundary is NOT ring[9] — it is the hay/wall behind the target,
+  // slightly beyond the outermost scoring line.  We use it only as a hard
+  // upper-bound clamp to prevent over-extrapolation.
   {
-    const whiteExtent = zoneExtent[4]; // [transitionDist[3], boundaryDist]
-    const expectedD = 9 * w;
-
-    // Build regression model from reliably-detected colour-zone transitions +
-    // the paper boundary as a hard anchor at ring index 9.  Anchoring at the
-    // actual boundary turns the extrapolation into an interpolation, preventing
-    // the regression from overshooting on angled/distorted shots.
     const knownBoundaries = ([
+      { ringIdx: 0, dist: result[0] },
       { ringIdx: 1, dist: transitionDist[0] },
+      { ringIdx: 2, dist: result[2] },
       { ringIdx: 3, dist: transitionDist[1] },
+      { ringIdx: 4, dist: result[4] },
       { ringIdx: 5, dist: transitionDist[2] },
+      { ringIdx: 6, dist: result[6] },
       { ringIdx: 7, dist: transitionDist[3] },
-      { ringIdx: 9, dist: boundaryDist },      // anchor at paper boundary
     ] as { ringIdx: number; dist: number | null }[])
       .filter(({ dist }) => dist !== null) as { ringIdx: number; dist: number }[];
-    const predictR = knownBoundaries.length >= 2
-      ? fitRingRadiusModel(knownBoundaries)
-      : null;
 
-    let detected: number | null = null;
-
-    // 1. Black-line scan within confirmed white zone.
-    if (whiteExtent) {
-      detected = detectOutermostBlackLine(
-        rgba, width, height, cx, cy, cosT, sinT,
-        whiteExtent[0], whiteExtent[1],
-      );
+    const r7 = (result[7] as number | null) ?? 8 * w;
+    if (knownBoundaries.length >= 2) {
+      const predictR = fitRingRadiusModel(knownBoundaries);
+      result[8] = Math.max(r7,       Math.min(boundaryDist * 0.98, predictR(8)));
+      result[9] = Math.max(result[8] as number, Math.min(boundaryDist * 0.99, predictR(9)));
+    } else {
+      result[8] = 9 * w  < boundaryDist ? 9 * w  : null;
+      result[9] = 10 * w < boundaryDist ? 10 * w : null;
     }
-
-    // 2. Linear regression estimate (only if the regression point is inside boundary).
-    if (detected === null && predictR !== null) {
-      const regEst = predictR(8);
-      if (regEst > 0 && regEst < boundaryDist) detected = regEst;
-    }
-
-    // 3. detectZoneDivider fallback within confirmed white zone.
-    if (detected === null && whiteExtent) {
-      const [dStart, dEnd] = whiteExtent;
-      const clampedExp = Math.max(dStart + 1, Math.min(dEnd - 1, expectedD));
-      detected = detectZoneDivider(
-        rgba, width, height, cx, cy, cosT, sinT,
-        dStart, dEnd, clampedExp, searchHalf, true,
-      );
-    }
-
-    // 4. w-based fallback.
-    if (detected === null && expectedD < boundaryDist) detected = expectedD;
-
-    result[8] = detected;
   }
 
   return result;
@@ -1628,7 +1618,7 @@ export function findTarget(
     // more than 1.5w from its ring's median radius.  Stray detections (arrow holes,
     // zone-divider noise on single rays) otherwise pull the Fitzgibbon fit off-axis.
     const transitionPoints = rawTransitionPoints.map(
-      pts => filterRingOutliers(pts, cx, cy, w * 0.25),
+      pts => filterRingOutliers(pts, cx, cy, w * 0.35),
     );
 
     // Precompute max boundary radius for fit rejection in Phase 4.
@@ -1751,7 +1741,9 @@ export function findTarget(
       })),
       paperBoundary,
       calibration,
-      ringPoints: transitionPoints,
+      // Rings 7 and 8 are regression-derived, not colour-detected — omit their
+      // dots from the report to avoid misleading white dots in the overlay.
+      ringPoints: transitionPoints.map((pts, i) => i >= 7 ? [] : pts),
       success: true,
     };
   } catch (e) {
