@@ -37,13 +37,18 @@ interface ImageEntry {
   result: ArcheryResult;
 }
 
-async function processImage(imgPath: string): Promise<ImageEntry> {
+async function loadImageBase64(imgPath: string): Promise<{ base64: string; width: number; height: number }> {
   const { Jimp } = require('jimp');
-  const filename = path.basename(imgPath);
-  const { rgba, width, height } = await loadImageNode(imgPath);
   const img = await Jimp.read(imgPath);
   img.scaleToFit({ w: 1200, h: 1200 });
   const base64 = await img.getBase64('image/jpeg');
+  return { base64, width: img.width, height: img.height };
+}
+
+async function processImage(imgPath: string): Promise<ImageEntry> {
+  const filename = path.basename(imgPath);
+  const { rgba, width, height } = await loadImageNode(imgPath);
+  const { base64 } = await loadImageBase64(imgPath);
   const result = findTarget(rgba, width, height);
   return { filename, base64, width, height, result };
 }
@@ -87,9 +92,6 @@ function generateHtml(entries: ImageEntry[]): string {
     #controls button:hover { background: #3a8a50; }
     #controls button.danger { background: #7a2222; }
     #controls button.danger:hover { background: #9a3232; }
-    #controls label.file-btn { background: #444; color: #ccc; border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 0.8rem; display: block; }
-    #controls label.file-btn:hover { background: #555; }
-    #controls input[type=file] { display: none; }
 
     #toolbar { padding: 8px 14px; border-bottom: 1px solid #333; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
     #toolbar label { font-size: 0.78rem; color: #aaa; display: flex; align-items: center; gap: 4px; cursor: pointer; }
@@ -129,8 +131,7 @@ function generateHtml(entries: ImageEntry[]): string {
   <div id="sidebar-header">
     <h1>Annotation Tool</h1>
     <div id="controls">
-      <button id="btn-export">Export JSON</button>
-      <label class="file-btn">Load JSON <input type="file" id="input-load" accept=".json"/></label>
+      <button id="btn-save">Save</button>
       <button id="btn-reset">Reset image</button>
       <button id="btn-reset-all" class="danger">Reset all</button>
     </div>
@@ -185,18 +186,6 @@ function splineToPath(pts) {
   return sampled.map((p, i) => \`\${i===0?'M':'L'}\${p[0].toFixed(1)},\${p[1].toFixed(1)}\`).join(' ') + ' Z';
 }
 
-function ellipseToSplinePoints(cx, cy, rx, ry, angleDeg, K) {
-  K = K || 12;
-  const a = angleDeg * Math.PI / 180;
-  const pts = [];
-  for (let k = 0; k < K; k++) {
-    const theta = 2 * Math.PI * k / K;
-    const x = rx * Math.cos(theta), y = ry * Math.sin(theta);
-    pts.push([cx + x*Math.cos(a) - y*Math.sin(a), cy + x*Math.sin(a) + y*Math.cos(a)]);
-  }
-  return pts;
-}
-
 // ---- State ----
 let store = { annotations: {}, modified: [] };
 let currentIdx = 0;
@@ -208,32 +197,17 @@ function showBoundary() { return document.getElementById('chk-boundary').checked
 function showHandles()  { return document.getElementById('chk-handles').checked; }
 
 // ---- Annotation helpers ----
-function migrateRings(rings) {
-  // Migrate old ellipse format { centerX, centerY, width, height, angle } → spline
-  return rings.map(r => {
-    if (r.points) return r;
-    return { points: ellipseToSplinePoints(r.centerX, r.centerY, r.width/2, r.height/2, r.angle || 0, K_POINTS) };
-  });
-}
-
 function getDetected(idx) {
   const img = IMAGES[idx];
   return {
-    paperBoundary: img.detected.paperBoundary
-      ? img.detected.paperBoundary.map(p => [p[0], p[1]])
-      : null,
-    rings: migrateRings(img.detected.rings),
+    paperBoundary: img.detected.paperBoundary ? img.detected.paperBoundary.map(p => [p[0], p[1]]) : null,
+    rings: img.detected.rings,
   };
 }
 
 function getAnnotation(idx) {
   const filename = IMAGES[idx].filename;
-  if (!store.annotations[filename]) {
-    store.annotations[filename] = getDetected(idx);
-  } else {
-    // Migrate any old-format rings that may have been stored
-    store.annotations[filename].rings = migrateRings(store.annotations[filename].rings || []);
-  }
+  if (!store.annotations[filename]) store.annotations[filename] = getDetected(idx);
   return store.annotations[filename];
 }
 
@@ -454,15 +428,12 @@ function updateDataPanel() {
   document.getElementById('data-table').innerHTML = html;
 }
 
-// ---- Export (save to DB via server) ----
-async function exportJson() {
+// ---- Save to DB ----
+async function save() {
   const out = {};
   for (const filename of Object.keys(store.annotations)) {
     const ann = store.annotations[filename];
-    out[filename] = {
-      paperBoundary: ann.paperBoundary,
-      rings: migrateRings(ann.rings || []).map(r => ({ points: r.points })),
-    };
+    out[filename] = { paperBoundary: ann.paperBoundary, rings: ann.rings };
   }
   try {
     const res = await fetch('/api/save', {
@@ -477,28 +448,6 @@ async function exportJson() {
   }
   store.modified = [];
   updateImageList();
-}
-
-// ---- Load JSON ----
-function loadJson(file) {
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    try {
-      const data = JSON.parse(e.target.result);
-      for (const [filename, ann] of Object.entries(data)) {
-        store.annotations[filename] = {
-          paperBoundary: ann.paperBoundary || null,
-          rings: migrateRings(ann.rings || []),
-        };
-        if (!store.modified.includes(filename)) store.modified.push(filename);
-      }
-      updateImageList();
-      render();
-    } catch (err) {
-      alert('Failed to parse JSON: ' + err);
-    }
-  };
-  reader.readAsText(file);
 }
 
 // ---- Reset ----
@@ -516,12 +465,9 @@ function resetAll() {
 }
 
 // ---- Wire up ----
-document.getElementById('btn-export').addEventListener('click', exportJson);
+document.getElementById('btn-save').addEventListener('click', save);
 document.getElementById('btn-reset').addEventListener('click', resetCurrent);
 document.getElementById('btn-reset-all').addEventListener('click', resetAll);
-document.getElementById('input-load').addEventListener('change', (e) => {
-  if (e.target.files.length > 0) loadJson(e.target.files[0]);
-});
 document.getElementById('chk-rings').addEventListener('change', render);
 document.getElementById('chk-boundary').addEventListener('change', render);
 document.getElementById('chk-handles').addEventListener('change', render);
@@ -531,10 +477,7 @@ fetch('/api/annotations')
   .then(r => r.json())
   .then(data => {
     for (const [filename, ann] of Object.entries(data)) {
-      store.annotations[filename] = {
-        paperBoundary: ann.paperBoundary || null,
-        rings: migrateRings(ann.rings || []),
-      };
+      store.annotations[filename] = { paperBoundary: ann.paperBoundary || null, rings: ann.rings || [] };
     }
     updateImageList();
     render();
@@ -557,27 +500,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`Processing ${jpgFiles.length} image(s) from ${IMAGES_DIR}\n`);
-
-  const entries: ImageEntry[] = [];
-
-  for (const imgPath of jpgFiles) {
-    const filename = path.basename(imgPath);
-    process.stdout.write(`  ${filename} ... `);
-    try {
-      const entry = await processImage(imgPath);
-      entries.push(entry);
-      console.log(entry.result.success ? 'ok' : `FAILED: ${entry.result.error}`);
-    } catch (err) {
-      console.log(`EXCEPTION: ${err}`);
-      entries.push({ filename, base64: '', width: 0, height: 0, result: { success: false, rings: [], error: String(err) } });
-    }
-  }
-
-  const passCount = entries.filter(e => e.result.success).length;
-  console.log(`Result: ${passCount}/${entries.length} passed\n`);
-
-  // --- DB setup ---
+  // --- DB setup (before processing so we know which images to skip) ---
   await db.query(`
     CREATE TABLE IF NOT EXISTS annotations (
       filename       TEXT PRIMARY KEY,
@@ -588,17 +511,44 @@ async function main(): Promise<void> {
   `);
   console.log('Table ready.');
 
-  // Seed only images not already in the DB
   const { rows: existing } = await db.query('SELECT filename FROM annotations');
   const inDb = new Set(existing.map((r: any) => r.filename));
+
+  const newImages = jpgFiles.filter(p => !inDb.has(path.basename(p)));
+  console.log(`Images: ${jpgFiles.length} total, ${inDb.size} in DB, ${newImages.length} to process\n`);
+
+  const entries: ImageEntry[] = [];
+
+  for (const imgPath of jpgFiles) {
+    const filename = path.basename(imgPath);
+    process.stdout.write(`  ${filename} ... `);
+    try {
+      let entry: ImageEntry;
+      if (inDb.has(filename)) {
+        const { base64, width, height } = await loadImageBase64(imgPath);
+        entry = { filename, base64, width, height, result: { success: true, rings: [], paperBoundary: undefined } };
+        console.log('cached');
+      } else {
+        entry = await processImage(imgPath);
+        console.log(entry.result.success ? 'ok' : `FAILED: ${entry.result.error}`);
+      }
+      entries.push(entry);
+    } catch (err) {
+      console.log(`EXCEPTION: ${err}`);
+      entries.push({ filename, base64: '', width: 0, height: 0, result: { success: false, rings: [], error: String(err) } });
+    }
+  }
+
+  const passCount = entries.filter(e => !inDb.has(e.filename) && e.result.success).length;
+  const processedCount = newImages.length;
+  if (processedCount > 0) console.log(`\nResult: ${passCount}/${processedCount} new images passed`);
 
   const savedAnnotations = fs.existsSync(ANNOTATIONS_PATH)
     ? JSON.parse(fs.readFileSync(ANNOTATIONS_PATH, 'utf8'))
     : {};
 
   let seeded = 0;
-  for (const entry of entries) {
-    if (inDb.has(entry.filename)) continue;
+  for (const entry of entries.filter(e => !inDb.has(e.filename))) {
 
     const fromFile = savedAnnotations[entry.filename];
     const paperBoundary = fromFile?.paperBoundary
