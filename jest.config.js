@@ -1,5 +1,6 @@
 module.exports = {
   preset: 'react-native',
+  maxWorkers: 2,
   testMatch: ['<rootDir>/src/__tests__/**/*.test.(ts|tsx)'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   moduleNameMapper: {

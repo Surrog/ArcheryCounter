@@ -7,6 +7,16 @@ jest.mock('react-native-image-picker', () => ({
   launchImageLibrary: jest.fn(),
 }));
 
+jest.mock('../ArcheryCounter', () => ({
+  __esModule: true,
+  default: {
+    processImage: jest.fn().mockResolvedValue({
+      rings: Array(10).fill({ points: Array.from({ length: 8 }, () => [500, 400] as [number, number]) }),
+      paperBoundary: null,
+    }),
+  },
+}));
+
 const mockLaunch = launchImageLibrary as jest.Mock;
 
 describe('useArcheryScorer', () => {

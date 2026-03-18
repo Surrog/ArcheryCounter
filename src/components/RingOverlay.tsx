@@ -1,11 +1,15 @@
 import React, { useMemo, useState } from 'react';
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
-import Svg, { Ellipse, G } from 'react-native-svg';
-import type { RingEllipse } from '../NativeArcheryCounter';
+import Svg, { Path, Polygon } from 'react-native-svg';
+import type { SplineRing } from '../spline';
+import { sampleClosedSpline } from '../spline';
+import type { TargetBoundary } from '../targetDetection';
 import { computeLetterboxTransform } from '../letterboxTransform';
 
 interface Props {
-  rings: RingEllipse[];
+  rings: SplineRing[];
+  /** Detected target paper boundary polygon in image pixels */
+  paperBoundary?: TargetBoundary | null;
   /** Original pixel dimensions of the source image */
   imageNaturalWidth: number;
   imageNaturalHeight: number;
@@ -34,9 +38,9 @@ interface ViewSize {
 /**
  * Transparent SVG layer that sits on top of an <Image resizeMode="contain">.
  * It compensates for the letterboxing that "contain" introduces so that
- * the ellipses are aligned with the actual pixels of the displayed photo.
+ * the ring paths are aligned with the actual pixels of the displayed photo.
  */
-export function RingOverlay({ rings, imageNaturalWidth, imageNaturalHeight }: Props) {
+export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNaturalHeight }: Props) {
   const [viewSize, setViewSize] = useState<ViewSize>({ width: 0, height: 0 });
 
   const transform = useMemo(() => {
@@ -53,26 +57,44 @@ export function RingOverlay({ rings, imageNaturalWidth, imageNaturalHeight }: Pr
     <View style={StyleSheet.absoluteFill} onLayout={handleLayout} pointerEvents="none">
       {transform && viewSize.width > 0 && (
         <Svg width={viewSize.width} height={viewSize.height}>
+          {/* Target paper boundary — dashed lime quadrilateral */}
+          {paperBoundary && paperBoundary.points.length >= 3 && (() => {
+            const points = paperBoundary.points
+              .map(([px, py]) => `${px * transform.scale + transform.offsetX},${py * transform.scale + transform.offsetY}`)
+              .join(' ');
+            return (
+              <Polygon
+                points={points}
+                fill="none"
+                stroke="#00FF88"
+                strokeWidth={2}
+                strokeDasharray="8 4"
+              />
+            );
+          })()}
+
+          {/* Scoring rings */}
           {rings.map((ring, i) => {
-            const cx = ring.centerX * transform.scale + transform.offsetX;
-            const cy = ring.centerY * transform.scale + transform.offsetY;
-            const rx = (ring.width / 2) * transform.scale;
-            const ry = (ring.height / 2) * transform.scale;
+            const sampled = sampleClosedSpline(ring.points, 120);
+            if (sampled.length < 2) return null;
+            // Build SVG path with letterbox transform applied to each point.
+            const [first, ...rest] = sampled;
+            const fx = first[0] * transform.scale + transform.offsetX;
+            const fy = first[1] * transform.scale + transform.offsetY;
+            let d = `M ${fx} ${fy}`;
+            for (const [px, py] of rest) {
+              d += ` L ${px * transform.scale + transform.offsetX} ${py * transform.scale + transform.offsetY}`;
+            }
+            d += ' Z';
 
             return (
-              // <G rotation> with origin rotates the ellipse around its own center,
-              // replicating the cv::RotatedRect angle convention.
-              <G key={i} rotation={ring.angle} origin={`${cx}, ${cy}`}>
-                <Ellipse
-                  cx={cx}
-                  cy={cy}
-                  rx={rx}
-                  ry={ry}
-                  fill="none"
-                  stroke={RING_STROKE[i] ?? '#00FF00'}
-                  strokeWidth={1.5}
-                />
-              </G>
+              <Path
+                key={i}
+                d={d}
+                fill="none"
+                stroke={RING_STROKE[i] ?? '#00FF00'}
+                strokeWidth={1.5}
+              />
             );
           })}
         </Svg>

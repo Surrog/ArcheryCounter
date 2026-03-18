@@ -58,3 +58,5 @@ yarn-error.log
 
 # ── Generated artefacts ───────────────────────────────────────
 report.html
+
+postgres/

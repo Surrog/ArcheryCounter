@@ -12,7 +12,7 @@ import { RingOverlay } from '../components/RingOverlay';
 import { useArcheryScorer } from '../useArcheryScorer';
 
 export function HomeScreen() {
-  const { imageUri, rings, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
+  const { imageUri, rings, paperBoundary, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
     useArcheryScorer();
 
   const hasResult = imageUri && rings && imageWidth && imageHeight;
@@ -29,6 +29,7 @@ export function HomeScreen() {
             {/* RingOverlay sits on top and compensates for contain letterboxing */}
             <RingOverlay
               rings={rings}
+              paperBoundary={paperBoundary}
               imageNaturalWidth={imageWidth}
               imageNaturalHeight={imageHeight}
             />

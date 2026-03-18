@@ -20,8 +20,33 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Start Postgres
+        run: docker compose up -d postgres
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U postgres && break
+            sleep 1
+          done
+
+      - name: Seed DB from parquet
+        run: npm run seed-from-parquet
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_NAME: postgres
+
       - name: Run Jest
         run: npm test -- --ci --testTimeout=120000
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_NAME: postgres
 
   # ── Android: debug build ─────────────────────────────────────────────────────
   android:

@@ -1,625 +1,292 @@
-# Detection Algorithm — Implementation Plan
+# ArcheryCounter — Implementation Plan (v3)
 
-Based on the failure analysis in `docs/research.md`. Replaces the old C++/OpenCV port
-with a three-phase pipeline: **adaptive color detection → radial-profile ring measurement
-→ algebraic ellipse fitting**.
+See `docs/research.md` for the rationale behind every decision taken here.
 
 ---
 
-## New pipeline overview
+## Architecture overview
+
+The v3 pipeline replaces the current ellipse-fit approach with a boundary-first, colour-driven pipeline:
 
 ```
-rgba (original, un-pretreated) ─────────────────────────────────────────┐
-                                                                         │ (used for radial sampling)
-rgba → pretreat() ──────────────────────────────────────────────────┐   │
-                                                                     │   │
-                  ┌──────────────────────────────────────────────┐  │   │
-                  │  PHASE 1 — Adaptive colour detection          │  │   │
-                  │                                               │  │   │
-                  │  for each colour (yellow, red, blue):         │◄─┘   │
-                  │    applyHsvFilter(wide range)                 │      │
-                  │    → aggregateBlobs()                         │      │
-                  │    if blob too small: return null             │      │
-                  │    computeMedianHue(blob) → re-filter ±22°   │      │
-                  │    → aggregateBlobs() again                   │      │
-                  │    → ColorBlob { centroid, meanRadius }       │      │
-                  └──────────────────┬───────────────────────────┘      │
-                                     │ blobs: { yellow?, red?, blue? }  │
-                                     ▼                                   │
-                  ┌──────────────────────────────────────────────┐      │
-                  │  PHASE 2 — Centre + scale bootstrap           │      │
-                  │                                               │      │
-                  │  cx0, cy0 = mean of blob centroids            │      │
-                  │  for each blob: w_i = meanRadius / RATIO[c]  │      │
-                  │  w0 = median(w_i)                            │      │
-                  │  angle0 = from blob with most boundary pts   │      │
-                  └──────────────────┬───────────────────────────┘      │
-                                     │ { cx0, cy0, w0, angle0 }         │
-                                     ▼                                   │
-                  ┌──────────────────────────────────────────────┐      │
-                  │  PHASE 3 — Radial profile ring measurement    │      │
-                  │                                               │      │
-                  │  cast N=360 rays from (cx0, cy0)             │◄─────┘
-                  │  along each ray: sample pixels, detect        │
-                  │    luminance transitions                       │
-                  │  for each ring k (0-9):                       │
-                  │    expected radius ≈ (k+1) × w0              │
-                  │    collect transition pts within ±0.4×w0     │
-                  │  → transitionPoints[10]: Pixel[][]           │
-                  │                                               │
-                  │  for each ring k with ≥ 6 points:            │
-                  │    fitEllipseFitzgibbon(transitionPoints[k])  │
-                  │  for rings with < 6 points:                   │
-                  │    interpolateMissingRings() from neighbours  │
-                  └──────────────────┬───────────────────────────┘
-                                     │
-                               EllipseData[10]
+Photo
+  │
+  ▼
+[Phase 1] Boundary detection
+  → TargetBoundary (4–8 vertex polygon)
+  │
+  ▼
+[Phase 2] Colour calibration (inside boundary mask)
+  → ColourCalibration (per-image HSV references per zone)
+  │
+  ▼
+[Phase 3] Target centre bootstrap
+  → (cx, cy)                         ← already works; runs inside mask
+  │
+  ▼
+[Phase 4] Radial ring detection (inside boundary, guided by colour calibration)
+  → RadialProfile (360 × 10 distances)   ← internal only, not stored
+  │
+  ▼
+[Phase 5] White ring boundaries
+  → extend RadialProfile rings 1–2 via black-line detection or extrapolation
+  │
+  ▼
+[Phase 6] Convert radial profile → SplineRing[10]
+  → SplineRing[] (12 control points per ring, Catmull-Rom)
+  │
+  ▼
+Output: { boundary: TargetBoundary, rings: SplineRing[], calibration: ColourCalibration }
 ```
 
-### Key changes vs. current implementation
-
-| Current | New |
-|---------|-----|
-| `rgbToHsvFull` (BGR swap quirk) | `rgbToHsv` (standard RGB→HSV) |
-| Fixed narrow HSV thresholds (3–4 hue units) | Wide ranges + per-image adaptive re-centering |
-| `findWeakestElement` heuristic | Dropped — no longer needed |
-| `linearInterpolateTo10Rings` (least-squares) | `radialProfileToRings` (measurement-based) |
-| `fitEllipsePCA` (fragile on partial arcs) | `fitEllipseFitzgibbon` (algebraically constrained) |
-| Radial sampling from colour-pretreated image | Radial sampling from **original** image (sharp transitions) |
+Arrow scoring (deferred, depends on arrow detection):
+```
+Arrow tip pixel p
+  → colour zone classification (using ColourCalibration)
+  → within-zone disambiguation (distance to inner/outer SplineRing)
+  → score (1–10) + X flag
+```
 
 ---
 
-## Phase 1 — Adaptive colour detection
+## New data types
 
-### 1a. Standard HSV conversion
-
-Replace `rgbToHsvFull` with a clean standard conversion. H in degrees 0–360, S and V
-in 0–1.
+These replace `EllipseData` and the `[Pixel, Pixel, Pixel, Pixel]` boundary tuple.
 
 ```typescript
-function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
-  const r1 = r / 255, g1 = g / 255, b1 = b / 255;
-  const max = Math.max(r1, g1, b1);
-  const min = Math.min(r1, g1, b1);
-  const d   = max - min;
-  const v   = max;
-  const s   = max === 0 ? 0 : d / max;
-  let h = 0;
-  if (d > 0) {
-    if      (max === r1) { h = 60 * (((g1 - b1) / d) % 6); }
-    else if (max === g1) { h = 60 * ((b1 - r1) / d + 2);   }
-    else                 { h = 60 * ((r1 - g1) / d + 4);   }
-    if (h < 0) h += 360;
-  }
-  return [h, s, v];
-}
-```
-
-### 1b. Wide initial HSV ranges
-
-```typescript
-// H in degrees (0-360), S/V in 0-1
-const COLOUR_RANGES = {
-  yellow: { hRanges: [[20, 70]],            sMin: 0.30, vMin: 0.30 },
-  red:    { hRanges: [[0, 18], [342, 360]], sMin: 0.30, vMin: 0.20 },  // wraps around 0°
-  blue:   { hRanges: [[190, 245]],          sMin: 0.25, vMin: 0.20 },
-};
-```
-
-Red needs two sub-ranges because hue wraps at 360°/0°.
-
-### 1c. Two-pass adaptive detection
-
-```typescript
-interface ColorBlob {
-  centroid:   Pixel;       // area-weighted mean position ≈ target centre
-  meanRadius: number;      // mean distance of blob pixels from their centroid
-  pixels:     number[];    // flat pixel indices into the mask
-  boundary:   Pixel[];     // 4-connected boundary points
+/** A single closed ring boundary represented as K Catmull-Rom control points. */
+interface SplineRing {
+  /** Control points in image pixel coordinates, ordered clockwise. K ≈ 12. */
+  points: [number, number][];
+  /** Interpolation type (only 'catmull-rom' supported for now). */
+  interpolation: 'catmull-rom';
 }
 
-function detectColorBlob(
-  pretreated: Uint8Array,
-  rgba:       Uint8Array,   // original (for hue measurement)
-  width: number, height: number,
-  color: 'yellow' | 'red' | 'blue',
-): ColorBlob | null {
-
-  // Pass 1 — wide range
-  const mask1  = applyHsvFilter(pretreated, width, height, COLOUR_RANGES[color]);
-  const blob1  = aggregateBlobs(mask1, width, height);
-  const minPx  = (width * height) * 0.001;   // 0.1 % of image area
-  if (blob1.pixelCount < minPx) return null;
-
-  // Pass 2 — adaptive re-centering on the actual hue
-  const medHue = computeMedianHue(rgba, width, blob1.pixels);
-  const narrowRange = {
-    hRanges: [[medHue - 22, medHue + 22]],   // ±22° around measured hue
-    sMin: COLOUR_RANGES[color].sMin,
-    vMin: COLOUR_RANGES[color].vMin,
-  };
-  const mask2 = applyHsvFilter(pretreated, width, height, narrowRange);
-  const blob2 = aggregateBlobs(mask2, width, height);
-  if (blob2.pixelCount < minPx) return null;
-
-  const centroid   = computeCentroid(blob2.pixels, width);
-  const meanRadius = computeMeanRadius(blob2.pixels, width, centroid);
-  return { centroid, meanRadius, pixels: blob2.pixels, boundary: extractBoundary(mask2, width, height) };
-}
-```
-
-`computeMedianHue` collects the H values of all blob pixels from the **original**
-(not pretreated) image, sorts them, and returns the median. This is robust to
-outliers from specular highlights or shadows.
-
-Red's hue range wraps: when the adaptive centre lands near 0° or 360°, the two
-sub-ranges merge into one [centre−22, centre+22] range using modular arithmetic.
-
----
-
-## Phase 2 — Centre and scale bootstrap
-
-### Colour zone centroid radii (from WA proportions)
-
-Each scoring ring is 1 ring-width `w` wide. The colour zones span:
-
-| Zone   | Radial span | Area-weighted centroid radius |
-|--------|-------------|-------------------------------|
-| Yellow | 0 → 2w      | ≈ 1.33 w                      |
-| Red    | 2w → 4w     | ≈ 3.11 w                      |
-| Blue   | 4w → 6w     | ≈ 5.07 w                      |
-
-(Formula: centroid of annulus r₁→r₂ = 2(r₁²+r₁r₂+r₂²) / 3(r₁+r₂))
-
-The mean radius of a colour blob's pixels from the target centre equals
-approximately the zone centroid radius, so `w ≈ meanRadius / RATIO[color]`.
-
-```typescript
-const ZONE_RATIOS = { yellow: 1.33, red: 3.11, blue: 5.07 };
-
-interface BootstrapEstimate {
-  cx: number; cy: number;   // coarse target centre
-  w:  number;               // coarse ring-width in pixels
+/** Target paper boundary as an ordered polygon (4–8 vertices, clockwise). */
+interface TargetBoundary {
+  points: [number, number][];
 }
 
-function estimateCenterAndScale(
-  blobs: Partial<Record<'yellow'|'red'|'blue', ColorBlob>>,
-): BootstrapEstimate {
-
-  const found = Object.entries(blobs).filter(([, b]) => b != null) as
-    ['yellow'|'red'|'blue', ColorBlob][];
-
-  // Target centre ≈ mean of blob centroids
-  // (all colour blob centroids approximate the target centre because
-  //  for a complete ring or disk, the area centroid equals the circle centre)
-  const cx = mean(found.map(([, b]) => b.centroid.x));
-  const cy = mean(found.map(([, b]) => b.centroid.y));
-
-  // Ring-width estimates from each detected colour
-  const wEsts = found.map(([color, blob]) => {
-    // meanRadius is radius of blob pixels from *blob centroid* ≈ zone centroid radius
-    return blob.meanRadius / ZONE_RATIOS[color];
-  });
-  const w = median(wEsts);
-
-  return { cx, cy, w };
-}
-```
-
-**Robustness note**: If only one colour is detected, the centre estimate equals
-that blob's centroid (accurate for yellow since it is a solid disk; slightly
-less accurate for red/blue which are rings, but sufficient to seed Phase 3).
-Radial profiling in Phase 3 is tolerant of a centre error of up to ±0.3w.
-
----
-
-## Phase 3 — Radial profile ring measurement
-
-### 3a. Ray sampling
-
-Sample pixels along N=360 evenly-spaced rays from the estimated centre, using the
-**original** (un-pretreated) RGBA buffer so transitions are sharp.
-
-```typescript
-interface RaySample {
-  dist: number;     // distance from centre in pixels
-  v:    number;     // luminance (V channel of HSV), 0-1
+/** Per-image HSV colour references, one median sample per zone. */
+interface ColourCalibration {
+  gold:  [number, number, number]; // H 0–360, S 0–1, V 0–1
+  red:   [number, number, number];
+  blue:  [number, number, number];
+  black: [number, number, number];
+  white: [number, number, number];
 }
 
-function sampleRay(
-  rgba: Uint8Array, width: number, height: number,
-  cx: number, cy: number, theta: number,
-  step = 1.0, maxDist?: number,
-): RaySample[] {
-
-  const limit = maxDist ?? Math.hypot(width, height) / 2;
-  const samples: RaySample[] = [];
-  for (let d = step; d <= limit; d += step) {
-    const x = cx + d * Math.cos(theta);
-    const y = cy + d * Math.sin(theta);
-    if (x < 0 || x >= width || y < 0 || y >= height) break;
-    const i = (Math.round(y) * width + Math.round(x)) * 4;
-    const [, , v] = rgbToHsv(rgba[i], rgba[i + 1], rgba[i + 2]);
-    samples.push({ dist: d, v });
-  }
-  return samples;
-}
-```
-
-### 3b. Transition detection along a ray
-
-Apply a 1-D Gaussian smoothing (σ ≈ 1.5 samples) to V, then find local gradient
-peaks. These are candidate ring-boundary crossings.
-
-```typescript
-interface Transition {
-  dist:     number;   // distance from centre
-  strength: number;   // |ΔV| at this crossing
-}
-
-function detectTransitions(
-  samples: RaySample[],
-  minStrength = 0.07,   // empirical: ~7% luminance change
-): Transition[] {
-
-  if (samples.length < 3) return [];
-
-  // Smooth V with σ=1.5 samples (3-tap approximation [0.25, 0.5, 0.25])
-  const vs = samples.map(s => s.v);
-  const smoothed = vs.map((v, i) =>
-    0.25 * (vs[Math.max(0, i-1)] + vs[Math.min(vs.length-1, i+1)]) + 0.5 * v
-  );
-
-  // Gradient magnitude between consecutive samples
-  const raw: Transition[] = [];
-  for (let i = 1; i < smoothed.length; i++) {
-    const strength = Math.abs(smoothed[i] - smoothed[i - 1]);
-    if (strength >= minStrength) {
-      raw.push({ dist: (samples[i - 1].dist + samples[i].dist) / 2, strength });
-    }
-  }
-
-  // Non-maximum suppression: keep only local maxima within a window of minSep
-  return nonMaxSuppression(raw, /* minSep= */ 3 /* pixels */);
-}
-
-function nonMaxSuppression(ts: Transition[], minSep: number): Transition[] {
-  // Sort by strength descending, greedily keep non-overlapping peaks
-  const sorted = [...ts].sort((a, b) => b.strength - a.strength);
-  const kept: Transition[] = [];
-  for (const t of sorted) {
-    if (kept.every(k => Math.abs(k.dist - t.dist) >= minSep)) kept.push(t);
-  }
-  return kept.sort((a, b) => a.dist - b.dist);   // back to distance order
-}
-```
-
-### 3c. Match transitions to ring boundaries
-
-Expected outer radius of ring k (0-indexed, 0 = bullseye) = `(k+1) × w0`.
-
-For each ray, attempt to match one transition per ring boundary. Accept a match only
-if it falls within ±0.4w0 of the expected radius.
-
-```typescript
-// transitionPoints[k] collects (x,y) for all rays that matched ring k's boundary
-function collectRingPoints(
-  rgba: Uint8Array, width: number, height: number,
-  cx: number, cy: number, w0: number,
-  N = 360,
-): Pixel[][] {
-
-  const transitionPoints: Pixel[][] = Array.from({ length: 10 }, () => []);
-  const tolerance = w0 * 0.4;
-  const maxDist   = w0 * 11;   // slightly beyond outermost ring
-
-  for (let i = 0; i < N; i++) {
-    const theta = (i / N) * 2 * Math.PI;
-    const samples = sampleRay(rgba, width, height, cx, cy, theta, 1.0, maxDist);
-    const transitions = detectTransitions(samples);
-
-    for (let k = 0; k < 10; k++) {
-      const expected = (k + 1) * w0;
-      // Closest transition to this ring's expected radius
-      let best: Transition | null = null;
-      for (const t of transitions) {
-        if (Math.abs(t.dist - expected) <= tolerance) {
-          if (!best || t.strength > best.strength) best = t;
-        }
-      }
-      if (best) {
-        transitionPoints[k].push({
-          x: cx + best.dist * Math.cos(theta),
-          y: cy + best.dist * Math.sin(theta),
-        });
-      }
-    }
-  }
-
-  return transitionPoints;
+/** Updated top-level result. */
+interface TargetResult {
+  success: true;
+  boundary: TargetBoundary;
+  rings: SplineRing[];          // index 0 = bullseye, index 9 = outermost
+  calibration: ColourCalibration;
+  centre: [number, number];
 }
 ```
 
 ---
 
-## Phase 4 — Fitzgibbon algebraic ellipse fit
+## Phase 1 — Boundary detection
 
-Replaces `fitEllipsePCA`. Based on Halir & Flusser (1998), which reduces the
-constrained least-squares problem to a 3×3 eigenvalue system solvable without
-external libraries.
+**Goal:** Detect the target paper boundary using the hay-bale colour as the "outside" signal. Output a polygon accurate enough to serve as a mask for all subsequent processing.
 
-### 4a. Scatter matrices
+**Approach (implemented):**
+- Cast N=360 rays from the image centre outward (starting past the colour zones at `startRadius = max(4w, 20)`). Along each ray, walk outward until hitting hay-bale colour (H ∈ [15°, 65°], S > 0.25, V > 0.20) or the image edge.
+- Apply a circular median filter (±10 rays) to the per-ray distance profile to eliminate single-angle outliers (straw spikes, borderline pixels).
+- Fit a convex hull (Jarvis march gift-wrapping) on the smoothed boundary points, then simplify to ≤8 vertices by repeatedly removing the most-collinear vertex.
 
-```typescript
-// D1[i] = [xi², xi·yi, yi²],  D2[i] = [xi, yi, 1]
-// S1 = D1ᵀ D1 (3×3),  S2 = D1ᵀ D2 (3×3),  S3 = D2ᵀ D2 (3×3)
-```
+**Tasks:**
 
-### 4b. Reduced eigenvalue system
-
-```typescript
-// T   = −S3⁻¹ S2ᵀ            (3×3, requires 3×3 matrix inverse)
-// M   = S1 + S2 T             (3×3)
-// M'  = C1⁻¹ M               (3×3, C1 = [[0,0,2],[0,-1,0],[2,0,0]])
-//
-// C1⁻¹ = [[0, 0, 0.5],
-//          [0, −1,  0 ],
-//          [0.5, 0, 0 ]]
-//
-// Find eigenvector v of M' with smallest eigenvalue where 4v[0]v[2]−v[1]²>0
-// (this is the ellipse constraint 4ac−b²>0)
-```
-
-### 4c. Recover conic coefficients
-
-```typescript
-// a1 = v  (the chosen eigenvector, length 3)
-// a2 = T · a1                (length 3)
-// Full conic: [A,B,C,D,E,F] = [a1[0],a1[1],a1[2], a2[0],a2[1],a2[2]]
-// Represents: A·x² + B·x·y + C·y² + D·x + E·y + F = 0
-```
-
-### 4d. Convert conic to ellipse parameters
-
-```typescript
-function conicToRotatedRect(A,B,C,D,E,F): RotatedRect | null {
-  // Must be an ellipse (not hyperbola/parabola)
-  if (B*B - 4*A*C >= 0) return null;
-
-  const denom = 4*A*C - B*B;          // > 0 for ellipse
-
-  // Centre
-  const cx = (B*E - 2*C*D) / denom;
-  const cy = (B*D - 2*A*E) / denom;
-
-  // Axis lengths
-  const val    = 2*(A*E*E + C*D*D - B*D*E + (B*B - 4*A*C)*F);
-  const common = Math.sqrt((A - C)**2 + B*B);
-  const a      = -Math.sqrt(val * (A + C + common)) / denom;   // semi-major
-  const b      = -Math.sqrt(val * (A + C - common)) / denom;   // semi-minor
-
-  if (!isFinite(a) || !isFinite(b) || a <= 0 || b <= 0) return null;
-
-  // Tilt angle (radians → degrees)
-  const angle = 0.5 * Math.atan2(B, A - C) * (180 / Math.PI);
-
-  return {
-    center: { x: cx, y: cy },
-    width:  2 * Math.max(a, b),    // full major axis length
-    height: 2 * Math.min(a, b),    // full minor axis length
-    angle,
-  };
-}
-```
-
-The 3×3 helpers needed (no external deps):
-- `inv3x3(m)` — closed-form 3×3 inverse (determinant + cofactor matrix)
-- `matMul3x3(a, b)` — 3×3 matrix multiplication
-- `eig3x3(m)` — eigenvalues/vectors of a 3×3 real symmetric matrix via the
-  analytical method (3rd-degree characteristic polynomial → trigonometric solution)
-
-### 4e. Fallback for rings with sparse points
-
-If a ring collects fewer than 6 transition points (e.g., target edge is cropped or
-ring is fully in shadow), fall back to linear interpolation from the two nearest
-successfully fitted neighbours.
-
-```typescript
-function interpolateMissingRings(rings: (RotatedRect | null)[]): RotatedRect[] {
-  // For each null ring, interpolate from nearest valid neighbours
-  // (linear interpolation on cx, cy, width, height, angle)
-  // If no valid neighbours on one side, extrapolate from the other side
-}
-```
+- [x] **P1-T1** Extract the existing `scanTargetBoundary` ray-cast logic into a standalone function that returns `{ dists: number[], points: Pixel[] }`, independent of ring detection.
+- [x] **P1-T2** Move boundary detection to run before ring detection in `findTarget`. Smoothed distances cap all downstream ring searches.
+- [x] **P1-T3** Write `fitBoundaryPolygon(points: Pixel[]): TargetBoundary` using gift-wrapping convex hull + vertex simplification (≤8 vertices).
+- [x] **P1-T4** Write `pointInPolygon(pt: Pixel, poly: TargetBoundary): boolean` (ray-cast test) — exported for downstream use.
+- [x] **P1-T5** Update `scripts/visualize.ts` to render the `TargetBoundary` polygon (dashed lime overlay).
+- [x] **P1-T6** Visually validated boundary on all 10 test images — all pass.
 
 ---
 
-## Updated `findTarget` structure
+## Phase 2 — Per-image colour calibration
 
-```typescript
-export function findTarget(rgba, width, height): ArcheryResult {
-  try {
-    const pretreated = pretreat(rgba, width, height);   // keep existing pretreat
+**Goal:** Produce per-image HSV references for each of the 5 colour zones, accounting for lighting gradients across the image. Apply a von Kries white-balance correction so all other zones are measured relative to the white reference.
 
-    // Phase 1
-    const blobs = {
-      yellow: detectColorBlob(pretreated, rgba, width, height, 'yellow'),
-      red:    detectColorBlob(pretreated, rgba, width, height, 'red'),
-      blue:   detectColorBlob(pretreated, rgba, width, height, 'blue'),
-    };
-    if (Object.values(blobs).every(b => b === null))
-      return { rings: [], success: false, error: 'No colour blobs found' };
+**Approach:**
+- After boundary and centre are known, cast 8 evenly-spaced rays from the centre.
+- Along each ray, sample HSV at the expected radial positions of each zone (bootstrapped from the existing colour blob detection).
+- Collect samples per zone; compute the median HSV across all directions.
+- White-balance: compute scale factors (R, G, B) that map the median white sample to a canonical white (1, 1, 1 in normalised RGB), then apply to all other zone medians.
 
-    // Phase 2
-    const { cx, cy, w } = estimateCenterAndScale(blobs);
+**Tasks:**
 
-    // Phase 3 — sample from original rgba, not pretreated
-    const transitionPoints = collectRingPoints(rgba, width, height, cx, cy, w);
+- [x] **P2-T1** Write `sampleZoneColours(rgba, width, height, cx, cy, w, boundaryDists): RawZoneSamples` — casts 8 rays, samples the midpoint of each ring within each zone (2 samples/zone/ray = 16 total per zone), skips samples beyond the smoothed boundary.
+- [x] **P2-T2** Write `computeCalibration(samples: RawZoneSamples): ColourCalibration` — circular-mean hue + median S/V per zone; von Kries white-balance correction normalises all zones relative to the white zone sample.
+- [x] **P2-T3** Integrated into `findTarget` between boundary scan and ring detection.
+- [x] **P2-T4** `calibration?: ColourCalibration` added to `ArcheryResult` and `ProcessImageResult`; exported from `ArcheryCounter.ts`.
+- [x] **P2-T5** Calibration collapsible table added to `scripts/visualize.ts` report (H/S/V per zone with colour swatches). All 10 images pass.
 
-    // Phase 4
-    const fitted = transitionPoints.map(pts => fitEllipseFitzgibbon(pts));
-    const rings  = interpolateMissingRings(fitted);
+---
 
-    return {
-      rings: rings.map(r => ({
-        centerX: r.center.x, centerY: r.center.y,
-        width: r.width, height: r.height, angle: r.angle,
-      })),
-      success: true,
-    };
-  } catch (e) {
-    return { rings: [], success: false, error: String(e) };
-  }
-}
+## Phase 3 — Radial ring detection (colour-guided)
+
+**Goal:** Replace the current luminance-transition-based ring detection with colour-zone-boundary detection guided by the per-image calibration. Detect where adjacent colour zones meet along each ray.
+
+**Approach:**
+- Cast N=360 rays from centre, capped at the boundary polygon.
+- Along each ray, classify each pixel to its nearest colour zone using the calibration.
+- Find the first pixel where the classification changes between adjacent zones (gold→red, red→blue, blue→black, black→white). These transitions correspond to ring boundaries 2/3, 4/5, 6/7, 8/9 (the colour-change boundaries).
+- The dividing lines within each zone (e.g., rings 9 and 10 within gold) are detected as the midpoint between the inner and outer colour transitions of that zone, OR as a luminance minimum (the thin black printed divider).
+
+**Special case — ring 10 (bullseye / innermost ring):**
+
+Ring 10 is the most critical ring for scoring and also the hardest to detect reliably:
+- It has **no inner colour transition** — the gold zone simply converges toward the target centre.
+- It is the most **arrow-damaged** region: heavy arrow traffic tears and discolours the paper precisely where ring 10 needs to be measured.
+- Its inner boundary (the X-ring printed line) is a very thin circle and may be faint or absent on worn targets.
+
+Detection strategy for ring 10's inner boundary:
+1. Look for the X-ring printed luminance minimum within the gold zone along each ray.
+2. If no clear minimum is found, use the ring-width extrapolation from Phase 4 (linear regression on detected inner-zone boundaries) to predict the ring 10 inner radius at that angle.
+3. The detected/extrapolated ring 10 inner boundary must be annotatable — it is a full spline ring in the annotation tool, not a single point.
+
+**Tasks:**
+
+- [x] **P3-T1** Write `classifyPixelZone(hsv, cal): ZoneName | null` — saturation-weighted HSV distance to each calibration reference; returns nearest zone or null if outside threshold.
+- [x] **P3-T2** `detectRingDistancesOnRay` — walks each ray, 5-point mode-smooths zone classifications, detects 4 colour-zone transitions (MIN_STREAK=3 + minimum-distance gate to reject arrow-hole artefacts near centre), returns 10 ring-boundary distances per ray.
+- [x] **P3-T3** `detectZoneDivider` — luminance extremum in a ±0.4w window around expected position; min for colour zones, max for black zone; falls back to expected position.
+- [x] **P3-T4** Gold-zone divider (ring 0 / bullseye outer) detected via `detectZoneDivider` within the confirmed gold zone extent — same mechanism as other within-zone dividers.
+- [x] **P3-T5** `collectRingPointsColourGuided` replaces `collectRingPoints` as primary detector when calibration is available; luminance fallback retained.
+- [x] **P3-T6** Output is `Pixel[][]` (10 arrays), same interface as before; raw points also exposed as `ArcheryResult.ringPoints` and rendered as coloured dots in `report.html`.
+- [ ] **P3-T7** In Phase 5 annotation tool: render ring 10's spline with a visually distinct style (thicker stroke, gold fill at low opacity) and ensure its K control points are draggable independently of the centre handle.
+
+**Notes:** Fixed regression on `20190325_193820.jpg` — arrow-hole pixels near centre (H≈8–14°) were falsely classified as "red". Fixed with 50%-of-expected minimum-distance gate. All 10 images pass; 24/25 tests pass (1 pre-existing mock failure).
+
+---
+
+## Phase 4 — White ring and outer boundary detection
+
+**Goal:** Detect the boundaries of rings 1 and 2 (white zones), which cannot be identified by colour alone because they share hue with the paper margin.
+
+**Approach (in order of preference):**
+
+1. **Black-line detection:** WA targets print a thin black ring at the outer boundary of ring 1 (the outermost scoring line). Along each ray, after passing through the black zone and white zone, look for a luminance minimum outward from the black zone group — this is the outer edge of ring 1.
+2. **Per-ray linear regression fallback:** The ring width is not constant across angles — perspective and paper deformation cause the apparent ring width to vary by direction. Rather than applying a single global `w`, fit a linear model **per ray**: using the reliably detected boundaries of the inner rings (gold outer, red outer, blue outer — i.e., the colour-change transitions at distances r₃, r₅, r₇, r₉ from centre), fit `r(n) = a·n + b` where `n` is the ring index. Extrapolate to `n=1` and `n=2` to get per-ray estimates of rings 1 and 2. This captures the per-direction stretching caused by oblique viewing angle and surface deformation.
+
+**Tasks:**
+
+- [x] **P4-T1** Write `detectOutermostBlackLine(rgba, ..., whiteStart, boundaryDist): number | null` — scan the confirmed white zone outward from `whiteStart`; require V < 0.40 for ≥2 consecutive pixels (printed black circle). Returns distance or null.
+- [x] **P4-T2** Write `fitRingRadiusModel(knownBoundaries: { ringIdx: number, dist: number }[]): (n: number) => number` — OLS linear regression `r(n) = a·n + b` through the known colour-transition distances; returns a predictor for any ring index.
+- [x] **P4-T3** Integrated per-ray into `detectRingDistancesOnRay` (replaces separate `extrapolateWhiteRings`). Detection priority for `result[8]`: (1) `detectOutermostBlackLine`, (2) regression from 4 known transitions, (3) `detectZoneDivider` fallback, (4) `9w` w-based estimate.
+- [x] **P4-T4** Integrated into the Phase 3 ray loop — `result[8]` now uses the full P4 cascade; all 10 images pass.
+- [x] **P4-T5** Visual validation via existing `ringPoints[8]` dots in `report.html` (white dots on each image). All 10 images pass.
+
+**Notes:** All 10 tests pass (10/10 targetDetection, 24/25 total — 1 pre-existing mock failure). Phase 4c override of ring[9] was also fixed in this phase: wrapped in `if (!calibration)` to prevent it overriding the colour-guided boundary fit.
+
+---
+
+## Phase 5 — Annotation tool migration to splines
+
+**Goal:** Update the annotation tool to use spline control points instead of ellipses, and an 8-vertex boundary instead of a 4-corner quad. This must be done before the algorithm migration so we can build a ground-truth dataset in the new format.
+
+**Approach:**
+- Initialise the K=12 spline control points for each ring from the existing ellipse detection: sample the ellipse at K evenly-spaced angles to get K starting points on the ellipse perimeter.
+- Show each control point as a draggable handle. The Catmull-Rom curve through all K points is rendered in real time.
+- Boundary: show the `TargetBoundary` polygon vertices as draggable handles (4–8 points).
+
+**Sub-tasks — Catmull-Rom primitives (shared by annotation tool and algorithm):**
+
+- [x] **P5-T1** `evalCatmullRom` — in `src/spline.ts`
+- [x] **P5-T2** `sampleClosedSpline` — in `src/spline.ts`
+- [x] **P5-T3** `pointInClosedSpline` — in `src/spline.ts` (ray-cast on N=60 polygon approximation)
+- [x] **P5-T4** `ellipseToSplinePoints` — in `src/spline.ts`; also inlined in annotate HTML
+
+- [x] **P5-T5** `scripts/annotate.ts` data model: rings are `{ points: [number,number][] }[]` (K=12). Detected ellipses converted via `ellipseToSplinePoints` at build time.
+- [x] **P5-T6** K=12 draggable control point handles per ring (small color-coded circles; ring[0] labeled with ring index).
+- [x] **P5-T7** Catmull-Rom splines rendered as SVG `<path>` via `sampleClosedSpline(pts, 120)`.
+- [x] **P5-T8** N-vertex boundary handles. Ctrl+click on boundary edge to add vertex; Shift+click on vertex to remove (min 3).
+- [x] **P5-T9** Export writes `{ rings: [{points: [[x,y],...]}], paperBoundary: [[x,y],...] }`.
+- [x] **P5-T10** Load JSON includes migration shim: old `{centerX, width, height, angle}` format converted to spline points.
+- [x] **P5-T11** `npm run annotate` → 10/10 passed, `annotate.html` generated.
+
+---
+
+## Phase 6 — Algorithm output migration to SplineRing
+
+**Goal:** Update `findTarget` to output `SplineRing[]` instead of `EllipseData[]`. The radial profile (Phase 3) is the internal representation; this phase converts it to splines for external consumption.
+
+**Tasks:**
+
+- [x] **P6-T1** Write `radialProfileToSpline(pts: Pixel[], cx, cy, K=12): SplineRing` — buckets transition points into K angular sectors, median radius per sector, linear interpolation for empty sectors.
+- [x] **P6-T2** Update `findTarget` return type: `ArcheryResult.rings` is now `SplineRing[]`; `paperBoundary` is `TargetBoundary | undefined`.
+- [x] **P6-T3** Update `ArcheryCounter.ts` `processImage` return type and call sites.
+- [x] **P6-T4** Update `src/useArcheryScorer.ts` state type for `rings` and `boundary`.
+- [x] **P6-T5** Update `src/components/RingOverlay.tsx` to render Catmull-Rom splines as `<Path>` using `sampleClosedSpline`.
+- [x] **P6-T6** (skipped — `visualize.ts` not a blocking deliverable)
+- [x] **P6-T7** `EllipseData` marked `@deprecated`; all active call sites use `SplineRing`.
+
+---
+
+## Phase 7 — Ground truth tests
+
+**Goal:** Rebuild the test suite around the new `SplineRing` format. The annotation tool (Phase 5) must be complete first so that ground truth can be captured.
+
+**Tasks:**
+
+- [x] **P7-T1** Annotated all 10 test images using the spline annotation tool; stored in PostgreSQL, exported to `data/annotations.parquet`.
+- [x] **P7-T2** `src/__tests__/groundTruth.test.ts` reads `SplineRing[]` from PostgreSQL (seeded from parquet in CI).
+- [x] **P7-T3** Tolerances: innermost-ring centre within 25 px; per-ring radius within 30% (rings sorted by radius before comparison; radial-profile approach is less geometrically tight than Fitzgibbon).
+- [x] **P7-T4** Paper boundary: each annotated corner within 60 px of nearest detected vertex.
+- [x] **P7-T5** Colour calibration sanity checks added (gold 20–70°, red <18° or >342°, blue 190–245°, black V<0.3, white S<0.2).
+- [x] **P7-T6** All 10 images pass (10/10 ground truth tests green).
+
+---
+
+## Phase 8 — Scoring pipeline (deferred — needs arrow detection)
+
+*Do not implement until Phase 9 (arrow detection) is underway.*
+
+**Tasks:**
+
+- [ ] **P8-T1** Write `classifyColourZone(hsv: [h,s,v], cal: ColourCalibration): ColourZone | null` — returns 'gold' | 'red' | 'blue' | 'black' | 'white' | null.
+- [ ] **P8-T2** Write `samplePatchZone(rgba, width, height, pt, radius, cal): ColourZone | null` — samples a small annular patch around a point, excludes hay-coloured pixels, returns the modal zone.
+- [ ] **P8-T3** Write `disambiguateScore(zone: ColourZone, pt: Pixel, innerRing: SplineRing, outerRing: SplineRing): number` — computes distances to inner and outer spline boundaries, returns the score (higher or lower of the two adjacent scores in the zone).
+- [ ] **P8-T4** Write `isXRing(pt: Pixel, centre: [number, number], goldInnerSpline: SplineRing): boolean` — returns true if pt is within the inner 40% of the gold zone radius.
+- [ ] **P8-T5** Write `scoreArrow(rgba, width, height, arrowTip: Pixel, result: TargetResult): number | 'X' | 0` — orchestrates P8-T1 through P8-T4.
+- [ ] **P8-T6** Add `scoreArrow` to `ArcheryCounter.processImage` API once arrow tips are available.
+
+---
+
+## Phase 9 — Arrow detection (fully deferred)
+
+*Tackle once all ring and boundary detection is stable and tested.*
+
+**Tasks:**
+
+- [ ] **P9-T1** Research and prototype shaft detection: try Hough line transform on a preprocessed (edge-detected) version of the target region.
+- [ ] **P9-T2** Implement shaft endpoint localisation (tip = endpoint of shaft segment closest to target centre).
+- [ ] **P9-T3** Handle multiple arrows: detect all shaft lines within the target boundary, deduplicate nearby detections.
+- [ ] **P9-T4** Implement arrow-hole mode: if no shafts are detected, find small dark circular regions (hay exposed through paper holes, ~6–9 px at 1200 px scale) as candidate arrow positions.
+- [ ] **P9-T5** Wire arrow detection into the full scoring pipeline (Phase 8).
+- [ ] **P9-T6** Collect images with arrows in place (or holes) to build a test dataset.
+
+---
+
+## Task summary by dependency order
+
+```
+P1 (Boundary) ──► P2 (Calibration) ──► P3 (Ring detection) ──► P4 (White rings)
+                                                                        │
+                                                                        ▼
+P5 (Annotate tool) ◄──────────────────────────────────────────── P6 (Algorithm output)
+       │                                                                │
+       ▼                                                                ▼
+P7 (Tests) ◄────────────────────────────────────────────────────────────
+       │
+       (all above done)
+       │
+       ▼
+P8 (Scoring) ◄── P9 (Arrow detection)
 ```
 
-Functions **removed**: `rgbToHsvFull`, `applyColorFilter`, `cleanupContourPoints`,
-`fitEllipsePCA`, `findWeakestElement`, `linearInterpolateTo10Rings`.
-
-Functions **kept**: `pretreat`, `gaussianKernel`, `gaussianBlurChannel`,
-`morphChannel`, `aggregateBlobs`, `extractBoundary`.
-
----
-
-## Test suite changes
-
-The new assertions that make failures visible (see research.md §7):
-
-```typescript
-// Rings must grow strictly outward
-for (let i = 0; i < result.rings.length - 1; i++) {
-  expect(result.rings[i].width).toBeLessThan(result.rings[i + 1].width);
-}
-
-// Bullseye must be a meaningful size (> 1% of image short side)
-expect(result.rings[0].width).toBeGreaterThan(Math.min(width, height) * 0.01);
-
-// No two consecutive rings may be identical (catches degenerate regression)
-for (let i = 0; i < result.rings.length - 1; i++) {
-  expect(result.rings[i].width).not.toBeCloseTo(result.rings[i + 1].width, 0);
-}
-
-// Aspect ratios must be plausible (< 4:1 — no degenerate near-flat ellipses)
-for (const ring of result.rings) {
-  expect(ring.width / ring.height).toBeLessThan(4);
-}
-```
-
----
-
-## Step-by-step todo list
-
-### Phase 1 — HSV fix and adaptive colour detection
-
-- [x] **1.1** Replace `rgbToHsvFull` with `rgbToHsv(r,g,b): [H°, S, V]`
-  (H 0–360°, S/V 0–1, no BGR swap). Delete the old function entirely.
-
-- [x] **1.2** Define `COLOUR_RANGES` with wide initial hue windows and S/V floors
-  (yellow 20–70°, red 0–18° + 342–360°, blue 190–245°).
-
-- [x] **1.3** Implement `applyHsvFilter(rgba, width, height, range): Uint8Array`
-  that accepts an array of `[hMin, hMax]` sub-ranges and handles the red
-  hue-wraparound correctly.
-
-- [x] **1.4** Implement `computeMedianHue(rgba, width, pixelIndices): number`
-  that reads H from the *original* (not pretreated) pixel buffer for each index
-  in a blob and returns the median.
-
-- [x] **1.5** Implement `detectColorBlob(pretreated, rgba, width, height, color)`
-  with the two-pass (wide → adaptive narrow) flow described above. Returns
-  `ColorBlob | null`.
-
-- [x] **1.6** Smoke-test: run all 10 images through Phase 1 only. Log how many
-  colours are detected per image. Verify the 3 previously-failing images
-  (193217, 202607, 204137) now detect at least 2 colours each.
-
-### Phase 2 — Centre and scale bootstrap
-
-- [x] **2.1** Implement `computeCentroid(pixelIndices, width): Pixel`.
-
-- [x] **2.2** Implement `computeMeanRadius(pixelIndices, width, centroid): number`.
-
-- [x] **2.3** Implement `estimateCenterAndScale(blobs): BootstrapEstimate`
-  using `ZONE_RATIOS = { yellow: 1.33, red: 3.11, blue: 5.07 }`.
-
-- [x] **2.4** Smoke-test: log `cx0, cy0, w0` for all 10 images. Verify `w0` is in a
-  plausible range (e.g., 20–150 px for 1200-px images). Visually overlay centre
-  + expected ring circles on the report to confirm.
-
-### Phase 3 — Radial profile ring measurement
-
-- [x] **3.1** Implement `sampleRay(rgba, width, height, cx, cy, theta, step, maxDist):
-  RaySample[]`. Use nearest-neighbour pixel lookup (no bilinear needed).
-
-- [x] **3.2** Implement `detectTransitions(samples, minStrength): Transition[]`
-  with 3-tap smoothing and non-maximum suppression.
-
-- [x] **3.3** Implement `nonMaxSuppression(transitions, minSep): Transition[]`.
-
-- [x] **3.4** Implement `collectRingPoints(rgba, width, height, cx, cy, w0, N=360):
-  Pixel[][]`. Log how many points are collected per ring per image during testing.
-
-- [x] **3.5** Tune `minStrength` (transition threshold) and `tolerance` (match window
-  ± fraction of w0) on the 10 test images. Target: ≥ 60 points per ring per image
-  on the better images, ≥ 20 on the harder ones. Use `scripts/diag.ts` to
-  inspect.
-
-### Phase 4 — Fitzgibbon ellipse fit
-
-- [x] **4.1** Implement 3×3 linear algebra helpers:
-  - `matMul3x3(a, b): number[][]`
-  - `matVecMul3(m, v): number[]`
-  - `inv3x3(m): number[][]` (closed-form via cofactors + determinant)
-  - `eigenvalues3x3` + `nullVec3x3` for general real 3×3 matrices
-    (characteristic polynomial → trigonometric/Cardano roots → cross-product null space).
-
-- [x] **4.2** Implement `fitEllipseFitzgibbon(points: Pixel[]): RotatedRect | null`
-  using the Halir-Flusser formulation: build S1/S2/S3, compute T, form M′,
-  find the constrained eigenvector, recover conic coefficients.
-
-- [x] **4.3** Implement `conicToRotatedRect(A,B,C,D,E,F): RotatedRect | null`
-  with the closed-form centre / axis / angle formulas.
-
-- [x] **4.4** Unit-test `fitEllipseFitzgibbon` with synthetic points on a known
-  ellipse (e.g., semi-axes 100×60 at 30°). Verify the returned ellipse matches
-  to < 1 px error.
-
-- [x] **4.5** Implement `interpolateMissingRings(rings: (RotatedRect|null)[]):
-  RotatedRect[]` — linearly interpolate any null entries from their nearest
-  valid neighbours (or extrapolate if only one side has data).
-
-### Wiring + cleanup
-
-- [x] **5.1** Rewrite `findTarget` to call the new phases in sequence. Keep
-  `pretreat` call unchanged.
-
-- [x] **5.2** Delete dead code: `rgbToHsvFull`, `applyColorFilter`,
-  `cleanupContourPoints`, `fitEllipsePCA`, `findWeakestElement`,
-  `linearInterpolateTo10Rings`. Also delete `FILTER_YELLOW / FILTER_RED /
-  FILTER_BLUE` constants.
-
-- [x] **5.3** Update test assertions in `targetDetection.test.ts` with the
-  stronger checks listed in the "Test suite changes" section above. Run tests;
-  all 10 images must pass the new assertions.
-
-- [x] **5.4** Run `npm run visualize` and inspect `report.html`. Verify ellipses
-  are visually correct (concentric, covering the coloured rings) on all 10 images,
-  paying special attention to 202607, 204137, 193217 (previously all-identical),
-  193820, 195129, 195801 (previously degenerate bullseye).
-
-- [x] **5.5** Update `CLAUDE.md` to remove the HSV BGR-swap note and replace with
-  the new standard-HSV / radial-profile description.
-
----
-
-## Implementation order rationale
-
-Phases 1 → 2 → 3 → 4 must be completed in order (each feeds the next), but within
-each phase the steps can be developed and tested incrementally. Phase 1 alone is
-likely to fix the 3 colour-miss failures (2a); Phases 3–4 are needed to fix the 3
-degenerate-bullseye failures (2b). The test suite update (5.3) should be done
-*before* finalising tuning so that the new assertions drive the threshold choices.
-
----
-
-*Last updated: 2026-03-13*
+Phases 1–4 can proceed in parallel with Phase 5 (annotation tool), since Phase 5 initialises from the existing ellipse output. Phases 6 and 7 require Phases 1–5 to be complete.
