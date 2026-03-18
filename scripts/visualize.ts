@@ -1,7 +1,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { loadImageNode } from '../src/imageLoader';
-import { findTarget, EllipseData, ArcheryResult, TargetBoundary, ColourCalibration, Pixel } from '../src/targetDetection';
+import { Jimp } from 'jimp';
+import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel } from '../src/targetDetection';
+import { SplineRing, sampleClosedSpline } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const OUTPUT_PATH = path.resolve(__dirname, '../report.html');
@@ -24,63 +25,74 @@ interface ImageEntry {
 }
 
 async function processImage(imgPath: string): Promise<ImageEntry> {
-  const { Jimp } = require('jimp');
   const filename = path.basename(imgPath);
 
-  // Load and scale for the algorithm (matches loadImageNode behaviour)
-  const { rgba, width, height } = await loadImageNode(imgPath);
-
-  // Load with Jimp again to export the *scaled* JPEG as a base64 data URL for
-  // the HTML <image> tag.  The viewBox uses the same scaled dimensions, so
-  // the SVG ellipses line up correctly.
+  // Load once, scale to 1200px — reuse for both detection and base64 thumbnail.
   const img = await Jimp.read(imgPath);
   img.scaleToFit({ w: 1200, h: 1200 });
+  const { width, height } = img.bitmap;
+  const rgba = new Uint8Array(img.bitmap.data.buffer);
   const base64 = await img.getBase64('image/jpeg');
 
   const result = findTarget(rgba, width, height);
   return { filename, base64, width, height, result };
 }
 
+function splineCentroid(ring: SplineRing): [number, number] {
+  const n = ring.points.length;
+  return [
+    ring.points.reduce((s, p) => s + p[0], 0) / n,
+    ring.points.reduce((s, p) => s + p[1], 0) / n,
+  ];
+}
+
+function splineRadius(ring: SplineRing): number {
+  const [cx, cy] = splineCentroid(ring);
+  const radii = ring.points.map(([x, y]) => Math.hypot(x - cx, y - cy));
+  return radii.reduce((s, r) => s + r, 0) / radii.length;
+}
+
+function ringToPath(ring: SplineRing, N = 120): string {
+  const pts = sampleClosedSpline(ring.points, N);
+  const d = pts
+    .map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`)
+    .join(' ') + ' Z';
+  return d;
+}
+
 function renderSvg(
   base64: string,
   width: number,
   height: number,
-  rings: EllipseData[],
+  rings: SplineRing[],
   paperBoundary?: TargetBoundary,
   ringPoints?: Pixel[][],
 ): string {
   // Draw outermost rings first so inner rings render on top
-  const ellipsesSvg = [...rings]
+  const pathsSvg = [...rings]
     .map((ring, idx) => ({ ring, idx }))
     .reverse()
     .map(({ ring, idx }) => {
-      const rx = (ring.width / 2).toFixed(1);
-      const ry = (ring.height / 2).toFixed(1);
-      const cx = ring.centerX.toFixed(1);
-      const cy = ring.centerY.toFixed(1);
-      const angle = ring.angle.toFixed(1);
       const color = RING_COLORS[idx] ?? '#FFFFFF';
-      const transform = `rotate(${angle},${cx},${cy})`;
-
-      // White rings need a dark halo to be visible on bright backgrounds
+      const d = ringToPath(ring);
+      // White rings need a dark halo; black rings a light halo
       if (idx >= 8) {
         return (
-          `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" transform="${transform}" fill="none" stroke="#000" stroke-width="4"/>` +
-          `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" transform="${transform}" fill="none" stroke="${color}" stroke-width="2"/>`
+          `<path d="${d}" fill="none" stroke="#000" stroke-width="4"/>` +
+          `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`
         );
       }
-      // Black rings get a light halo
       if (idx >= 6) {
         return (
-          `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" transform="${transform}" fill="none" stroke="#aaa" stroke-width="4"/>` +
-          `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" transform="${transform}" fill="none" stroke="${color}" stroke-width="2"/>`
+          `<path d="${d}" fill="none" stroke="#aaa" stroke-width="4"/>` +
+          `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`
         );
       }
-      return `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" transform="${transform}" fill="none" stroke="${color}" stroke-width="2"/>`;
+      return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`;
     })
     .join('\n    ');
 
-  // Target paper boundary — dashed lime polygon drawn behind the scoring rings
+  // Target paper boundary — dashed lime polygon
   const boundarySvg = paperBoundary && paperBoundary.points.length >= 3
     ? (() => {
         const pts = paperBoundary.points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
@@ -88,43 +100,53 @@ function renderSvg(
       })()
     : '';
 
-  // Small marker at the bullseye centre
-  const bull = rings[0];
-  const bullMarker = bull
-    ? `<circle cx="${bull.centerX.toFixed(1)}" cy="${bull.centerY.toFixed(1)}" r="5" fill="#FFD700" stroke="#000" stroke-width="1"/>`
-    : '';
-
-  // Raw transition points — small dots in each ring's colour, drawn before ellipses
+  // Raw transition points — small dots in each ring's colour
   const pointsSvg = ringPoints
     ? ringPoints.map((pts, idx) => {
         if (pts.length === 0) return '';
         const color = RING_COLORS[idx] ?? '#00FF00';
-        const stroke = (idx >= 6 && idx <= 7) ? '#fff' : '#000'; // halo for dark rings
+        const stroke = (idx >= 6 && idx <= 7) ? '#fff' : '#000';
         return pts.map(p =>
           `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2" fill="${color}" stroke="${stroke}" stroke-width="0.5" opacity="0.75"/>`
         ).join('');
       }).join('')
     : '';
 
+  // Spline control points — diamond markers showing the sector-median points
+  // that were actually used to build each SplineRing (K=12 per ring).
+  // Only rendered for rings that have detected points (not interpolated rings [0,2,4,6,8]).
+  const INTERPOLATED = new Set([0, 2, 4, 6, 8]);
+  const ctrlSvg = rings.map((ring, idx) => {
+    if (INTERPOLATED.has(idx)) return '';
+    const color = RING_COLORS[idx] ?? '#00FF00';
+    const S = 4; // half-size of diamond
+    return ring.points.map(([x, y]) => {
+      const d = `M${x},${y - S} L${x + S},${y} L${x},${y + S} L${x - S},${y} Z`;
+      return `<path d="${d}" fill="${color}" stroke="#000" stroke-width="0.8" opacity="0.9"/>`;
+    }).join('');
+  }).join('');
+
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="display:block;max-width:100%;height:auto">
     <image href="${base64}" width="${width}" height="${height}"/>
     ${boundarySvg}
     ${pointsSvg}
-    ${ellipsesSvg}
-    ${bullMarker}
+    ${ctrlSvg}
+    ${pathsSvg}
   </svg>`;
 }
 
-function renderRingTable(rings: EllipseData[], paperBoundary?: TargetBoundary): string {
+function renderRingTable(rings: SplineRing[], paperBoundary?: TargetBoundary): string {
   const rows = rings
-    .map((r, i) => {
+    .map((ring, i) => {
       const score = 10 - i;
-      const ratio = i > 0 ? (r.width / rings[i - 1].width).toFixed(3) : '—';
+      const [cx, cy] = splineCentroid(ring);
+      const r = splineRadius(ring);
+      const prevR = i > 0 ? splineRadius(rings[i - 1]) : null;
+      const ratio = prevR !== null ? (r / prevR).toFixed(3) : '—';
       return `<tr>
         <td>${i}</td><td>${score}</td>
-        <td>${r.centerX.toFixed(1)}</td><td>${r.centerY.toFixed(1)}</td>
-        <td>${r.width.toFixed(1)}</td><td>${r.height.toFixed(1)}</td>
-        <td>${r.angle.toFixed(1)}</td><td>${ratio}</td>
+        <td>${cx.toFixed(1)}</td><td>${cy.toFixed(1)}</td>
+        <td>${r.toFixed(1)}</td><td>${ring.points.length}</td><td>${ratio}</td>
       </tr>`;
     })
     .join('\n');
@@ -134,7 +156,7 @@ function renderRingTable(rings: EllipseData[], paperBoundary?: TargetBoundary): 
         return `<tr style="${i === 0 ? 'border-top:2px solid #00FF88;' : ''}color:#00FF88">
           <td colspan="2">boundary v${i}</td>
           <td>${x.toFixed(0)}</td><td>${y.toFixed(0)}</td>
-          <td colspan="4">—</td>
+          <td colspan="3">—</td>
         </tr>`;
       }).join('\n')
     : '';
@@ -142,21 +164,13 @@ function renderRingTable(rings: EllipseData[], paperBoundary?: TargetBoundary): 
   return `<table>
     <thead><tr>
       <th>Ring</th><th>Score</th><th>cx</th><th>cy</th>
-      <th>width</th><th>height</th><th>angle°</th><th>w-ratio</th>
+      <th>radius</th><th>pts</th><th>r-ratio</th>
     </tr></thead>
     <tbody>${rows}${boundaryRow}</tbody>
   </table>`;
 }
 
 // Canonical expected hue ranges per zone, for highlighting outliers
-const EXPECTED_HUE: Record<string, [number, number]> = {
-  gold:  [20,  70],
-  red:   [340, 380], // wraps; compare mod 360
-  blue:  [190, 245],
-  black: [0,   360], // any hue, V < 0.3 matters
-  white: [0,   360], // any hue, S < 0.2 matters
-};
-
 const ZONE_COLORS: Record<string, string> = {
   gold:  '#FFD700',
   red:   '#E8000D',
@@ -170,7 +184,6 @@ function renderCalibrationTable(cal: ColourCalibration): string {
   const rows = zones.map(z => {
     const [h, s, v] = cal[z];
     const color = ZONE_COLORS[z];
-    const textColor = z === 'white' || z === 'gold' ? '#000' : '#fff';
     const swatch = `<span style="display:inline-block;width:16px;height:16px;border-radius:3px;background:${color};border:1px solid #555;vertical-align:middle"></span>`;
     return `<tr>
       <td>${swatch} ${z}</td>
@@ -186,42 +199,7 @@ function renderCalibrationTable(cal: ColourCalibration): string {
   </table>`;
 }
 
-function generateHtml(entries: ImageEntry[]): string {
-  const passCount = entries.filter(e => e.result.success).length;
-  const timestamp = new Date().toISOString();
-
-  const sections = entries
-    .map(({ filename, base64, width, height, result }) => {
-      const statusClass = result.success ? 'success' : 'error';
-      const statusText = result.success
-        ? `&#10003; 10 rings detected &nbsp;(${width}&times;${height} px)`
-        : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
-
-      const content = result.success
-        ? renderSvg(base64, width, height, result.rings, result.paperBoundary, result.ringPoints)
-        : base64
-          ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
-          : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
-
-      const calibTable = result.success && result.calibration
-        ? `<details><summary>Colour calibration</summary>${renderCalibrationTable(result.calibration)}</details>`
-        : '';
-      const table = result.success
-        ? `<details><summary>Ring data</summary>${renderRingTable(result.rings, result.paperBoundary)}</details>`
-        : '';
-
-      return `
-  <section class="entry ${statusClass}">
-    <h2>${filename}</h2>
-    <p class="status">${statusText}</p>
-    <div class="svg-wrapper">${content}</div>
-    ${calibTable}
-    ${table}
-  </section>`;
-    })
-    .join('\n');
-
-  return `<!DOCTYPE html>
+const HTML_HEAD = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
@@ -251,13 +229,36 @@ function generateHtml(entries: ImageEntry[]): string {
   </style>
 </head>
 <body>
-  <h1>ArcheryCounter &#8212; Detection Report</h1>
-  <p class="meta">Generated: ${timestamp} &nbsp;&middot;&nbsp; ${passCount}/${entries.length} images passed</p>
-  <div class="grid">
-${sections}
-  </div>
-</body>
-</html>`;
+  <h1>ArcheryCounter &#8212; Detection Report</h1>`;
+
+function renderSection(entry: ImageEntry): string {
+  const { filename, base64, width, height, result } = entry;
+  const statusClass = result.success ? 'success' : 'error';
+  const statusText = result.success
+    ? `&#10003; ${result.rings.length} rings detected &nbsp;(${width}&times;${height} px)`
+    : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
+
+  const content = result.success
+    ? renderSvg(base64, width, height, result.rings, result.paperBoundary, result.ringPoints)
+    : base64
+      ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
+      : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
+
+  const calibTable = result.success && result.calibration
+    ? `<details><summary>Colour calibration</summary>${renderCalibrationTable(result.calibration)}</details>`
+    : '';
+  const table = result.success
+    ? `<details><summary>Ring data</summary>${renderRingTable(result.rings, result.paperBoundary)}</details>`
+    : '';
+
+  return `
+  <section class="entry ${statusClass}">
+    <h2>${filename}</h2>
+    <p class="status">${statusText}</p>
+    <div class="svg-wrapper">${content}</div>
+    ${calibTable}
+    ${table}
+  </section>`;
 }
 
 async function main(): Promise<void> {
@@ -272,34 +273,41 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`Processing ${jpgFiles.length} image(s) from ${IMAGES_DIR}\n`);
+  console.log(`Processing ${jpgFiles.length} image(s) from ${IMAGES_DIR} (parallel)\n`);
 
-  const entries: ImageEntry[] = [];
-
-  for (const imgPath of jpgFiles) {
+  const entries = await Promise.all(jpgFiles.map(async imgPath => {
     const filename = path.basename(imgPath);
-    process.stdout.write(`  ${filename} ... `);
     try {
       const entry = await processImage(imgPath);
-      entries.push(entry);
       const label = entry.result.success ? 'ok' : `FAILED: ${entry.result.error}`;
-      console.log(label);
+      console.log(`  ${filename} ... ${label}`);
+      return entry;
     } catch (err) {
-      console.log(`EXCEPTION: ${err}`);
-      entries.push({
+      console.log(`  ${filename} ... EXCEPTION: ${err}`);
+      return {
         filename,
         base64: '',
         width: 0,
         height: 0,
         result: { success: false, rings: [], error: String(err) },
-      });
+      } as ImageEntry;
     }
-  }
+  }));
 
-  const html = generateHtml(entries);
-  fs.writeFileSync(OUTPUT_PATH, html, 'utf8');
-
+  // Stream HTML to disk — avoids holding the full report string in memory.
   const passCount = entries.filter(e => e.result.success).length;
+  const timestamp = new Date().toISOString();
+  const out = fs.createWriteStream(OUTPUT_PATH, { encoding: 'utf8' });
+  await new Promise<void>((resolve, reject) => {
+    out.on('error', reject);
+    out.write(HTML_HEAD);
+    out.write(`\n  <p class="meta">Generated: ${timestamp} &nbsp;&middot;&nbsp; ${passCount}/${entries.length} images passed</p>`);
+    out.write('\n  <div class="grid">');
+    for (const entry of entries) out.write(renderSection(entry));
+    out.write('\n  </div>\n</body>\n</html>\n');
+    out.end(resolve);
+  });
+
   console.log(`\nWrote: ${OUTPUT_PATH}`);
   console.log(`Result: ${passCount}/${entries.length} passed`);
 }

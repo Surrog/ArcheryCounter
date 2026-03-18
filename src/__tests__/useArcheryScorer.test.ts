@@ -11,7 +11,7 @@ jest.mock('../ArcheryCounter', () => ({
   __esModule: true,
   default: {
     processImage: jest.fn().mockResolvedValue({
-      rings: Array(10).fill({ centerX: 500, centerY: 400, width: 100, height: 100, angle: 0 }),
+      rings: Array(10).fill({ points: Array.from({ length: 8 }, () => [500, 400] as [number, number]) }),
       paperBoundary: null,
     }),
   },

@@ -3,6 +3,11 @@
  * and the algorithm output (Phase 6).
  */
 
+/** A closed ring boundary represented as Catmull-Rom control points. */
+export interface SplineRing {
+  points: [number, number][];
+}
+
 /** Evaluates one Catmull-Rom segment at parameter t ∈ [0, 1]. */
 export function evalCatmullRom(
   p0: [number, number], p1: [number, number],

@@ -1,12 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
-import Svg, { Ellipse, G, Polygon } from 'react-native-svg';
-import type { RingEllipse } from '../NativeArcheryCounter';
+import Svg, { Path, Polygon } from 'react-native-svg';
+import type { SplineRing } from '../spline';
+import { sampleClosedSpline } from '../spline';
 import type { TargetBoundary } from '../targetDetection';
 import { computeLetterboxTransform } from '../letterboxTransform';
 
 interface Props {
-  rings: RingEllipse[];
+  rings: SplineRing[];
   /** Detected target paper boundary polygon in image pixels */
   paperBoundary?: TargetBoundary | null;
   /** Original pixel dimensions of the source image */
@@ -37,7 +38,7 @@ interface ViewSize {
 /**
  * Transparent SVG layer that sits on top of an <Image resizeMode="contain">.
  * It compensates for the letterboxing that "contain" introduces so that
- * the ellipses are aligned with the actual pixels of the displayed photo.
+ * the ring paths are aligned with the actual pixels of the displayed photo.
  */
 export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNaturalHeight }: Props) {
   const [viewSize, setViewSize] = useState<ViewSize>({ width: 0, height: 0 });
@@ -74,25 +75,26 @@ export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNatu
 
           {/* Scoring rings */}
           {rings.map((ring, i) => {
-            const cx = ring.centerX * transform.scale + transform.offsetX;
-            const cy = ring.centerY * transform.scale + transform.offsetY;
-            const rx = (ring.width / 2) * transform.scale;
-            const ry = (ring.height / 2) * transform.scale;
+            const sampled = sampleClosedSpline(ring.points, 120);
+            if (sampled.length < 2) return null;
+            // Build SVG path with letterbox transform applied to each point.
+            const [first, ...rest] = sampled;
+            const fx = first[0] * transform.scale + transform.offsetX;
+            const fy = first[1] * transform.scale + transform.offsetY;
+            let d = `M ${fx} ${fy}`;
+            for (const [px, py] of rest) {
+              d += ` L ${px * transform.scale + transform.offsetX} ${py * transform.scale + transform.offsetY}`;
+            }
+            d += ' Z';
 
             return (
-              // <G rotation> with origin rotates the ellipse around its own center,
-              // replicating the cv::RotatedRect angle convention.
-              <G key={i} rotation={ring.angle} origin={`${cx}, ${cy}`}>
-                <Ellipse
-                  cx={cx}
-                  cy={cy}
-                  rx={rx}
-                  ry={ry}
-                  fill="none"
-                  stroke={RING_STROKE[i] ?? '#00FF00'}
-                  strokeWidth={1.5}
-                />
-              </G>
+              <Path
+                key={i}
+                d={d}
+                fill="none"
+                stroke={RING_STROKE[i] ?? '#00FF00'}
+                strokeWidth={1.5}
+              />
             );
           })}
         </Svg>

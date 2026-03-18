@@ -1,12 +1,14 @@
 import { findTarget } from './targetDetection';
 import { decodeBase64Jpeg } from './imageLoader';
 import type { EllipseData, TargetBoundary, ColourCalibration, Pixel } from './targetDetection';
+import type { SplineRing } from './spline';
 
-export type { EllipseData as RingEllipse };
-export type { Pixel, TargetBoundary, ColourCalibration };
+export type { SplineRing as RingEllipse };
+export type { SplineRing };
+export type { EllipseData, Pixel, TargetBoundary, ColourCalibration };
 
 export interface ProcessImageResult {
-  rings: EllipseData[];
+  rings: SplineRing[];
   paperBoundary?: TargetBoundary;
   calibration?: ColourCalibration;
 }
