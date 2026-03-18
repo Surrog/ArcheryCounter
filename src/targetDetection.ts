@@ -890,6 +890,21 @@ function detectRingDistancesOnRay(
   // Intra-zone rings [0, 2, 4, 6] are NOT computed here — they are derived at
   // the spline level in findTarget() by interpolating between adjacent fitted
   // zone-boundary splines.  That avoids propagating per-ray noise before fitting.
+  //
+  // Monotonicity: each transition is scanned independently from ray origin, so
+  // a colour-zone false positive (hay bale, arrow shaft, reflection) can place
+  // an outer transition closer than an inner one.  Discard any transition that
+  // violates strict increase; it is treated as missing and filled by regression.
+  let lastTransDist = 0;
+  for (let ti = 0; ti < transitionDist.length; ti++) {
+    if (transitionDist[ti] !== null) {
+      if ((transitionDist[ti] as number) <= lastTransDist) {
+        transitionDist[ti] = null;
+      } else {
+        lastTransDist = transitionDist[ti] as number;
+      }
+    }
+  }
   const [r1, r3, r5, r7] = transitionDist;
   result[1] = r1;
   result[3] = r3;
@@ -897,8 +912,10 @@ function detectRingDistancesOnRay(
   result[7] = r7;
 
   // White zone: not reliably detectable (low saturation, similar to background).
-  // Extrapolate rings[8] and rings[9] via linear regression through the 4
-  // confirmed colour transitions, clamped below the paper boundary.
+  // Extrapolate rings[8] and rings[9] via linear regression through the detected
+  // colour transitions.  Also fill in ring[7] from regression when the boundary
+  // scan stopped early (boundary < predicted r7), so the outer rings don't collapse
+  // in directions where hay bale or the image edge truncates the boundary scan.
   const knownBoundaries = ([
     { ringIdx: 1, dist: r1 },
     { ringIdx: 3, dist: r3 },
@@ -907,14 +924,43 @@ function detectRingDistancesOnRay(
   ] as { ringIdx: number; dist: number | null }[])
     .filter(({ dist }) => dist !== null) as { ringIdx: number; dist: number }[];
 
-  const r7safe = r7 ?? 8 * w;
   if (knownBoundaries.length >= 2) {
     const predictR = fitRingRadiusModel(knownBoundaries);
-    result[8] = Math.max(r7safe,              Math.min(boundaryDist * 0.98, predictR(8)));
-    result[9] = Math.max(result[8] as number, Math.min(boundaryDist * 0.99, predictR(9)));
+    // If r7 was not detected and the regression predicts it beyond the boundary,
+    // the boundary scan stopped early — fill r7 from regression and skip the
+    // boundary cap for r8/r9 so the outer rings aren't pinched toward the centre.
+    const boundaryTruncated = r7 === null && predictR(7) > boundaryDist;
+    if (boundaryTruncated) {
+      result[7] = predictR(7);
+    }
+    const r7safe = (result[7] as number | null) ?? 8 * w;
+    if (boundaryTruncated) {
+      result[8] = Math.max(r7safe, predictR(8));
+      result[9] = Math.max(result[8] as number, predictR(9));
+    } else {
+      result[8] = Math.max(r7safe,              Math.min(boundaryDist * 0.98, predictR(8)));
+      result[9] = Math.max(result[8] as number, Math.min(boundaryDist * 0.99, predictR(9)));
+    }
   } else {
+    const r7safe = r7 ?? 8 * w;
     result[8] = 9  * w < boundaryDist ? 9  * w : null;
     result[9] = 10 * w < boundaryDist ? 10 * w : null;
+    void r7safe; // r7safe not needed in this branch but keeps TS happy
+  }
+
+  // Final guard: ensure all non-null distances are strictly increasing.
+  // A bad scale estimate (w) or a misdetected transition can leave regression
+  // values smaller than a detected inner ring.  Null out any violation — the
+  // spline fitter will interpolate missing outer rings from neighbouring rays.
+  let prevR = 0;
+  for (let k = 0; k < 10; k++) {
+    if (result[k] !== null) {
+      if ((result[k] as number) <= prevR) {
+        result[k] = null;
+      } else {
+        prevR = result[k] as number;
+      }
+    }
   }
 
   return result;

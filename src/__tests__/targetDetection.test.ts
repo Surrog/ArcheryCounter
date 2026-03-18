@@ -151,6 +151,19 @@ describe('findTarget', () => {
         expect(entry.distances).toHaveLength(10);
         expect(entry.boundary).toBeGreaterThan(0);
       }
+
+      // Per-ray distance ordering: non-null detected distances must be strictly
+      // increasing by ring index.  A ring boundary can never appear closer than
+      // an inner boundary on the same ray (catches r8/r9 collapse on truncated rays).
+      for (const { distances } of result.rayDebug) {
+        let prevD = 0;
+        for (let k = 0; k < 10; k++) {
+          const d = distances[k];
+          if (d === null) continue;
+          expect(d).toBeGreaterThan(prevD);
+          prevD = d;
+        }
+      }
     }
 
     // --- Boundary containment ---
