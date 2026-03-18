@@ -17,7 +17,7 @@ const db = new Pool({
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
 });
-const K_POINTS = 8; // control points per ring
+const K_POINTS = 8;
 
 const RING_COLORS = [
   '#FFD700', '#FFD700',
@@ -56,7 +56,7 @@ async function processImage(imgPath: string): Promise<ImageEntry> {
 function generateHtml(entries: ImageEntry[]): string {
   const imagesData = entries.map(({ filename, base64, width, height, result }) => {
     const rings: SplineRing[] = result.success
-      ? result.rings.map(r => ({
+      ? result.rings.map((r: any) => ({
           points: ellipseToSplinePoints(r.centerX, r.centerY, r.width / 2, r.height / 2, r.angle, K_POINTS),
         }))
       : [];
@@ -92,10 +92,21 @@ function generateHtml(entries: ImageEntry[]): string {
     #controls button:hover { background: #3a8a50; }
     #controls button.danger { background: #7a2222; }
     #controls button.danger:hover { background: #9a3232; }
+    #controls button.active-mode { background: #8a5a00; }
+    #controls button.active-mode:hover { background: #aa7200; }
 
     #toolbar { padding: 8px 14px; border-bottom: 1px solid #333; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
     #toolbar label { font-size: 0.78rem; color: #aaa; display: flex; align-items: center; gap: 4px; cursor: pointer; }
-    #legend { font-size: 0.72rem; color: #666; margin-left: auto; }
+    #legend { font-size: 0.7rem; color: #666; width: 100%; margin-top: 2px; }
+
+    #score-picker { display: none; gap: 4px; align-items: center; flex-wrap: wrap; width: 100%; padding-top: 6px; }
+    #score-picker .sp-label { font-size: 0.78rem; color: #FF8C00; white-space: nowrap; margin-right: 2px; }
+    #score-picker button { padding: 3px 7px; font-size: 0.78rem; border: 1px solid #555; border-radius: 3px; background: #2a2a2a; color: #ddd; cursor: pointer; }
+    #score-picker button:hover { background: #3a3a3a; }
+    #score-picker button.gold { background: #5a4a00; color: #FFD700; border-color: #FFD700; font-weight: bold; }
+    #score-picker button.gold:hover { background: #7a6400; }
+    #score-picker button.miss { background: #3a2a2a; color: #999; }
+    #score-picker button.miss:hover { background: #4a3a3a; }
 
     #img-list { flex: 1; overflow-y: auto; padding: 8px 0; }
     .img-btn {
@@ -109,11 +120,13 @@ function generateHtml(entries: ImageEntry[]): string {
     .img-btn .dot { width: 6px; height: 6px; border-radius: 50%; background: #f0a030; flex-shrink: 0; }
     .img-btn .spacer { width: 6px; flex-shrink: 0; }
 
-    #data-panel { padding: 10px 14px; border-top: 1px solid #333; font-size: 0.72rem; overflow-y: auto; max-height: 180px; }
+    #data-panel { padding: 10px 14px; border-top: 1px solid #333; font-size: 0.72rem; overflow-y: auto; max-height: 240px; }
     #data-panel h3 { color: #888; margin-bottom: 6px; font-size: 0.75rem; font-weight: 600; }
-    #data-panel table { width: 100%; border-collapse: collapse; }
+    #data-panel table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
     #data-panel th { color: #666; font-weight: 600; padding: 2px 4px; text-align: left; }
     #data-panel td { color: #aaa; font-family: monospace; padding: 2px 4px; border-top: 1px solid #2a2a2a; }
+    #data-panel td.score-cell { cursor: pointer; color: #FF8C00; }
+    #data-panel td.score-cell:hover { text-decoration: underline; }
 
     #main { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; background: #111; padding: 16px; }
     #svg-container { position: relative; }
@@ -121,6 +134,7 @@ function generateHtml(entries: ImageEntry[]): string {
     .img-wrap img { display: block; max-width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
     .img-wrap svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: visible; cursor: default; }
     .img-wrap svg.dragging { cursor: grabbing; }
+    .img-wrap svg.add-arrow-mode { cursor: crosshair; }
     .handle { cursor: grab; }
     .handle:active { cursor: grabbing; }
   </style>
@@ -133,6 +147,7 @@ function generateHtml(entries: ImageEntry[]): string {
     <div id="controls">
       <button id="btn-save">Save</button>
       <button id="btn-reset">Reset image</button>
+      <button id="btn-add-arrow">Add arrow (A)</button>
       <button id="btn-reset-all" class="danger">Reset all</button>
     </div>
   </div>
@@ -140,8 +155,25 @@ function generateHtml(entries: ImageEntry[]): string {
     <label><input type="checkbox" id="chk-rings" checked/> Rings</label>
     <label><input type="checkbox" id="chk-boundary" checked/> Boundary</label>
     <label><input type="checkbox" id="chk-handles" checked/> Handles</label>
-    <div id="legend" style="font-size:0.7rem;color:#666">
-      Ctrl+click boundary edge: add vertex · Shift+click vertex: remove
+    <label><input type="checkbox" id="chk-arrows" checked/> Arrows</label>
+    <div id="score-picker">
+      <span class="sp-label" id="score-prompt">Score:</span>
+      <button class="gold" data-score="X">X</button>
+      <button class="gold" data-score="10">10</button>
+      <button data-score="9">9</button>
+      <button data-score="8">8</button>
+      <button data-score="7">7</button>
+      <button data-score="6">6</button>
+      <button data-score="5">5</button>
+      <button data-score="4">4</button>
+      <button data-score="3">3</button>
+      <button data-score="2">2</button>
+      <button data-score="1">1</button>
+      <button class="miss" data-score="0">M</button>
+      <button class="miss" id="score-skip">?</button>
+    </div>
+    <div id="legend">
+      Ctrl+click boundary: add vertex · Shift+click vertex/arrow: remove · A: add arrow
     </div>
   </div>
   <div id="img-list"></div>
@@ -190,11 +222,16 @@ function splineToPath(pts) {
 let store = { annotations: {}, modified: [] };
 let currentIdx = 0;
 let drag = null;
+let addArrowMode = 'idle'; // 'idle' | 'place-tip' | 'place-nock' | 'score-input'
+let pendingTip = null;
+let pendingNock = null;
+let pickerContext = null; // { type: 'new' } | { type: 'edit', ai: number } | null
 
 // ---- Overlay toggles ----
 function showRings()    { return document.getElementById('chk-rings').checked; }
 function showBoundary() { return document.getElementById('chk-boundary').checked; }
 function showHandles()  { return document.getElementById('chk-handles').checked; }
+function showArrows()   { return document.getElementById('chk-arrows').checked; }
 
 // ---- Annotation helpers ----
 function getDetected(idx) {
@@ -207,8 +244,10 @@ function getDetected(idx) {
 
 function getAnnotation(idx) {
   const filename = IMAGES[idx].filename;
-  if (!store.annotations[filename]) store.annotations[filename] = getDetected(idx);
-  return store.annotations[filename];
+  if (!store.annotations[filename]) store.annotations[filename] = { ...getDetected(idx), arrows: [] };
+  const ann = store.annotations[filename];
+  if (!ann.arrows) ann.arrows = [];
+  return ann;
 }
 
 function markModified(idx) {
@@ -240,13 +279,52 @@ function nearestBoundaryEdge(boundary, x, y) {
   return { edge: bestEdge, dist: bestDist, pt: bestPt };
 }
 
+// ---- Score picker ----
+function showScorePicker(label) {
+  const picker = document.getElementById('score-picker');
+  picker.style.display = 'flex';
+  document.getElementById('score-prompt').textContent = label || 'Score:';
+}
+
+function hideScorePicker() {
+  document.getElementById('score-picker').style.display = 'none';
+  pickerContext = null;
+}
+
+function onScoreSelect(score) {
+  if (!pickerContext) return;
+  const ann = getAnnotation(currentIdx);
+  if (pickerContext.type === 'new') {
+    ann.arrows.push({
+      tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
+      nock: [Math.round(pendingNock[0]), Math.round(pendingNock[1])],
+      score,
+    });
+    pendingTip = null;
+    pendingNock = null;
+    addArrowMode = 'idle';
+    document.getElementById('btn-add-arrow').classList.remove('active-mode');
+    hideScorePicker();
+    markModified(currentIdx);
+    updateImageList();
+    render();
+  } else if (pickerContext.type === 'edit') {
+    ann.arrows[pickerContext.ai].score = score;
+    hideScorePicker();
+    markModified(currentIdx);
+    updateImageList();
+    render();
+    updateDataPanel();
+  }
+}
+
 // ---- Render ----
 function render() {
   const container = document.getElementById('svg-container');
   const img = IMAGES[currentIdx];
   const ann = getAnnotation(currentIdx);
   const W = img.width, H = img.height;
-  const showR = showRings(), showB = showBoundary(), showH = showHandles();
+  const showR = showRings(), showB = showBoundary(), showH = showHandles(), showA = showArrows();
 
   let svgContent = '';
 
@@ -275,7 +353,7 @@ function render() {
     }
   }
 
-  // Control point handles — one per spline point per ring
+  // Control point handles
   if (showH && ann.rings.length > 0) {
     ann.rings.forEach((ring, ri) => {
       if (!ring.points) return;
@@ -284,7 +362,6 @@ function render() {
       ring.points.forEach((p, pi) => {
         svgContent += \`<circle class="handle" data-handle="ring_pt" data-ri="\${ri}" data-pi="\${pi}" cx="\${p[0].toFixed(1)}" cy="\${p[1].toFixed(1)}" r="4" fill="\${color}" stroke="#000" stroke-width="1" opacity="0.85"/>\`;
         if (pi === 0) {
-          // Label first control point with ring index
           svgContent += \`<text x="\${p[0].toFixed(1)}" y="\${(p[1]+3.5).toFixed(1)}" text-anchor="middle" dominant-baseline="middle" fill="\${labelFill}" font-size="8" font-weight="bold" font-family="monospace" pointer-events="none">\${ri}</text>\`;
         }
       });
@@ -299,9 +376,34 @@ function render() {
     });
   }
 
+  // Arrows
+  if (showA) {
+    ann.arrows.forEach((arrow, ai) => {
+      const { tip, nock, score } = arrow;
+      const isMiss = score === 0;
+      const isIncomplete = score === null || score === undefined;
+      const shaftColor = isMiss ? '#888888' : '#FF8C00';
+      const labelText = score === 0 ? 'M' : isIncomplete ? '?' : String(score);
+      const mx = ((tip[0] + nock[0]) / 2).toFixed(1);
+      const my = ((tip[1] + nock[1]) / 2 - 14).toFixed(1);
+      svgContent += \`<line x1="\${tip[0].toFixed(1)}" y1="\${tip[1].toFixed(1)}" x2="\${nock[0].toFixed(1)}" y2="\${nock[1].toFixed(1)}" stroke="\${shaftColor}" stroke-width="2" stroke-dasharray="8 4"/>\`;
+      const tipDash = isIncomplete ? 'stroke-dasharray="3 2"' : '';
+      svgContent += \`<circle class="handle" data-handle="arrow_tip" data-ai="\${ai}" cx="\${tip[0].toFixed(1)}" cy="\${tip[1].toFixed(1)}" r="4" fill="#FF4500" stroke="#000" stroke-width="1" \${tipDash}/>\`;
+      svgContent += \`<circle class="handle" data-handle="arrow_nock" data-ai="\${ai}" cx="\${nock[0].toFixed(1)}" cy="\${nock[1].toFixed(1)}" r="6" fill="#FFD700" stroke="#000" stroke-width="1"/>\`;
+      svgContent += \`<text x="\${mx}" y="\${my}" text-anchor="middle" fill="white" font-size="10" font-weight="bold" font-family="monospace" pointer-events="none">\${labelText}</text>\`;
+    });
+
+    // Pending tip dot while placing nock
+    if ((addArrowMode === 'place-nock' || addArrowMode === 'score-input') && pendingTip) {
+      svgContent += \`<circle cx="\${pendingTip[0].toFixed(1)}" cy="\${pendingTip[1].toFixed(1)}" r="6" fill="#FF8C00" opacity="0.5" pointer-events="none"/>\`;
+    }
+  }
+
+  const inAddMode = addArrowMode === 'place-tip' || addArrowMode === 'place-nock';
+  const svgClass = inAddMode ? 'class="add-arrow-mode"' : '';
   const wrapEl = \`<div class="img-wrap">
   <img src="\${img.base64}" alt="\${img.filename}" draggable="false"/>
-  <svg id="main-svg" viewBox="0 0 \${W} \${H}" xmlns="http://www.w3.org/2000/svg">
+  <svg id="main-svg" viewBox="0 0 \${W} \${H}" \${svgClass} xmlns="http://www.w3.org/2000/svg">
     \${svgContent}
   </svg>
 </div>\`;
@@ -316,39 +418,63 @@ function attachSvgListeners() {
   const svg = document.getElementById('main-svg');
   if (!svg) return;
 
-  // Ctrl+click on SVG background: add boundary vertex
   svg.addEventListener('click', (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    const ann = getAnnotation(currentIdx);
-    if (!ann.paperBoundary) return;
-    const mpt = svgPt(svg, e);
-    const { edge, pt } = nearestBoundaryEdge(ann.paperBoundary, mpt.x, mpt.y);
-    if (edge >= 0) {
-      ann.paperBoundary.splice(edge + 1, 0, [Math.round(pt[0]), Math.round(pt[1])]);
-      markModified(currentIdx);
-      updateImageList();
+    if (e.ctrlKey || e.metaKey) {
+      const ann = getAnnotation(currentIdx);
+      if (!ann.paperBoundary) return;
+      const mpt = svgPt(svg, e);
+      const { edge, pt } = nearestBoundaryEdge(ann.paperBoundary, mpt.x, mpt.y);
+      if (edge >= 0) {
+        ann.paperBoundary.splice(edge + 1, 0, [Math.round(pt[0]), Math.round(pt[1])]);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      }
+      return;
+    }
+
+    if (e.target.closest && e.target.closest('.handle')) return;
+
+    if (addArrowMode === 'place-tip') {
+      const mpt = svgPt(svg, e);
+      pendingTip = [mpt.x, mpt.y];
+      addArrowMode = 'place-nock';
+      render();
+    } else if (addArrowMode === 'place-nock') {
+      const mpt = svgPt(svg, e);
+      pendingNock = [mpt.x, mpt.y];
+      addArrowMode = 'score-input';
+      pickerContext = { type: 'new' };
+      showScorePicker('Score:');
       render();
     }
   });
 
   svg.querySelectorAll('.handle').forEach(el => {
-    // Shift+click on boundary vertex: remove it
     el.addEventListener('click', (e) => {
       if (!e.shiftKey) return;
       e.preventDefault(); e.stopPropagation();
       const handleType = el.getAttribute('data-handle');
-      if (handleType !== 'boundary') return;
       const ann = getAnnotation(currentIdx);
-      if (!ann.paperBoundary || ann.paperBoundary.length <= 3) return;
-      const idx = parseInt(el.getAttribute('data-idx'), 10);
-      ann.paperBoundary.splice(idx, 1);
-      markModified(currentIdx);
-      updateImageList();
-      render();
+      if (handleType === 'boundary') {
+        if (!ann.paperBoundary || ann.paperBoundary.length <= 3) return;
+        const idx = parseInt(el.getAttribute('data-idx'), 10);
+        ann.paperBoundary.splice(idx, 1);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      } else if (handleType === 'arrow_tip' || handleType === 'arrow_nock') {
+        const ai = parseInt(el.getAttribute('data-ai'), 10);
+        ann.arrows.splice(ai, 1);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      }
     });
 
     el.addEventListener('mousedown', (e) => {
       if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+      if (addArrowMode !== 'idle') return;
       e.preventDefault(); e.stopPropagation();
       const handleType = el.getAttribute('data-handle');
 
@@ -356,6 +482,10 @@ function attachSvgListeners() {
         drag = { type: 'ring_pt', ri: parseInt(el.getAttribute('data-ri'), 10), pi: parseInt(el.getAttribute('data-pi'), 10) };
       } else if (handleType === 'boundary') {
         drag = { type: 'boundary', idx: parseInt(el.getAttribute('data-idx'), 10) };
+      } else if (handleType === 'arrow_tip') {
+        drag = { type: 'arrow_tip', ai: parseInt(el.getAttribute('data-ai'), 10) };
+      } else if (handleType === 'arrow_nock') {
+        drag = { type: 'arrow_nock', ai: parseInt(el.getAttribute('data-ai'), 10) };
       }
 
       const svgEl0 = document.getElementById('main-svg');
@@ -372,6 +502,10 @@ function attachSvgListeners() {
           ann.rings[drag.ri].points[drag.pi] = [mpt.x, mpt.y];
         } else if (drag.type === 'boundary' && ann.paperBoundary) {
           ann.paperBoundary[drag.idx] = [Math.round(mpt.x), Math.round(mpt.y)];
+        } else if (drag.type === 'arrow_tip') {
+          ann.arrows[drag.ai].tip = [mpt.x, mpt.y];
+        } else if (drag.type === 'arrow_nock') {
+          ann.arrows[drag.ai].nock = [mpt.x, mpt.y];
         }
         render();
       };
@@ -425,7 +559,34 @@ function updateDataPanel() {
   });
 
   html += '</tbody></table>';
+
+  // Arrows section
+  if (ann.arrows.length > 0) {
+    html += \`<table><thead><tr><th>Arrow</th><th>tip</th><th>nock</th><th>score</th></tr></thead><tbody>\`;
+    ann.arrows.forEach((arrow, ai) => {
+      const s = arrow.score;
+      const scoreLabel = s === 0 ? 'M' : (s === null || s === undefined) ? '?' : String(s);
+      html += \`<tr>
+        <td>A\${ai}</td>
+        <td>(\${Math.round(arrow.tip[0])},\${Math.round(arrow.tip[1])})</td>
+        <td>(\${Math.round(arrow.nock[0])},\${Math.round(arrow.nock[1])})</td>
+        <td class="score-cell" data-ai="\${ai}">\${scoreLabel}</td>
+      </tr>\`;
+    });
+    html += '</tbody></table>';
+  } else {
+    html += \`<div style="color:#555;font-size:0.72rem;margin-top:4px">No arrows annotated</div>\`;
+  }
+
   document.getElementById('data-table').innerHTML = html;
+
+  document.querySelectorAll('#data-table .score-cell').forEach(cell => {
+    cell.addEventListener('click', () => {
+      const ai = parseInt(cell.getAttribute('data-ai'), 10);
+      pickerContext = { type: 'edit', ai };
+      showScorePicker(\`Edit A\${ai} score:\`);
+    });
+  });
 }
 
 // ---- Save to DB ----
@@ -433,7 +594,7 @@ async function save() {
   const out = {};
   for (const filename of Object.keys(store.annotations)) {
     const ann = store.annotations[filename];
-    out[filename] = { paperBoundary: ann.paperBoundary, rings: ann.rings };
+    out[filename] = { paperBoundary: ann.paperBoundary, rings: ann.rings, arrows: ann.arrows || [] };
   }
   try {
     const res = await fetch('/api/save', {
@@ -453,16 +614,84 @@ async function save() {
 // ---- Reset ----
 function resetCurrent() {
   const filename = IMAGES[currentIdx].filename;
-  store.annotations[filename] = getDetected(currentIdx);
+  store.annotations[filename] = { ...getDetected(currentIdx), arrows: [] };
   store.modified = store.modified.filter(f => f !== filename);
+  addArrowMode = 'idle';
+  pendingTip = null;
+  pendingNock = null;
+  hideScorePicker();
+  document.getElementById('btn-add-arrow').classList.remove('active-mode');
   updateImageList(); render();
 }
 
 function resetAll() {
   if (!confirm('Reset all annotations?')) return;
   store = { annotations: {}, modified: [] };
+  addArrowMode = 'idle';
+  pendingTip = null;
+  pendingNock = null;
+  hideScorePicker();
+  document.getElementById('btn-add-arrow').classList.remove('active-mode');
   updateImageList(); render();
 }
+
+// ---- Keyboard handler ----
+document.addEventListener('keydown', (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+  if (e.key === 'Escape') {
+    if (addArrowMode === 'score-input' && pickerContext) {
+      if (pickerContext.type === 'new') {
+        // Commit with null score
+        const ann = getAnnotation(currentIdx);
+        ann.arrows.push({
+          tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
+          nock: [Math.round(pendingNock[0]), Math.round(pendingNock[1])],
+          score: null,
+        });
+        pendingTip = null;
+        pendingNock = null;
+        addArrowMode = 'idle';
+        document.getElementById('btn-add-arrow').classList.remove('active-mode');
+        hideScorePicker();
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      } else {
+        hideScorePicker();
+        addArrowMode = 'idle';
+      }
+    } else if (addArrowMode === 'place-tip' || addArrowMode === 'place-nock') {
+      pendingTip = null;
+      pendingNock = null;
+      addArrowMode = 'idle';
+      document.getElementById('btn-add-arrow').classList.remove('active-mode');
+      render();
+    }
+    return;
+  }
+
+  if (addArrowMode === 'score-input') {
+    let score = undefined;
+    if (e.key === 'x' || e.key === 'X') score = 'X';
+    else if (e.key === 'm' || e.key === 'M') score = 0;
+    else if (e.key >= '1' && e.key <= '9') score = parseInt(e.key, 10);
+    if (score !== undefined) { onScoreSelect(score); return; }
+  }
+
+  if ((e.key === 'a' || e.key === 'A') && addArrowMode !== 'score-input') {
+    if (addArrowMode === 'idle') {
+      addArrowMode = 'place-tip';
+      document.getElementById('btn-add-arrow').classList.add('active-mode');
+      render();
+    } else if (addArrowMode === 'place-tip') {
+      addArrowMode = 'idle';
+      document.getElementById('btn-add-arrow').classList.remove('active-mode');
+      render();
+    }
+  }
+});
 
 // ---- Wire up ----
 document.getElementById('btn-save').addEventListener('click', save);
@@ -471,13 +700,40 @@ document.getElementById('btn-reset-all').addEventListener('click', resetAll);
 document.getElementById('chk-rings').addEventListener('change', render);
 document.getElementById('chk-boundary').addEventListener('change', render);
 document.getElementById('chk-handles').addEventListener('change', render);
+document.getElementById('chk-arrows').addEventListener('change', render);
+
+document.getElementById('btn-add-arrow').addEventListener('click', () => {
+  if (addArrowMode === 'idle') {
+    addArrowMode = 'place-tip';
+    document.getElementById('btn-add-arrow').classList.add('active-mode');
+    render();
+  } else if (addArrowMode === 'place-tip' || addArrowMode === 'place-nock') {
+    pendingTip = null;
+    pendingNock = null;
+    addArrowMode = 'idle';
+    document.getElementById('btn-add-arrow').classList.remove('active-mode');
+    render();
+  }
+});
+
+document.querySelectorAll('#score-picker button[data-score]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const raw = btn.getAttribute('data-score');
+    onScoreSelect(raw === 'X' ? 'X' : parseInt(raw, 10));
+  });
+});
+document.getElementById('score-skip').addEventListener('click', () => onScoreSelect(null));
 
 // ---- Init ----
 fetch('/api/annotations')
   .then(r => r.json())
   .then(data => {
     for (const [filename, ann] of Object.entries(data)) {
-      store.annotations[filename] = { paperBoundary: ann.paperBoundary || null, rings: ann.rings || [] };
+      store.annotations[filename] = {
+        paperBoundary: ann.paperBoundary || null,
+        rings: ann.rings || [],
+        arrows: ann.arrows || [],
+      };
     }
     updateImageList();
     render();
@@ -500,7 +756,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // --- DB setup (before processing so we know which images to skip) ---
+  // --- DB setup ---
   await db.query(`
     CREATE TABLE IF NOT EXISTS annotations (
       filename       TEXT PRIMARY KEY,
@@ -509,6 +765,8 @@ async function main(): Promise<void> {
       updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // P8-T1: add arrows column if not present
+  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS arrows JSONB NOT NULL DEFAULT '[]'`);
   console.log('Table ready.');
 
   const { rows: existing } = await db.query('SELECT filename FROM annotations');
@@ -549,7 +807,6 @@ async function main(): Promise<void> {
 
   let seeded = 0;
   for (const entry of entries.filter(e => !inDb.has(e.filename))) {
-
     const fromFile = savedAnnotations[entry.filename];
     const paperBoundary = fromFile?.paperBoundary
       ?? (entry.result.success && entry.result.paperBoundary ? entry.result.paperBoundary.points : null);
@@ -559,8 +816,8 @@ async function main(): Promise<void> {
         })) : []);
 
     await db.query(
-      `INSERT INTO annotations (filename, paper_boundary, rings) VALUES ($1, $2, $3)`,
-      [entry.filename, JSON.stringify(paperBoundary), JSON.stringify(rings)],
+      `INSERT INTO annotations (filename, paper_boundary, rings, arrows) VALUES ($1, $2, $3, $4)`,
+      [entry.filename, JSON.stringify(paperBoundary), JSON.stringify(rings), JSON.stringify([])],
     );
     seeded++;
   }
@@ -580,9 +837,11 @@ async function main(): Promise<void> {
       respond(200, html, 'text/html; charset=utf-8');
 
     } else if (req.method === 'GET' && req.url === '/api/annotations') {
-      const { rows } = await db.query('SELECT filename, paper_boundary, rings FROM annotations');
+      const { rows } = await db.query('SELECT filename, paper_boundary, rings, arrows FROM annotations');
       const out: Record<string, unknown> = {};
-      for (const row of rows) out[row.filename] = { paperBoundary: row.paper_boundary, rings: row.rings };
+      for (const row of rows) {
+        out[row.filename] = { paperBoundary: row.paper_boundary, rings: row.rings, arrows: row.arrows };
+      }
       respond(200, JSON.stringify(out));
 
     } else if (req.method === 'POST' && req.url === '/api/save') {
@@ -593,13 +852,19 @@ async function main(): Promise<void> {
           const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           for (const [filename, ann] of Object.entries(data) as [string, any][]) {
             await db.query(
-              `INSERT INTO annotations (filename, paper_boundary, rings)
-               VALUES ($1, $2, $3)
+              `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+               VALUES ($1, $2, $3, $4)
                ON CONFLICT (filename) DO UPDATE
                  SET paper_boundary = EXCLUDED.paper_boundary,
                      rings          = EXCLUDED.rings,
+                     arrows         = EXCLUDED.arrows,
                      updated_at     = NOW()`,
-              [filename, JSON.stringify(ann.paperBoundary ?? null), JSON.stringify(ann.rings ?? [])],
+              [
+                filename,
+                JSON.stringify(ann.paperBoundary ?? null),
+                JSON.stringify(ann.rings ?? []),
+                JSON.stringify(ann.arrows ?? []),
+              ],
             );
           }
           console.log(`Saved ${Object.keys(data).length} annotations`);

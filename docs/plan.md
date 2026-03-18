@@ -58,11 +58,11 @@ interface ArrowAnnotation {
 
 ### Tasks
 
-- [ ] **P8-T1 DB migration** — Add `arrows JSONB NOT NULL DEFAULT '[]'` column to the `annotations` table. Update the `CREATE TABLE IF NOT EXISTS` DDL. Run `ALTER TABLE annotations ADD COLUMN IF NOT EXISTS arrows JSONB NOT NULL DEFAULT '[]'` on startup before any reads.
+- [x] **P8-T1 DB migration** — Add `arrows JSONB NOT NULL DEFAULT '[]'` column to the `annotations` table. Update the `CREATE TABLE IF NOT EXISTS` DDL. Run `ALTER TABLE annotations ADD COLUMN IF NOT EXISTS arrows JSONB NOT NULL DEFAULT '[]'` on startup before any reads.
 
-- [ ] **P8-T2 State model** — Add `arrows: ArrowAnnotation[]` to the in-memory annotation object. On load from `/api/annotations`, set `arrows = ann.arrows ?? []`. On `resetCurrent()` and `resetAll()`, initialise `arrows: []`.
+- [x] **P8-T2 State model** — Add `arrows: ArrowAnnotation[]` to the in-memory annotation object. On load from `/api/annotations`, set `arrows = ann.arrows ?? []`. On `resetCurrent()` and `resetAll()`, initialise `arrows: []`.
 
-- [ ] **P8-T3 Add-arrow mode** — Introduce a mode variable `let addArrowMode: 'idle' | 'place-tip' | 'place-nock' = 'idle'` and a pending tip `let pendingTip: [number,number] | null = null`.
+- [x] **P8-T3 Add-arrow mode** — Introduce a mode variable `let addArrowMode: 'idle' | 'place-tip' | 'place-nock' = 'idle'` and a pending tip `let pendingTip: [number,number] | null = null`.
   - Add **"Add arrow"** button to the sidebar controls (below Reset).
   - Clicking the button sets `addArrowMode = 'place-tip'`.
   - First SVG click (not on a handle, not Ctrl/Shift): records tip, advances to `'place-nock'`.
@@ -71,7 +71,7 @@ interface ArrowAnnotation {
   - Pressing **Escape** during `'place-tip'` or `'place-nock'` cancels the arrow entirely and resets to `'idle'`.
   - Pressing **A** (when no input focused) toggles `'idle' ↔ 'place-tip'`.
 
-- [ ] **P8-T4 Arrow rendering** — In `render()`, for each arrow `{tip, nock}` at index `i`:
+- [x] **P8-T4 Arrow rendering** — In `render()`, for each arrow `{tip, nock}` at index `i`:
   - Dashed orange line from tip to nock (`stroke="#FF8C00"`, `stroke-width="2"`, `stroke-dasharray="8 4"`).
   - **Tip handle**: `r=8`, `fill="#FF4500"`, `data-handle="arrow_tip"`, `data-ai="${i}"`.
   - **Nock handle**: `r=6`, `fill="#FFD700"`, `data-handle="arrow_nock"`, `data-ai="${i}"`.
@@ -80,18 +80,18 @@ interface ArrowAnnotation {
   - Add **"Arrows"** checkbox to the toolbar. When unchecked, skip all arrow rendering.
   - SVG cursor is `crosshair` while in add-arrow mode; status text in the toolbar shows "Click to place tip" / "Click to place nock".
 
-- [ ] **P8-T5 Arrow drag handling** — Extend `attachSvgListeners()` to handle `data-handle === 'arrow_tip'` and `'arrow_nock'`:
+- [x] **P8-T5 Arrow drag handling** — Extend `attachSvgListeners()` to handle `data-handle === 'arrow_tip'` and `'arrow_nock'`:
   - `drag = { type: 'arrow_tip'|'arrow_nock', ai }`.
   - `mousemove` updates `ann.arrows[drag.ai].tip` or `.nock`.
   - Skip mousedown when `addArrowMode !== 'idle'`.
 
-- [ ] **P8-T6 Arrow removal** — Shift+click on any arrow handle removes that arrow: `ann.arrows.splice(ai, 1)`, `markModified`, `render()`.
+- [x] **P8-T6 Arrow removal** — Shift+click on any arrow handle removes that arrow: `ann.arrows.splice(ai, 1)`, `markModified`, `render()`.
 
-- [ ] **P8-T7 Save / load** —
+- [x] **P8-T7 Save / load** —
   - `GET /api/annotations`: include `arrows: row.arrows` in each entry.
   - `POST /api/save`: add `arrows = EXCLUDED.arrows` to the upsert clause; pass `JSON.stringify(ann.arrows ?? [])` as `$4`. Seeding defaults to `[]`.
 
-- [ ] **P8-T8 Data panel** — Add an "Arrows" section showing count and one row per arrow with tip coordinates and score. Clicking a score cell opens the score picker inline for correction.
+- [x] **P8-T8 Data panel** — Add an "Arrows" section showing count and one row per arrow with tip coordinates and score. Clicking a score cell opens the score picker inline for correction.
 
 ---
 
