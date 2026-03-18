@@ -12,7 +12,7 @@ ArcheryCounter is a React Native app that detects arrows in archery target photo
 src/              React Native JS/TS source (screens, components, hooks, algorithm)
   targetDetection.ts   Core computer vision algorithm (pure TS port of the C++ pipeline)
   imageLoader.ts       Image decoding helpers (jpeg-js for RN, jimp for Node.js tests)
-  ArcheryCounter.ts    Public API: processImage(uri, base64) → RingEllipse[]
+  ArcheryCounter.ts    Public API: processImage(uri, base64) → ArcheryResult
   useArcheryScorer.ts  Hook: image picker → processImage → state
   components/          RingOverlay.tsx — SVG ellipse overlay
   screens/             HomeScreen.tsx
@@ -55,14 +55,15 @@ npx react-native run-android
 2. **Adaptive colour detection** — two-pass HSV filtering (wide range → adaptive re-centering around
    measured median hue) for yellow, red, and blue zones; returns `ColorBlob | null` per colour
 3. **Centre + scale bootstrap** — mean of blob centroids = target centre; ring-width `w` from
-   blob mean-radii ÷ WA zone centroid ratios (yellow 1.33w, red 3.11w, blue 5.07w)
-4. **Radial profile sampling** — 360 rays from the bootstrap centre; luminance transitions along
-   each ray are detected and matched to the 10 expected ring boundaries
-5. **Fitzgibbon ellipse fit** — Halir-Flusser (1998) constrained algebraic fit on each ring's
-   transition points; concentric centre forced from bootstrap; outlier fits rejected and filled by
-   linear interpolation; rings sorted by width ascending
+   blob mean-radii ÷ WA zone centroid ratios (yellow 1.414w, red 3.162w, blue 5.099w)
+4. **Boundary scan** — 360 rays locate the paper edge polygon; smoothed with a circular median
+   filter; capped per-ray to prevent rings extending beyond the target sheet
+5. **Colour-guided ring detection** — 32 rays; per-ray zone classification + luminance divider
+   detects all 10 ring-boundary distances; outlier points snapped to angular-local median radius
+6. **Spline construction** — detected rings [1,3,5,7,9] converted directly to Catmull-Rom
+   SplineRings; intra-zone rings [0,2,4,6,8] filled by point-wise spline interpolation
 
-Returns `EllipseData[10]` — **index 0 = innermost (bullseye), index 9 = outermost**.
+Returns `ArcheryResult` with `rings: SplineRing[10]` — **index 0 = innermost (bullseye), index 9 = outermost**.
 
 ### HSV convention
 

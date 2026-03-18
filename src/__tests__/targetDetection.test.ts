@@ -2,7 +2,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { loadImageNode } from '../imageLoader';
 import { findTarget } from '../targetDetection';
-import type { SplineRing } from '../spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../../images');
 
@@ -11,7 +10,7 @@ const jpgFiles = fs.readdirSync(IMAGES_DIR)
   .map(f => path.join(IMAGES_DIR, f));
 
 /** Mean of the control-point coordinates — approximates the ring centre. */
-function splineCentroid(ring: SplineRing): [number, number] {
+function splineCentroid(ring: { points: [number, number][] }): [number, number] {
   const n = ring.points.length;
   return [
     ring.points.reduce((s, p) => s + p[0], 0) / n,
@@ -20,7 +19,7 @@ function splineCentroid(ring: SplineRing): [number, number] {
 }
 
 /** Mean radial distance from the centroid — approximates ring radius. */
-function splineRadius(ring: SplineRing): number {
+function splineRadius(ring: { points: [number, number][] }): number {
   const [cx, cy] = splineCentroid(ring);
   const radii = ring.points.map(([x, y]) => Math.hypot(x - cx, y - cy));
   return radii.reduce((s, r) => s + r, 0) / radii.length;
@@ -30,7 +29,7 @@ function splineRadius(ring: SplineRing): number {
  * Approximate semi-axis widths: compute projections of all control points along
  * the horizontal and vertical axes from the centroid.
  */
-function splineAxes(ring: SplineRing): { rx: number; ry: number } {
+function splineAxes(ring: { points: [number, number][] }): { rx: number; ry: number } {
   const [cx, cy] = splineCentroid(ring);
   const xs = ring.points.map(([x]) => Math.abs(x - cx));
   const ys = ring.points.map(([, y]) => Math.abs(y - cy));
@@ -110,6 +109,49 @@ describe('findTarget', () => {
 
     const arSpread = Math.max(...aspectRatios) - Math.min(...aspectRatios);
     expect(arSpread).toBeLessThan(0.8);
+
+    // --- WA ring-width ratios ---
+    // World Archery specifies equal-width scoring zones. Each outer zone boundary
+    // is therefore 1 ring-width further than the inner boundary of the same zone.
+    // The expected radius of ring i (0-indexed) is proportional to (i + 1).
+    // Consecutive detected rings (odd indices 1,3,5,7,9) should therefore grow
+    // by a ratio close to (i+3)/(i+1), which for adjacent pairs is:
+    //   r3/r1 ≈ 4/2 = 2.0,  r5/r3 ≈ 6/4 = 1.5,  r7/r5 ≈ 8/6 = 1.33,  r9/r7 ≈ 10/8 = 1.25
+    // Allow ±30% on each ratio to account for perspective and detection variance.
+    const detectedPairs: [number, number][] = [[1, 3], [3, 5], [5, 7], [7, 9]];
+    const expectedRatios = [2.0, 1.5, 1.333, 1.25];
+    for (let p = 0; p < detectedPairs.length; p++) {
+      const [ia, ib] = detectedPairs[p];
+      const ratio = splineRadius(result.rings[ib]) / splineRadius(result.rings[ia]);
+      expect(ratio).toBeGreaterThan(expectedRatios[p] * 0.7);
+      expect(ratio).toBeLessThan(expectedRatios[p] * 1.3);
+    }
+
+    // --- ringPoints structure ---
+    // Detected rings (odd indices) must have transition points; interpolated rings
+    // (even indices 0,2,4,6) must not (they are derived by spline interpolation).
+    expect(result.ringPoints).toBeDefined();
+    if (result.ringPoints) {
+      const INTERPOLATED = [0, 2, 4, 6];
+      const DETECTED     = [1, 3, 5, 7, 8, 9];
+      for (const i of INTERPOLATED) {
+        expect(result.ringPoints[i]).toHaveLength(0);
+      }
+      for (const i of DETECTED) {
+        expect(result.ringPoints[i].length).toBeGreaterThan(0);
+      }
+    }
+
+    // --- rayDebug ---
+    // The colour-guided path always collects per-ray debug data.
+    expect(result.rayDebug).toBeDefined();
+    if (result.rayDebug) {
+      expect(result.rayDebug.length).toBeGreaterThan(0);
+      for (const entry of result.rayDebug) {
+        expect(entry.distances).toHaveLength(10);
+        expect(entry.boundary).toBeGreaterThan(0);
+      }
+    }
 
     // --- Boundary containment ---
     // Use polygon inradius (min distance from centre to each polygon edge) as

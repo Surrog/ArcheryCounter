@@ -6,12 +6,6 @@ import { sampleClosedSpline } from './spline';
 
 export interface Pixel { x: number; y: number }
 
-interface RotatedRect {
-  center: Pixel;
-  width: number;
-  height: number;
-  angle: number; // degrees
-}
 
 /** @deprecated Use SplineRing from './spline' instead. Kept for backward compatibility. */
 export interface EllipseData {
@@ -38,12 +32,20 @@ export interface ColourCalibration {
   white: [number, number, number];
 }
 
+export interface RayDebugEntry {
+  theta: number;              // ray angle in radians
+  boundary: number;           // boundary distance (smoothed)
+  distances: (number | null)[]; // detected distances per ring [0..9]
+}
+
 export interface ArcheryResult {
   rings: SplineRing[];
   paperBoundary?: TargetBoundary;
   calibration?: ColourCalibration;
   /** Raw per-ray transition points, indexed by ring (0=innermost). */
   ringPoints?: Pixel[][];
+  /** Per-ray debug data, populated only when DEBUG_RAYS is set. */
+  rayDebug?: RayDebugEntry[];
   success: boolean;
   error?: string;
 }
@@ -449,9 +451,9 @@ function arrayMedian(values: number[]): number {
 
 /**
  * Convert radial-profile transition points for one ring into a closed SplineRing.
- * Buckets pts into K angular sectors, computes the median radius per sector, then
- * linearly interpolates any empty sectors from valid neighbours (with circular wrap).
- * Returns K control points at uniformly-spaced angles starting at 0.
+ * Sorts pts by angle around (cx, cy) and uses them directly as Catmull-Rom control
+ * points, so the rendered spline passes through every detected transition position.
+ * Falls back to a unit-circle placeholder when no points are available.
  */
 function radialProfileToSpline(pts: Pixel[], cx: number, cy: number, K = 12): SplineRing {
   if (pts.length === 0) {
@@ -487,25 +489,33 @@ function medianFilter1D(data: number[], windowRadius: number): number[] {
 }
 
 /**
- * Clamp outlier points in a ring's point set to the median radius.
+ * Clamp outlier points in a ring's point set using angular-neighbour comparison.
  *
- * Two-pass radial clamp: points whose distance from (cx,cy) deviates more than
- * `maxDeviation` from the set's median radius are moved to the median radius,
- * keeping their original angle.  Catches rays that latched onto a completely
- * wrong ring boundary without discarding the angular coverage they provide.
+ * Points are sorted by angle, then each point's radius is compared against the
+ * median of its K nearest angular neighbours (K each side, circular wrap).
+ * Points that deviate more than `maxDeviation` from their local median are
+ * snapped to that local median, keeping their original angle.
+ * Two passes let snapped points stabilise the neighbourhood for the next pass.
  */
 function filterRingOutliers(pts: Pixel[], cx: number, cy: number, maxDeviation: number): Pixel[] {
   if (pts.length < 4) return pts;
 
-  let result = pts;
+  const K = 3; // neighbours on each side
+  // Sort by angle once; subsequent passes preserve this order.
+  let result = [...pts].sort(
+    (a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx),
+  );
+
   for (let pass = 0; pass < 2; pass++) {
+    const n = result.length;
     const radii = result.map(p => Math.hypot(p.x - cx, p.y - cy));
-    const medR = arrayMedian(radii);
     result = result.map((p, i) => {
-      if (Math.abs(radii[i] - medR) <= maxDeviation) return p;
-      // Snap to median radius along the same angle.
+      const window: number[] = [];
+      for (let d = -K; d <= K; d++) window.push(radii[(i + d + n) % n]);
+      const localMed = arrayMedian(window);
+      if (Math.abs(radii[i] - localMed) <= maxDeviation) return p;
       const angle = Math.atan2(p.y - cy, p.x - cx);
-      return { x: cx + medR * Math.cos(angle), y: cy + medR * Math.sin(angle) };
+      return { x: cx + localMed * Math.cos(angle), y: cy + localMed * Math.sin(angle) };
     });
   }
   return result;
@@ -857,24 +867,26 @@ function detectRingDistancesOnRay(
 }
 
 /**
- * P3-T5: Colour-guided replacement for collectRingPoints.
- * For each of N rays detects all 10 ring-boundary distances via zone
- * classification + within-zone luminance divider detection, then returns
- * Pixel[][] arrays for fitEllipseFitzgibbon (same interface as before).
+ * Colour-guided ring detection.
+ * For each of N rays, detects all 10 ring-boundary distances via zone
+ * classification and within-zone luminance divider detection.
+ * Returns raw Pixel[][] arrays and per-ray debug data (rayDebug).
  */
 function collectRingPointsColourGuided(
   rgba: Uint8Array, width: number, height: number,
   cx: number, cy: number, w: number,
   N: number, smoothedDists: number[],
   cal: ColourCalibration,
-): Pixel[][] {
+): { ringPoints: Pixel[][]; rayDebug: RayDebugEntry[] } {
   const ringPoints: Pixel[][] = Array.from({ length: 10 }, () => []);
+  const rayDebug: RayDebugEntry[] = [];
   for (let i = 0; i < N; i++) {
     const theta = (i / N) * 2 * Math.PI;
     const cosT = Math.cos(theta), sinT = Math.sin(theta);
     const distances = detectRingDistancesOnRay(
       rgba, width, height, cx, cy, cosT, sinT, smoothedDists[i], w, cal,
     );
+    rayDebug.push({ theta, boundary: smoothedDists[i], distances });
     for (let k = 0; k < 10; k++) {
       const d = distances[k];
       if (d === null || d <= 0) continue;
@@ -885,7 +897,7 @@ function collectRingPointsColourGuided(
       }
     }
   }
-  return ringPoints;
+  return { ringPoints, rayDebug };
 }
 
 // ---------------------------------------------------------------------------
@@ -974,295 +986,9 @@ function collectRingPoints(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4 — Fitzgibbon algebraic ellipse fit (Halir & Flusser 1998)
-// ---------------------------------------------------------------------------
-
-function matMul3x3(a: number[][], b: number[][]): number[][] {
-  const c = [[0,0,0],[0,0,0],[0,0,0]];
-  for (let i = 0; i < 3; i++)
-    for (let j = 0; j < 3; j++)
-      for (let k = 0; k < 3; k++)
-        c[i][j] += a[i][k] * b[k][j];
-  return c;
-}
-
-function matVecMul3(m: number[][], v: number[]): number[] {
-  return [
-    m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2],
-    m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2],
-    m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2],
-  ];
-}
-
-function inv3x3(m: number[][]): number[][] | null {
-  const [[a,b,c],[d,e,f],[g,h,k]] = m;
-  const det = a*(e*k - f*h) - b*(d*k - f*g) + c*(d*h - e*g);
-  if (Math.abs(det) < 1e-14) return null;
-  const inv = 1 / det;
-  return [
-    [ (e*k - f*h)*inv, -(b*k - c*h)*inv,  (b*f - c*e)*inv ],
-    [-(d*k - f*g)*inv,  (a*k - c*g)*inv, -(a*f - c*d)*inv ],
-    [ (d*h - e*g)*inv, -(a*h - b*g)*inv,  (a*e - b*d)*inv ],
-  ];
-}
-
-/**
- * Eigenvalues of a real 3×3 matrix via the characteristic polynomial.
- * Returns all three real roots (may include repeated roots).
- * Falls back to a single real root + two imaginary via Cardano when discriminant < 0.
- */
-function eigenvalues3x3(m: number[][]): number[] {
-  const a00=m[0][0], a01=m[0][1], a02=m[0][2];
-  const a10=m[1][0], a11=m[1][1], a12=m[1][2];
-  const a20=m[2][0], a21=m[2][1], a22=m[2][2];
-
-  const T = a00 + a11 + a22;
-  const P = (a00*a11 - a01*a10) + (a11*a22 - a12*a21) + (a00*a22 - a02*a20);
-  const D = a00*(a11*a22 - a12*a21) - a01*(a10*a22 - a12*a20) + a02*(a10*a21 - a11*a20);
-
-  // Depressed cubic t³ + p·t + q = 0, where λ = t + T/3
-  const p = P - T*T/3;
-  const q = -2*T*T*T/27 + T*P/3 - D;
-
-  const disc = -(4*p*p*p + 27*q*q);
-  const offset = T / 3;
-
-  if (p === 0 && q === 0) return [offset, offset, offset];
-
-  if (disc >= 0 && p < 0) {
-    // Three real roots — trigonometric method
-    const alpha = Math.sqrt(-p / 3);
-    const arg   = Math.max(-1, Math.min(1, -q / (2 * alpha * alpha * alpha)));
-    const phi   = Math.acos(arg) / 3;
-    const m2    = 2 * alpha;
-    return [
-      offset + m2 * Math.cos(phi),
-      offset + m2 * Math.cos(phi + 2 * Math.PI / 3),
-      offset + m2 * Math.cos(phi + 4 * Math.PI / 3),
-    ];
-  }
-
-  // One real root — Cardano's formula
-  const rad  = Math.sqrt(Math.abs(q*q/4 + p*p*p/27));
-  const u    = Math.cbrt(-q/2 + rad);
-  const v    = Math.cbrt(-q/2 - rad);
-  return [offset + u + v];
-}
-
-/**
- * Null-space vector of a 3×3 matrix (assumed near-singular for eigenvalue λ).
- * Uses cross product of the two highest-norm rows.
- */
-function nullVec3x3(m: number[][], lambda: number): number[] {
-  const A = [
-    [m[0][0] - lambda, m[0][1],           m[0][2]          ],
-    [m[1][0],          m[1][1] - lambda,  m[1][2]          ],
-    [m[2][0],          m[2][1],           m[2][2] - lambda ],
-  ];
-  const norms = A.map(r => Math.hypot(r[0], r[1], r[2]));
-  const sorted = [0,1,2].sort((i,j) => norms[j] - norms[i]);
-  const r0 = A[sorted[0]], r1 = A[sorted[1]];
-  const v = [
-    r0[1]*r1[2] - r0[2]*r1[1],
-    r0[2]*r1[0] - r0[0]*r1[2],
-    r0[0]*r1[1] - r0[1]*r1[0],
-  ];
-  const norm = Math.hypot(v[0], v[1], v[2]);
-  return norm < 1e-14 ? [1, 0, 0] : [v[0]/norm, v[1]/norm, v[2]/norm];
-}
-
-function conicToRotatedRect(
-  A: number, B: number, C: number, D: number, E: number, F: number,
-): RotatedRect | null {
-  if (B*B - 4*A*C >= 0) return null; // not an ellipse
-
-  const denom = 4*A*C - B*B; // > 0 for ellipse
-
-  const cx = (B*E - 2*C*D) / denom;
-  const cy = (B*D - 2*A*E) / denom;
-
-  const val    = 2 * (A*E*E + C*D*D - B*D*E + (B*B - 4*A*C)*F);
-  const common = Math.sqrt((A - C)**2 + B*B);
-
-  const a2 = val * (A + C + common);
-  const b2 = val * (A + C - common);
-  if (a2 <= 0 || b2 <= 0) return null;
-
-  const a = Math.sqrt(a2) / Math.abs(denom);
-  const b = Math.sqrt(b2) / Math.abs(denom);
-  if (!isFinite(a) || !isFinite(b)) return null;
-
-  const angle = 0.5 * Math.atan2(B, A - C) * (180 / Math.PI);
-
-  return {
-    center: { x: cx, y: cy },
-    width:  2 * Math.max(a, b),
-    height: 2 * Math.min(a, b),
-    angle,
-  };
-}
-
-function fitEllipseFitzgibbon(points: Pixel[]): RotatedRect | null {
-  if (points.length < 6) return null;
-
-  const n = points.length;
-
-  // Normalize for numerical stability
-  let mx = 0, my = 0;
-  for (const p of points) { mx += p.x; my += p.y; }
-  mx /= n; my /= n;
-
-  let scale = 0;
-  for (const p of points) scale += Math.hypot(p.x - mx, p.y - my);
-  scale /= n;
-  if (scale < 1e-10) return null;
-
-  const invScale = 1 / scale;
-  const xs = points.map(p => (p.x - mx) * invScale);
-  const ys = points.map(p => (p.y - my) * invScale);
-
-  // Scatter matrices S1 (3×3), S2 (3×3), S3 (3×3)
-  const S1: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
-  const S2: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
-  const S3: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
-
-  for (let i = 0; i < n; i++) {
-    const x = xs[i], y = ys[i];
-    const d1 = [x*x, x*y, y*y];
-    const d2 = [x, y, 1];
-    for (let r = 0; r < 3; r++) {
-      for (let c = 0; c < 3; c++) {
-        S1[r][c] += d1[r] * d1[c];
-        S2[r][c] += d1[r] * d2[c];
-        S3[r][c] += d2[r] * d2[c];
-      }
-    }
-  }
-
-  // T = -S3⁻¹ S2ᵀ
-  const S3inv = inv3x3(S3);
-  if (!S3inv) return null;
-
-  const S2T = [[S2[0][0], S2[1][0], S2[2][0]],
-               [S2[0][1], S2[1][1], S2[2][1]],
-               [S2[0][2], S2[1][2], S2[2][2]]];
-  const T = matMul3x3(S3inv, S2T).map(row => row.map(v => -v));
-
-  // M = S1 + S2 * T
-  const S2T_prod = matMul3x3(S2, T);
-  const M: number[][] = S1.map((row, r) => row.map((v, c) => v + S2T_prod[r][c]));
-
-  // M' = C1⁻¹ M, where C1⁻¹ = [[0,0,0.5],[0,-1,0],[0.5,0,0]]
-  const C1inv: number[][] = [[0, 0, 0.5], [0, -1, 0], [0.5, 0, 0]];
-  const Mprime = matMul3x3(C1inv, M);
-
-  // Find eigenvector satisfying ellipse constraint 4ac - b² > 0
-  const eigVals = eigenvalues3x3(Mprime);
-  let bestVec: number[] | null = null;
-  let bestVal = Infinity;
-
-  for (const lambda of eigVals) {
-    const v = nullVec3x3(Mprime, lambda);
-    const cond = 4 * v[0] * v[2] - v[1] * v[1];
-    if (cond > 0 && lambda < bestVal) {
-      bestVal = lambda;
-      bestVec = v;
-    }
-  }
-  if (!bestVec) return null;
-
-  // a2 = T * a1
-  const a2 = matVecMul3(T, bestVec);
-
-  // Conic coefficients in normalized space: [An, Bn, Cn, Dn, En, Fn]
-  const [An, Bn, Cn] = bestVec;
-  const [Dn, En, Fn] = a2;
-
-  // Denormalize: xn = (x - mx)/s, yn = (y - my)/s
-  // A·x² + B·xy + C·y² + D·x + E·y + F = 0 in original coords
-  const s = scale, s2 = s * s;
-  const A = An / s2;
-  const B = Bn / s2;
-  const C = Cn / s2;
-  const D = (-2*An*mx - Bn*my) / s2 + Dn / s;
-  const E = (-2*Cn*my - Bn*mx) / s2 + En / s;
-  const F = An*mx*mx/s2 + Bn*mx*my/s2 + Cn*my*my/s2 - Dn*mx/s - En*my/s + Fn;
-
-  return conicToRotatedRect(A, B, C, D, E, F);
-}
-
-// ---------------------------------------------------------------------------
-// Phase 4e — Interpolate/extrapolate rings with too few sample points
-// ---------------------------------------------------------------------------
-
-function interpolateMissingRings(rings: (RotatedRect | null)[]): RotatedRect[] {
-  const n = rings.length;
-  const result: (RotatedRect | null)[] = [...rings];
-
-  function lerp(a: RotatedRect, b: RotatedRect, t: number): RotatedRect {
-    return {
-      center: {
-        x: a.center.x + t * (b.center.x - a.center.x),
-        y: a.center.y + t * (b.center.y - a.center.y),
-      },
-      width:  Math.max(1, a.width  + t * (b.width  - a.width)),
-      height: Math.max(1, a.height + t * (b.height - a.height)),
-      angle:  a.angle + t * (b.angle - a.angle),
-    };
-  }
-
-  // Pass 1: interpolate nulls that have valid neighbours on both sides
-  for (let i = 0; i < n; i++) {
-    if (result[i]) continue;
-    let prevIdx = -1, nextIdx = -1;
-    for (let j = i - 1; j >= 0; j--) { if (result[j]) { prevIdx = j; break; } }
-    for (let j = i + 1; j < n;  j++) { if (result[j]) { nextIdx = j; break; } }
-    if (prevIdx >= 0 && nextIdx >= 0) {
-      const t = (i - prevIdx) / (nextIdx - prevIdx);
-      result[i] = lerp(result[prevIdx]!, result[nextIdx]!, t);
-    }
-  }
-
-  // Pass 2: extrapolate leftward nulls (no valid left neighbour)
-  for (let i = 0; i < n; i++) {
-    if (result[i]) continue;
-    // Find two valid rings to the right to extrapolate inward
-    let r1 = -1, r2 = -1;
-    for (let j = i + 1; j < n; j++) {
-      if (result[j]) { if (r1 < 0) r1 = j; else { r2 = j; break; } }
-    }
-    if (r1 >= 0 && r2 >= 0) {
-      const t = (i - r1) / (r2 - r1);
-      result[i] = lerp(result[r1]!, result[r2]!, t);
-    } else if (r1 >= 0) {
-      result[i] = { ...result[r1]!, width: Math.max(1, result[r1]!.width * 0.7) };
-    }
-  }
-
-  // Pass 3: extrapolate rightward nulls (no valid right neighbour)
-  for (let i = n - 1; i >= 0; i--) {
-    if (result[i]) continue;
-    let l1 = -1, l2 = -1;
-    for (let j = i - 1; j >= 0; j--) {
-      if (result[j]) { if (l1 < 0) l1 = j; else { l2 = j; break; } }
-    }
-    if (l1 >= 0 && l2 >= 0) {
-      const t = (i - l1) / (l2 - l1);
-      result[i] = lerp(result[l1]!, result[l2]!, t);
-    } else if (l1 >= 0) {
-      result[i] = { ...result[l1]!, width: result[l1]!.width * 1.3 };
-    }
-  }
-
-  // Final fallback: any remaining nulls get a degenerate default
-  const reference = result.find(r => r) ??
-    { center: { x: 0, y: 0 }, width: 10, height: 8, angle: 0 };
-  return result.map((r, i) => r ?? { ...reference, width: reference.width * (i + 1) });
-}
-
-// ---------------------------------------------------------------------------
 // Quadrilateral fitting — rectangular paper boundary
 // ---------------------------------------------------------------------------
+
 
 /**
  * Fits a perspective-projected rectangle to a set of boundary points.
@@ -1500,7 +1226,7 @@ export function findTarget(
     // subsequent ring searches, preventing ellipses from extending beyond the
     // rectangular white target border.
     // Boundary scan uses 360 rays for precise polygon-corner fitting.
-    // Ring detection uses 180 rays (halved cost; K=12 sectors still get ~15 pts each).
+    // Ring detection uses 32 rays (reduced cost; each ring still gets ample coverage).
     const N_BOUNDARY = 360;
     const N_RINGS    = 32;
     const boundary = scanTargetBoundary(
@@ -1529,24 +1255,23 @@ export function findTarget(
     const smoothedDistsRings = Array.from({ length: N_RINGS }, (_, i) =>
       smoothedDists[Math.round(i * N_BOUNDARY / N_RINGS) % N_BOUNDARY],
     );
-    const rawTransitionPoints = calibration
+    const { ringPoints: rawTransitionPoints, rayDebug } = calibration
       ? collectRingPointsColourGuided(rgba, width, height, cx, cy, w, N_RINGS, smoothedDistsRings, calibration)
-      : collectRingPoints(rgba, width, height, cx, cy, w, N_RINGS, 0.4, smoothedDistsRings);
+      : { ringPoints: collectRingPoints(rgba, width, height, cx, cy, w, N_RINGS, 0.4, smoothedDistsRings), rayDebug: [] };
 
-    // Erode outlier points: discard any point whose radius from (cx,cy) deviates
-    // more than 1.5w from its ring's median radius.  Stray detections (arrow holes,
-    // zone-divider noise on single rays) otherwise pull the Fitzgibbon fit off-axis.
+    // Filter outlier points: any point whose radius deviates by more than 0.15w from
+    // its angular-local median is snapped to that median radius.  This corrects
+    // stray detections (arrow holes, single-ray noise) without discarding points.
     const transitionPoints = rawTransitionPoints.map(
-      pts => filterRingOutliers(pts, cx, cy, w * 0.12),
+      pts => filterRingOutliers(pts, cx, cy, w * 0.15),
     );
 
-    // Precompute max boundary radius for fit rejection in Phase 4.
     const maxBoundaryR = Math.max(...smoothedDists);
 
-    // Phase 4 — Build splines for the 6 detected rings [1,3,5,7,8,9].
-    // Intra-zone rings [0,2,4,6] are left as empty placeholders here and filled
-    // below by spline-level interpolation — this avoids propagating per-ray noise
-    // (from individually noisy transition detections) into the final spline shape.
+    // Build splines for the 5 directly-detected rings [1,3,5,7,9] plus regression-
+    // derived white boundaries [8,9].  Intra-zone rings [0,2,4,6] are filled below
+    // by spline-level interpolation — this avoids accumulating per-ray detection
+    // noise into regions that have no colour-zone boundary to anchor them.
     const rings: SplineRing[] = transitionPoints.map(pts => radialProfileToSpline(pts, cx, cy));
 
     // Interpolate intra-zone ring splines from adjacent detected zone boundaries.
@@ -1588,6 +1313,7 @@ export function findTarget(
       paperBoundary,
       calibration,
       ringPoints: detectedRingPoints,
+      rayDebug: rayDebug.length > 0 ? rayDebug : undefined,
       success: true,
     };
   } catch (e) {

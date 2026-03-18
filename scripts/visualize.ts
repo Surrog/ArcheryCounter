@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { Jimp } from 'jimp';
-import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel } from '../src/targetDetection';
+import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel, RayDebugEntry } from '../src/targetDetection';
 import { SplineRing, sampleClosedSpline } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
@@ -67,6 +67,7 @@ function renderSvg(
   rings: SplineRing[],
   paperBoundary?: TargetBoundary,
   ringPoints?: Pixel[][],
+  rayDebug?: RayDebugEntry[],
 ): string {
   // Draw outermost rings first so inner rings render on top
   const pathsSvg = [...rings]
@@ -126,9 +127,33 @@ function renderSvg(
     }).join('');
   }).join('');
 
+  // Rays — line from centre to boundary with coloured tick marks at each detected transition.
+  const rayDebugSvg = (() => {
+    if (!rayDebug || rayDebug.length === 0 || rings.length === 0) return '';
+    const [cx, cy] = splineCentroid(rings[1] ?? rings[0]);
+    return rayDebug.map(({ theta, boundary, distances }) => {
+      const cosT = Math.cos(theta), sinT = Math.sin(theta);
+      const bx = (cx + boundary * cosT).toFixed(1);
+      const by = (cy + boundary * sinT).toFixed(1);
+      const deg = (theta * 180 / Math.PI).toFixed(1);
+      const line = `<line x1="${cx.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${bx}" y2="${by}" stroke="rgba(255,255,255,0.25)" stroke-width="1"/>`;
+      const ticks = distances.map((d, k) => {
+        if (d === null || d <= 0) return '';
+        const tx = (cx + d * cosT).toFixed(1);
+        const ty = (cy + d * sinT).toFixed(1);
+        const color = RING_COLORS[k] ?? '#fff';
+        const stroke = (k >= 6 && k <= 7) ? '#fff' : '#000';
+        return `<circle cx="${tx}" cy="${ty}" r="4" fill="${color}" stroke="${stroke}" stroke-width="1"/>`;
+      }).join('');
+      const label = `<text x="${bx}" y="${by}" font-size="10" fill="#fff" stroke="#000" stroke-width="2" paint-order="stroke" dx="4" dy="4">${deg}°</text>`;
+      return line + ticks + label;
+    }).join('');
+  })();
+
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="display:block;max-width:100%;height:auto">
     <image href="${base64}" width="${width}" height="${height}"/>
     ${boundarySvg}
+    ${rayDebugSvg}
     ${pointsSvg}
     ${ctrlSvg}
     ${pathsSvg}
@@ -239,7 +264,7 @@ function renderSection(entry: ImageEntry): string {
     : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
 
   const content = result.success
-    ? renderSvg(base64, width, height, result.rings, result.paperBoundary, result.ringPoints)
+    ? renderSvg(base64, width, height, result.rings, result.paperBoundary, result.ringPoints, result.rayDebug)
     : base64
       ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
       : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
