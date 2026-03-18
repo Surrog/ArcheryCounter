@@ -95,13 +95,16 @@ function hueInRange(h: number, hMin: number, hMax: number): boolean {
 }
 
 /**
- * Precompute a flat Float32Array of [H,S,V] triples for every pixel in `img`.
+ * Precompute a flat Float64Array of [H,S,V] triples for every pixel in `img`.
  * Index pixel i as: h=cache[i*3], s=cache[i*3+1], v=cache[i*3+2].
  * Building the cache once and passing it to applyHsvFilter avoids recomputing
  * rgbToHsv for the same pretreated pixels across all 6 colour-filter calls.
+ * Float64 (not Float32) is required to preserve the full double precision of
+ * rgbToHsv so that threshold comparisons (e.g. s < 0.30) are identical to
+ * the inline computation.
  */
-function buildHsvCache(img: Uint8Array, n: number): Float32Array {
-  const cache = new Float32Array(n * 3);
+function buildHsvCache(img: Uint8Array, n: number): Float64Array {
+  const cache = new Float64Array(n * 3);
   for (let i = 0; i < n; i++) {
     const [h, s, v] = rgbToHsv(img[i * 4], img[i * 4 + 1], img[i * 4 + 2]);
     cache[i * 3] = h; cache[i * 3 + 1] = s; cache[i * 3 + 2] = v;
@@ -112,7 +115,7 @@ function buildHsvCache(img: Uint8Array, n: number): Float32Array {
 function applyHsvFilter(
   _rgba: Uint8Array, width: number, height: number,
   range: HsvRange,
-  hsvCache: Float32Array,
+  hsvCache: Float64Array,
 ): Uint8Array {
   const mask = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) {
@@ -1255,7 +1258,7 @@ export function findTarget(
     // Downsample the image 4× before pretreating so the Gaussian blur + morph
     // runs on a 300×300 image instead of 1200×1200, giving a ~16× speedup for
     // the bootstrap step.  Centroid and radius are scaled back up afterward.
-    const BOOTSTRAP_SCALE = 4;
+    const BOOTSTRAP_SCALE = 2;
     const ds = downsampleRgba(rgba, width, height, BOOTSTRAP_SCALE);
     const pretreated = pretreat(ds.data, ds.width, ds.height);
     // Build HSV cache for the pretreated image once so the 6 applyHsvFilter calls
