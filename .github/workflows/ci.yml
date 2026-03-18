@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   # ── React Native: Jest unit + algorithm tests ────────────────────────────────
   react-native:
