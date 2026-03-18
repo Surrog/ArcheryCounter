@@ -106,18 +106,7 @@ The **impact point** — where the shaft enters the paper — is the scoring loc
 
 ### 7.3 Detection approaches
 
-#### A. Nock-first (recommended primary approach)
-
-Nocks are the visually cleanest element:
-1. **Detect nock blobs**: look for small (5–20 px diameter), near-circular, highly-saturated blobs inside or near the target boundary. Prefer colors outside the known target-zone hue ranges (see calibration), but any high-saturation small circle is a candidate.
-2. **Estimate shaft direction**: cast multiple oriented line-scan rays from each nock candidate toward the target center. The direction minimizing mean luminance (dark shaft) is the shaft axis. All shaft directions should agree within ~5°; use the modal direction as the prior for all arrows.
-3. **Trace shaft to impact point**: follow the shaft axis from the nock inward until luminance jumps to match the local target-zone background. The last sub-threshold pixel is the entry point.
-
-**Strengths**: robust to shaft color, works even with specular highlights (the dark body is always darker than the background), natural multi-arrow handling.
-
-**Weaknesses**: nock color can overlap target zone colors (e.g., a red nock on a red zone → hard to distinguish). Mitigation: require the blob to be isolated (not part of a large uniform region) and slightly above the target plane (displaced from the target surface by the shaft projection).
-
-#### B. Shaft line detection (Hough / LSD)
+#### A. Shaft line detection (Hough / LSD)
 
 The shaft appears as a thin line segment. A Hough line transform (or Line Segment Detector) on a luminance-edge image finds candidate lines. Filter:
 - Within the target boundary
@@ -125,19 +114,19 @@ The shaft appears as a thin line segment. A Hough line transform (or Line Segmen
 - Consistent direction (within 10° of the estimated shaft vanishing point)
 - One endpoint on or near the target surface (impact point), other endpoint free (nock end)
 
-**Strengths**: directly finds the shaft regardless of nock color.
+**Strengths**: directly finds the shaft regardless of nock/vane color.
 
-**Weaknesses**: many false positives (ring-outline edge segments, ring divider lines). Requires a Hough transform implementation in pure TypeScript. The shaft direction prior from nock detection (§A) dramatically reduces false positives.
+**Weaknesses**: many false positives (ring-outline edge segments, ring divider lines). Requires a Hough transform implementation in pure TypeScript. The shaft direction prior (all shafts in a frame share the same vanishing point) dramatically reduces false positives.
 
-#### C. Doublet filter (specular shaft signature)
+#### B. Doublet filter (specular shaft signature)
 
 A glossy shaft under directional light shows a bright specular streak ≈1 px to one side of a dark line. This "doublet" (dark–bright or bright–dark depending on light direction) is distinctive. A matched filter tuned to this pattern (width ≈3 px, oriented along the shaft direction) would have high specificity.
 
 **Strengths**: high selectivity against ring-outline edges, which are dark–bright on one side only.
 
-**Weaknesses**: requires knowing the shaft direction and light direction first; a good refinement step after A or B, not a standalone detector.
+**Weaknesses**: requires knowing the shaft direction and light direction first; a good refinement step after A, not a standalone detector.
 
-#### D. Arrow-hole detection (fallback / post-pull mode)
+#### C. Arrow-hole detection (fallback / post-pull mode)
 
 After arrows are removed, circular holes (5–15 px diameter) expose the hay bale (H∈[15°,65°], S>0.25, V<0.6). These appear as small warm-dark blobs within the target boundary.
 
@@ -151,11 +140,11 @@ After arrows are removed, circular holes (5–15 px diameter) expose the hay bal
 
 ### 7.4 Recommended implementation order
 
-1. **Nock detector** (P9-T1): start with a simple thresholded blob detector (find connected components with saturation > 0.5, V > 0.4, area 20–400 px², eccentricity < 0.7).
-2. **Shaft direction prior** (P9-T2): from 2+ nock candidates, estimate the common vanishing point direction.
-3. **Impact point localisation** (P9-T3): trace shaft ray inward from each nock to the paper surface.
-4. **Arrow-hole fallback** (P9-T5): implement as alternative path when no nocks are found.
-5. **Doublet refinement** (later): once the direction is known, use the doublet filter to sub-pixel refine the impact point.
+1. **Shaft direction prior** (P9-T1): on a Hough-edge image of the target region, find the dominant line direction (all shafts share one vanishing point). A 1D Hough accumulator over angle is sufficient.
+2. **Shaft line detection** (P9-T2): Hough or LSD filtered to the estimated direction ±10°. Each detected segment with one endpoint on the target surface is a candidate shaft.
+3. **Impact point localisation** (P9-T3): the segment endpoint closest to the target centre is the entry point.
+4. **Arrow-hole fallback** (P9-T5): implement as alternative path when no shaft lines are found.
+5. **Doublet refinement** (later): once the shaft direction is known, use the doublet filter to sub-pixel refine the impact point.
 
 ### 7.5 Test dataset requirements
 
@@ -171,7 +160,6 @@ Store annotations in the same PostgreSQL `annotations` table used for ring groun
 
 | Question | Notes |
 |---|---|
-| Nock color variability | Can be any saturated color including those that appear on the target. A color classifier trained per-image (like zone calibration) may be needed. |
-| Indoor vs outdoor lighting | Indoor: diffuse, low specular; outdoor: directional sun → strong specular on shaft. The doublet filter is more useful outdoors. |
-| Arrow damage to target around impact | The paper tears and crumples; the entry point is not a clean circle. Use the shaft-ray method rather than trying to detect the hole shape. |
-| Arrows covering ring boundaries | A shaft crossing a ring boundary can occlude detection; the shaft mask should be subtracted before ring detection if shafts are detected first. (Future: run arrow detection before ring detection for images where arrows are visible.) |
+| Arrow damage to target around impact | Paper tears and crumples at the entry point; do not try to detect hole shape — use the shaft-ray method to project the entry point. |
+| Arrows covering ring boundaries | A shaft crossing a ring boundary occludes 1–3 rays at most; the existing outlier-rejection (angular-local median radius snapping) is likely sufficient. If needed in a future iteration, detect shafts first and mask those ray pixels before ring detection. |
+| Outdoor / directional lighting | Out of scope for current images (indoor / diffuse). Revisit when outdoor test images are available — the doublet filter becomes more valuable under directional sun. |
