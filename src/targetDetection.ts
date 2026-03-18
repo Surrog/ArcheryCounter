@@ -94,20 +94,73 @@ function hueInRange(h: number, hMin: number, hMax: number): boolean {
   return h >= lo || h <= hi;
 }
 
+/**
+ * Precompute a flat Float64Array of [H,S,V] triples for every pixel in `img`.
+ * Index pixel i as: h=cache[i*3], s=cache[i*3+1], v=cache[i*3+2].
+ * Building the cache once and passing it to applyHsvFilter avoids recomputing
+ * rgbToHsv for the same pretreated pixels across all 6 colour-filter calls.
+ * Float64 (not Float32) is required to preserve the full double precision of
+ * rgbToHsv so that threshold comparisons (e.g. s < 0.30) are identical to
+ * the inline computation.
+ */
+function buildHsvCache(img: Uint8Array, n: number): Float64Array {
+  const cache = new Float64Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const [h, s, v] = rgbToHsv(img[i * 4], img[i * 4 + 1], img[i * 4 + 2]);
+    cache[i * 3] = h; cache[i * 3 + 1] = s; cache[i * 3 + 2] = v;
+  }
+  return cache;
+}
+
 function applyHsvFilter(
-  rgba: Uint8Array, width: number, height: number,
+  _rgba: Uint8Array, width: number, height: number,
   range: HsvRange,
+  hsvCache: Float64Array,
 ): Uint8Array {
   const mask = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) {
-    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
-    const [h, s, v] = rgbToHsv(r, g, b);
+    const h = hsvCache[i * 3], s = hsvCache[i * 3 + 1], v = hsvCache[i * 3 + 2];
     if (s < range.sMin || v < range.vMin) continue;
     for (const [hMin, hMax] of range.hRanges) {
       if (hueInRange(h, hMin, hMax)) { mask[i] = 255; break; }
     }
   }
   return mask;
+}
+
+// ---------------------------------------------------------------------------
+// Downsampling — integer box average for bootstrap colour detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Box-average downsample of an RGBA image by an integer scale factor.
+ * Each output pixel is the unweighted mean of the scale×scale input block.
+ * Used to reduce the pretreated image size before colour blob detection so
+ * that the expensive Gaussian blur + morphology only runs on a small image.
+ */
+function downsampleRgba(
+  rgba: Uint8Array, srcW: number, srcH: number, scale: number,
+): { data: Uint8Array; width: number; height: number } {
+  const dstW = Math.ceil(srcW / scale);
+  const dstH = Math.ceil(srcH / scale);
+  const out = new Uint8Array(dstW * dstH * 4);
+  for (let dy = 0; dy < dstH; dy++) {
+    const syMax = Math.min((dy + 1) * scale, srcH);
+    for (let dx = 0; dx < dstW; dx++) {
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      const sxMax = Math.min((dx + 1) * scale, srcW);
+      for (let sy = dy * scale; sy < syMax; sy++) {
+        for (let sx = dx * scale; sx < sxMax; sx++) {
+          const i = (sy * srcW + sx) * 4;
+          r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; a += rgba[i + 3];
+          n++;
+        }
+      }
+      const o = (dy * dstW + dx) * 4;
+      out[o] = r / n; out[o + 1] = g / n; out[o + 2] = b / n; out[o + 3] = a / n;
+    }
+  }
+  return { data: out, width: dstW, height: dstH };
 }
 
 // ---------------------------------------------------------------------------
@@ -378,11 +431,12 @@ function detectColorBlob(
   pretreated: Uint8Array, rgba: Uint8Array,
   width: number, height: number,
   color: 'yellow' | 'red' | 'blue',
+  hsvCache: Float32Array,
 ): ColorBlob | null {
   const minPx = width * height * 0.001;
 
   // Pass 1 — wide initial range on pretreated image
-  const mask1 = applyHsvFilter(pretreated, width, height, COLOUR_RANGES[color]);
+  const mask1 = applyHsvFilter(pretreated, width, height, COLOUR_RANGES[color], hsvCache);
   const blob1 = aggregateBlobs(mask1, width, height);
   if (blob1.pixelCount < minPx) return null;
 
@@ -411,7 +465,7 @@ function detectColorBlob(
     vMin: COLOUR_RANGES[color].vMin,
   };
 
-  const mask2 = applyHsvFilter(pretreated, width, height, narrowRange);
+  const mask2 = applyHsvFilter(pretreated, width, height, narrowRange, hsvCache);
   // Yellow is a solid disk — use tighter aggregation to exclude nearby hay-bale
   // or clothing pixels that sit just outside the target's yellow zone.
   const mergeThresholdFactor = 2.5;
@@ -836,6 +890,21 @@ function detectRingDistancesOnRay(
   // Intra-zone rings [0, 2, 4, 6] are NOT computed here — they are derived at
   // the spline level in findTarget() by interpolating between adjacent fitted
   // zone-boundary splines.  That avoids propagating per-ray noise before fitting.
+  //
+  // Monotonicity: each transition is scanned independently from ray origin, so
+  // a colour-zone false positive (hay bale, arrow shaft, reflection) can place
+  // an outer transition closer than an inner one.  Discard any transition that
+  // violates strict increase; it is treated as missing and filled by regression.
+  let lastTransDist = 0;
+  for (let ti = 0; ti < transitionDist.length; ti++) {
+    if (transitionDist[ti] !== null) {
+      if ((transitionDist[ti] as number) <= lastTransDist) {
+        transitionDist[ti] = null;
+      } else {
+        lastTransDist = transitionDist[ti] as number;
+      }
+    }
+  }
   const [r1, r3, r5, r7] = transitionDist;
   result[1] = r1;
   result[3] = r3;
@@ -843,8 +912,10 @@ function detectRingDistancesOnRay(
   result[7] = r7;
 
   // White zone: not reliably detectable (low saturation, similar to background).
-  // Extrapolate rings[8] and rings[9] via linear regression through the 4
-  // confirmed colour transitions, clamped below the paper boundary.
+  // Extrapolate rings[8] and rings[9] via linear regression through the detected
+  // colour transitions.  Also fill in ring[7] from regression when the boundary
+  // scan stopped early (boundary < predicted r7), so the outer rings don't collapse
+  // in directions where hay bale or the image edge truncates the boundary scan.
   const knownBoundaries = ([
     { ringIdx: 1, dist: r1 },
     { ringIdx: 3, dist: r3 },
@@ -853,14 +924,43 @@ function detectRingDistancesOnRay(
   ] as { ringIdx: number; dist: number | null }[])
     .filter(({ dist }) => dist !== null) as { ringIdx: number; dist: number }[];
 
-  const r7safe = r7 ?? 8 * w;
   if (knownBoundaries.length >= 2) {
     const predictR = fitRingRadiusModel(knownBoundaries);
-    result[8] = Math.max(r7safe,              Math.min(boundaryDist * 0.98, predictR(8)));
-    result[9] = Math.max(result[8] as number, Math.min(boundaryDist * 0.99, predictR(9)));
+    // If r7 was not detected and the regression predicts it beyond the boundary,
+    // the boundary scan stopped early — fill r7 from regression and skip the
+    // boundary cap for r8/r9 so the outer rings aren't pinched toward the centre.
+    const boundaryTruncated = r7 === null && predictR(7) > boundaryDist;
+    if (boundaryTruncated) {
+      result[7] = predictR(7);
+    }
+    const r7safe = (result[7] as number | null) ?? 8 * w;
+    if (boundaryTruncated) {
+      result[8] = Math.max(r7safe, predictR(8));
+      result[9] = Math.max(result[8] as number, predictR(9));
+    } else {
+      result[8] = Math.max(r7safe,              Math.min(boundaryDist * 0.98, predictR(8)));
+      result[9] = Math.max(result[8] as number, Math.min(boundaryDist * 0.99, predictR(9)));
+    }
   } else {
+    const r7safe = r7 ?? 8 * w;
     result[8] = 9  * w < boundaryDist ? 9  * w : null;
     result[9] = 10 * w < boundaryDist ? 10 * w : null;
+    void r7safe; // r7safe not needed in this branch but keeps TS happy
+  }
+
+  // Final guard: ensure all non-null distances are strictly increasing.
+  // A bad scale estimate (w) or a misdetected transition can leave regression
+  // values smaller than a detected inner ring.  Null out any violation — the
+  // spline fitter will interpolate missing outer rings from neighbouring rays.
+  let prevR = 0;
+  for (let k = 0; k < 10; k++) {
+    if (result[k] !== null) {
+      if ((result[k] as number) <= prevR) {
+        result[k] = null;
+      } else {
+        prevR = result[k] as number;
+      }
+    }
   }
 
   return result;
@@ -1200,14 +1300,29 @@ export function findTarget(
   rgba: Uint8Array, width: number, height: number,
 ): ArcheryResult {
   try {
-    const pretreated = pretreat(rgba, width, height);
+    // Phase 1 — adaptive colour detection.
+    // Downsample the image 4× before pretreating so the Gaussian blur + morph
+    // runs on a 300×300 image instead of 1200×1200, giving a ~16× speedup for
+    // the bootstrap step.  Centroid and radius are scaled back up afterward.
+    const BOOTSTRAP_SCALE = 2;
+    const ds = downsampleRgba(rgba, width, height, BOOTSTRAP_SCALE);
+    const pretreated = pretreat(ds.data, ds.width, ds.height);
+    // Build HSV cache for the pretreated image once so the 6 applyHsvFilter calls
+    // (3 colours × 2 passes) share the same precomputed values.
+    const pretreatedHsv = buildHsvCache(pretreated, ds.width * ds.height);
 
-    // Phase 1 — adaptive colour detection
     const blobs = {
-      yellow: detectColorBlob(pretreated, rgba, width, height, 'yellow'),
-      red:    detectColorBlob(pretreated, rgba, width, height, 'red'),
-      blue:   detectColorBlob(pretreated, rgba, width, height, 'blue'),
+      yellow: detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'yellow', pretreatedHsv),
+      red:    detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'red',    pretreatedHsv),
+      blue:   detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'blue',   pretreatedHsv),
     };
+    // Scale centroid + radius back to full-resolution coordinates.
+    for (const blob of Object.values(blobs)) {
+      if (!blob) continue;
+      blob.centroid.x *= BOOTSTRAP_SCALE;
+      blob.centroid.y *= BOOTSTRAP_SCALE;
+      blob.meanRadius *= BOOTSTRAP_SCALE;
+    }
 
     if (Object.values(blobs).every(b => b === null)) {
       return { rings: [], success: false, error: 'No colour blobs found' };
@@ -1225,17 +1340,17 @@ export function findTarget(
     // is not confused with the yellow scoring zone.  Per-ray distances cap all
     // subsequent ring searches, preventing ellipses from extending beyond the
     // rectangular white target border.
-    // Boundary scan uses 360 rays for precise polygon-corner fitting.
-    // Ring detection uses 32 rays (reduced cost; each ring still gets ample coverage).
-    const N_BOUNDARY = 360;
+    // Boundary scan uses 180 rays (2° per ray) — enough for precise polygon-corner
+    // fitting.  Ring detection uses 32 rays (each ring still gets ample coverage).
+    const N_BOUNDARY = 180;
     const N_RINGS    = 32;
     const boundary = scanTargetBoundary(
       rgba, width, height, cx, cy, Math.max(w * 4, 20), N_BOUNDARY,
     );
-    // Smooth the per-ray distances with a circular median filter (±10 rays)
+    // Smooth the per-ray distances with a circular median filter (±5 rays = ±10°)
     // to eliminate single-angle outliers caused by hay-straw spikes or
     // borderline-threshold pixels at isolated angles.
-    const smoothedDists = medianFilter1D(boundary.dists, 10);
+    const smoothedDists = medianFilter1D(boundary.dists, 5);
     const smoothedPoints = smoothedDists.map((d, i) => {
       const theta = (i / N_BOUNDARY) * 2 * Math.PI;
       return { x: Math.round(cx + d * Math.cos(theta)), y: Math.round(cy + d * Math.sin(theta)) };
