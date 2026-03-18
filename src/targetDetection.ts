@@ -126,6 +126,41 @@ function applyHsvFilter(
 }
 
 // ---------------------------------------------------------------------------
+// Downsampling — integer box average for bootstrap colour detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Box-average downsample of an RGBA image by an integer scale factor.
+ * Each output pixel is the unweighted mean of the scale×scale input block.
+ * Used to reduce the pretreated image size before colour blob detection so
+ * that the expensive Gaussian blur + morphology only runs on a small image.
+ */
+function downsampleRgba(
+  rgba: Uint8Array, srcW: number, srcH: number, scale: number,
+): { data: Uint8Array; width: number; height: number } {
+  const dstW = Math.ceil(srcW / scale);
+  const dstH = Math.ceil(srcH / scale);
+  const out = new Uint8Array(dstW * dstH * 4);
+  for (let dy = 0; dy < dstH; dy++) {
+    const syMax = Math.min((dy + 1) * scale, srcH);
+    for (let dx = 0; dx < dstW; dx++) {
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      const sxMax = Math.min((dx + 1) * scale, srcW);
+      for (let sy = dy * scale; sy < syMax; sy++) {
+        for (let sx = dx * scale; sx < sxMax; sx++) {
+          const i = (sy * srcW + sx) * 4;
+          r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; a += rgba[i + 3];
+          n++;
+        }
+      }
+      const o = (dy * dstW + dx) * 4;
+      out[o] = r / n; out[o + 1] = g / n; out[o + 2] = b / n; out[o + 3] = a / n;
+    }
+  }
+  return { data: out, width: dstW, height: dstH };
+}
+
+// ---------------------------------------------------------------------------
 // Pretreatment — Gaussian blur + erode + dilate (unchanged from original)
 // ---------------------------------------------------------------------------
 
@@ -1216,17 +1251,29 @@ export function findTarget(
   rgba: Uint8Array, width: number, height: number,
 ): ArcheryResult {
   try {
-    const pretreated = pretreat(rgba, width, height);
+    // Phase 1 — adaptive colour detection.
+    // Downsample the image 4× before pretreating so the Gaussian blur + morph
+    // runs on a 300×300 image instead of 1200×1200, giving a ~16× speedup for
+    // the bootstrap step.  Centroid and radius are scaled back up afterward.
+    const BOOTSTRAP_SCALE = 4;
+    const ds = downsampleRgba(rgba, width, height, BOOTSTRAP_SCALE);
+    const pretreated = pretreat(ds.data, ds.width, ds.height);
     // Build HSV cache for the pretreated image once so the 6 applyHsvFilter calls
     // (3 colours × 2 passes) share the same precomputed values.
-    const pretreatedHsv = buildHsvCache(pretreated, width * height);
+    const pretreatedHsv = buildHsvCache(pretreated, ds.width * ds.height);
 
-    // Phase 1 — adaptive colour detection
     const blobs = {
-      yellow: detectColorBlob(pretreated, rgba, width, height, 'yellow', pretreatedHsv),
-      red:    detectColorBlob(pretreated, rgba, width, height, 'red',    pretreatedHsv),
-      blue:   detectColorBlob(pretreated, rgba, width, height, 'blue',   pretreatedHsv),
+      yellow: detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'yellow', pretreatedHsv),
+      red:    detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'red',    pretreatedHsv),
+      blue:   detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'blue',   pretreatedHsv),
     };
+    // Scale centroid + radius back to full-resolution coordinates.
+    for (const blob of Object.values(blobs)) {
+      if (!blob) continue;
+      blob.centroid.x *= BOOTSTRAP_SCALE;
+      blob.centroid.y *= BOOTSTRAP_SCALE;
+      blob.meanRadius *= BOOTSTRAP_SCALE;
+    }
 
     if (Object.values(blobs).every(b => b === null)) {
       return { rings: [], success: false, error: 'No colour blobs found' };
