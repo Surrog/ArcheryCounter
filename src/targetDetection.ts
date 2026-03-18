@@ -94,14 +94,29 @@ function hueInRange(h: number, hMin: number, hMax: number): boolean {
   return h >= lo || h <= hi;
 }
 
+/**
+ * Precompute a flat Float32Array of [H,S,V] triples for every pixel in `img`.
+ * Index pixel i as: h=cache[i*3], s=cache[i*3+1], v=cache[i*3+2].
+ * Building the cache once and passing it to applyHsvFilter avoids recomputing
+ * rgbToHsv for the same pretreated pixels across all 6 colour-filter calls.
+ */
+function buildHsvCache(img: Uint8Array, n: number): Float32Array {
+  const cache = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const [h, s, v] = rgbToHsv(img[i * 4], img[i * 4 + 1], img[i * 4 + 2]);
+    cache[i * 3] = h; cache[i * 3 + 1] = s; cache[i * 3 + 2] = v;
+  }
+  return cache;
+}
+
 function applyHsvFilter(
-  rgba: Uint8Array, width: number, height: number,
+  _rgba: Uint8Array, width: number, height: number,
   range: HsvRange,
+  hsvCache: Float32Array,
 ): Uint8Array {
   const mask = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) {
-    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
-    const [h, s, v] = rgbToHsv(r, g, b);
+    const h = hsvCache[i * 3], s = hsvCache[i * 3 + 1], v = hsvCache[i * 3 + 2];
     if (s < range.sMin || v < range.vMin) continue;
     for (const [hMin, hMax] of range.hRanges) {
       if (hueInRange(h, hMin, hMax)) { mask[i] = 255; break; }
@@ -378,11 +393,12 @@ function detectColorBlob(
   pretreated: Uint8Array, rgba: Uint8Array,
   width: number, height: number,
   color: 'yellow' | 'red' | 'blue',
+  hsvCache: Float32Array,
 ): ColorBlob | null {
   const minPx = width * height * 0.001;
 
   // Pass 1 — wide initial range on pretreated image
-  const mask1 = applyHsvFilter(pretreated, width, height, COLOUR_RANGES[color]);
+  const mask1 = applyHsvFilter(pretreated, width, height, COLOUR_RANGES[color], hsvCache);
   const blob1 = aggregateBlobs(mask1, width, height);
   if (blob1.pixelCount < minPx) return null;
 
@@ -411,7 +427,7 @@ function detectColorBlob(
     vMin: COLOUR_RANGES[color].vMin,
   };
 
-  const mask2 = applyHsvFilter(pretreated, width, height, narrowRange);
+  const mask2 = applyHsvFilter(pretreated, width, height, narrowRange, hsvCache);
   // Yellow is a solid disk — use tighter aggregation to exclude nearby hay-bale
   // or clothing pixels that sit just outside the target's yellow zone.
   const mergeThresholdFactor = 2.5;
@@ -1201,12 +1217,15 @@ export function findTarget(
 ): ArcheryResult {
   try {
     const pretreated = pretreat(rgba, width, height);
+    // Build HSV cache for the pretreated image once so the 6 applyHsvFilter calls
+    // (3 colours × 2 passes) share the same precomputed values.
+    const pretreatedHsv = buildHsvCache(pretreated, width * height);
 
     // Phase 1 — adaptive colour detection
     const blobs = {
-      yellow: detectColorBlob(pretreated, rgba, width, height, 'yellow'),
-      red:    detectColorBlob(pretreated, rgba, width, height, 'red'),
-      blue:   detectColorBlob(pretreated, rgba, width, height, 'blue'),
+      yellow: detectColorBlob(pretreated, rgba, width, height, 'yellow', pretreatedHsv),
+      red:    detectColorBlob(pretreated, rgba, width, height, 'red',    pretreatedHsv),
+      blue:   detectColorBlob(pretreated, rgba, width, height, 'blue',   pretreatedHsv),
     };
 
     if (Object.values(blobs).every(b => b === null)) {
@@ -1225,17 +1244,17 @@ export function findTarget(
     // is not confused with the yellow scoring zone.  Per-ray distances cap all
     // subsequent ring searches, preventing ellipses from extending beyond the
     // rectangular white target border.
-    // Boundary scan uses 360 rays for precise polygon-corner fitting.
-    // Ring detection uses 32 rays (reduced cost; each ring still gets ample coverage).
-    const N_BOUNDARY = 360;
+    // Boundary scan uses 180 rays (2° per ray) — enough for precise polygon-corner
+    // fitting.  Ring detection uses 32 rays (each ring still gets ample coverage).
+    const N_BOUNDARY = 180;
     const N_RINGS    = 32;
     const boundary = scanTargetBoundary(
       rgba, width, height, cx, cy, Math.max(w * 4, 20), N_BOUNDARY,
     );
-    // Smooth the per-ray distances with a circular median filter (±10 rays)
+    // Smooth the per-ray distances with a circular median filter (±5 rays = ±10°)
     // to eliminate single-angle outliers caused by hay-straw spikes or
     // borderline-threshold pixels at isolated angles.
-    const smoothedDists = medianFilter1D(boundary.dists, 10);
+    const smoothedDists = medianFilter1D(boundary.dists, 5);
     const smoothedPoints = smoothedDists.map((d, i) => {
       const theta = (i / N_BOUNDARY) * 2 * Math.PI;
       return { x: Math.round(cx + d * Math.cos(theta)), y: Math.round(cy + d * Math.sin(theta)) };
