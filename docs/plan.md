@@ -97,22 +97,58 @@ interface ArrowAnnotation {
 
 ## Phase 9 — Arrow detection (algorithm)
 
-See `docs/research.md §7` for the full research and approach comparison.
-
 *Implement after P8 so a ground-truth dataset can be collected first.*
 
-- [ ] **P9-T1** Shaft direction prior: 1D Hough accumulator over line angles in the target region; all shafts share a common vanishing point direction.
-- [ ] **P9-T2** Shaft line detection: Hough/LSD filtered to estimated direction ±10°; each segment with one endpoint on the target surface is a candidate shaft.
-- [ ] **P9-T3** Impact point: the segment endpoint closest to the target centre is the entry point.
-- [ ] **P9-T4** Multi-arrow deduplication: merge nearby shaft-line candidates; require one impact point per shaft.
-- [ ] **P9-T5** Arrow-hole fallback: if no shaft lines are found, detect small (~5–15 px) dark/warm circular regions (exposed hay) within the target boundary.
-- [ ] **P9-T6** Collect images with arrows in place (and post-pull holes) using the P8 annotation tool; build a detection test dataset.
-- [ ] **P9-T7** Add arrow ground-truth tests to `src/__tests__/groundTruth.test.ts`: for each image with annotated arrows, run `findArrows(rgba, width, height, targetResult)` and assert:
+### Algorithm rationale (from annotated dataset)
+
+Measured across all 10 annotated images (63 arrows total):
+
+| Property | Range | Typical |
+|---|---|---|
+| Shaft length (px) | 36–438 | 100–300 |
+| Per-image angle spread | 14–111° | 30–55° |
+| Tips per image | 5–9 | 6 |
+
+**Why direction filtering was dropped:** per-image shaft angle spreads of 30–55° (up to 111° in one image) mean any fixed angular window would discard a large fraction of valid arrows. Shafts flex on impact and archers shift stance between shots.
+
+**Why size + straightness instead of endpoint geometry:** some shafts start and end inside the paper boundary (observed down to 36 px). An "exactly one endpoint outside" rule would miss them entirely. LSD gives straight segments by construction; ring boundaries are curved and break into many short arc-tangent fragments. A minimum-length threshold after merging therefore naturally separates shaft segments (30–438 px, single long line) from ring-boundary noise.
+
+**Two additional challenges visible in the images:**
+- **Shaft crossings** — in 7/10 images arrows cross each other; LSD splits each shaft into two half-segments at every intersection. Without a merge step these halves may fall below the minimum-length threshold or produce wrong tip positions.
+- **LSD produces edge pairs, not centerlines** — a shaft ~5 px wide produces two parallel edge segments ~5 px apart. These must be merged into a single centerline before filtering, otherwise tip positions are off by ~2–3 px and the same shaft appears twice.
+- **Vanes are the most distinctive nock feature** — every arrow has brightly coloured fletching (yellow-green, blue, or red) at the nock end, clearly visible against the cork background. The shaft line often ends at the vane base, not the true nock tip. Detecting vane colour blobs outside the paper boundary gives more reliable nock positions than extrapolating the shaft line.
+
+### Tasks
+
+- [ ] **P9-T1** Segment extraction: run LSD on the full image; collect all raw edge segments. No direction or length filtering yet.
+
+- [ ] **P9-T2** Segment merging — two passes before any filtering:
+  1. *Centerline merge*: merge pairs of parallel segments within 8 px and angle difference < 5° into a single midline segment (handles the LSD edge-pair problem).
+  2. *Collinear merge*: merge nearly-collinear segments (angle difference < 3°, endpoint gap < 20 px, same line within 4 px perpendicular offset) into a single extended segment (handles the shaft-crossing split problem).
+
+- [ ] **P9-T3** Size + area filter: from merged segments, keep those that:
+  1. Have length ≥ 30 px.
+  2. Have at least one endpoint or their midpoint within the paper boundary (extended 1 ring-width outward).
+  3. Are not ring-boundary approximations: reject if midpoint is within 8 px of a detected ring radius **and** angle is within 15° of the tangent at that point.
+  Tip = endpoint closest to the target centre; nock endpoint = the other end (or `null` if both inside paper).
+
+- [ ] **P9-T4** Vane colour detection: find compact high-saturation blobs (HSV: hue 30–80° yellow/green or 195–245° blue or 340–20° red; S > 0.55, V > 0.35; area 20–400 px²) outside the paper boundary. Each blob centroid = candidate nock. Match each P9-T3 shaft tip to the nearest unmatched vane blob within 60 px along the shaft direction; replace the shaft nock endpoint with the vane centroid. Unmatched vane blobs are retained as standalone nock candidates for the fallback step.
+
+- [ ] **P9-T5** Multi-arrow deduplication: cluster candidate tips within 15 px; within each cluster keep the arrow with the longest shaft. Each cluster → one arrow candidate.
+
+- [ ] **P9-T6** Hole fallback — two cases:
+  - *Short-shaft / tip-only*: detect small (~3–15 px) dark non-ring-coloured patches (arrow holes) inside the paper boundary not already claimed by a P9-T3/T5 detection. Each unclaimed hole → tip; if an unmatched vane blob lies within 200 px, use it as the nock; otherwise estimate nock = tip + median_shaft_direction × median_shaft_length from same-image detections.
+  - *No detections at all*: hole detection only; nock left as `null`.
+
+- [ ] **P9-T7** Dataset is complete (collected in P8). 10 images, 63 arrows, all scored.
+
+- [ ] **P9-T8** Add arrow ground-truth tests to `src/__tests__/groundTruth.test.ts`: for each image with annotated arrows, run `findArrows(rgba, width, height, targetResult)` and assert:
   - Detected arrow count matches annotated count (exact).
-  - Each annotated tip is within 15 px of the nearest detected tip (bijective matching — each annotation pairs with exactly one detection).
-  - Each annotated nock is within 25 px of its matched detection's nock (looser tolerance: nock position is less critical for scoring).
-  - For arrows where `score !== null`: `detectedScore === annotatedScore` for each matched pair. Arrows with `score: null` are skipped for the score assertion.
-- [ ] **P9-T8** Wire into Phase P10 scoring once impact points are reliable.
+  - Each annotated tip is within 15 px of the nearest detected tip (bijective matching).
+  - Each annotated nock is within 40 px of its matched detection's nock. Skip nock assertion when `detectedNock === null` (fallback case).
+  - For arrows where `score !== null`: `detectedScore === annotatedScore`. Arrows with `score: null` skipped.
+
+- [ ] **P9-T9** Wire into Phase P10 scoring once impact points are reliable.
 
 ---
 
