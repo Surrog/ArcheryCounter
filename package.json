@@ -18,7 +18,7 @@
     "jpeg-js": "^0.4.4",
     "react": "19.2.4",
     "react-native": "0.84.1",
-    "react-native-image-picker": "^7.2.3",
+    "react-native-image-picker": "^8.0.0",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-svg": "^15.15.3"
   },
