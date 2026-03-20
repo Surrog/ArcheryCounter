@@ -1,8 +1,8 @@
 import * as path from 'path';
 import { Pool } from 'pg';
-import { ParquetSchema, ParquetWriter } from '@dsnp/parquetjs';
+import { parquetWriteFile } from 'hyparquet-writer';
 
-const OUT_PATH = path.resolve(__dirname, '../data/annotations.parquet');
+const OUT_PATH = path.resolve(import.meta.dirname, '../data/annotations.parquet');
 
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
@@ -14,24 +14,18 @@ const db = new Pool({
 
 async function main() {
   const { rows } = await db.query(
-    'SELECT filename, paper_boundary, rings FROM annotations ORDER BY filename',
+    'SELECT filename, paper_boundary, rings, arrows FROM annotations ORDER BY filename',
   );
 
-  const schema = new ParquetSchema({
-    filename:       { type: 'UTF8' },
-    paper_boundary: { type: 'UTF8' },
-    rings:          { type: 'UTF8' },
+  parquetWriteFile({
+    filename: OUT_PATH,
+    columnData: [
+      { name: 'filename',       data: rows.map((r: Record<string, unknown>) => r.filename as string) },
+      { name: 'paper_boundary', data: rows.map((r: Record<string, unknown>) => JSON.stringify(r.paper_boundary ?? null)) },
+      { name: 'rings',          data: rows.map((r: Record<string, unknown>) => JSON.stringify(r.rings ?? [])) },
+      { name: 'arrows',         data: rows.map((r: Record<string, unknown>) => JSON.stringify(r.arrows ?? [])) },
+    ],
   });
-
-  const writer = await ParquetWriter.openFile(schema, OUT_PATH);
-  for (const row of rows) {
-    await writer.appendRow({
-      filename:       row.filename,
-      paper_boundary: JSON.stringify(row.paper_boundary ?? null),
-      rings:          JSON.stringify(row.rings ?? []),
-    });
-  }
-  await writer.close();
   console.log(`Wrote ${rows.length} rows → ${OUT_PATH}`);
 }
 

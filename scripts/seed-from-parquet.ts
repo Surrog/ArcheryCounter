@@ -1,8 +1,8 @@
 import * as path from 'path';
 import { Pool } from 'pg';
-import { ParquetReader } from '@dsnp/parquetjs';
+import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
 
-const PARQUET_PATH = path.resolve(__dirname, '../data/annotations.parquet');
+const PARQUET_PATH = path.resolve(import.meta.dirname, '../data/annotations.parquet');
 
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
@@ -22,12 +22,12 @@ async function main() {
     )
   `);
 
-  const reader = await ParquetReader.openFile(PARQUET_PATH);
-  const cursor = reader.getCursor();
+  const file = await asyncBufferFromFile(PARQUET_PATH);
+  const metadata = await parquetMetadataAsync(file);
+  const records = await parquetReadObjects({ file, metadata });
 
   let count = 0;
-  let record: Record<string, unknown>;
-  while ((record = await cursor.next())) {
+  for (const record of records) {
     await db.query(
       `INSERT INTO annotations (filename, paper_boundary, rings)
        VALUES ($1, $2, $3)
@@ -40,7 +40,6 @@ async function main() {
     );
     count++;
   }
-  await reader.close();
   console.log(`Seeded ${count} rows from ${PARQUET_PATH}`);
 }
 
