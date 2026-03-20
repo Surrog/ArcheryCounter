@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import { Pool } from 'pg';
 import { loadImageNode } from '../imageLoader';
 import { findTarget } from '../targetDetection';
+import { findArrows } from '../arrowDetection';
 
 const IMAGES_DIR = path.resolve(__dirname, '../../images');
 
@@ -20,9 +21,16 @@ interface SplineRing {
   points: [number, number][];
 }
 
+interface ArrowAnnotation {
+  tip:   [number, number];
+  nock:  [number, number];
+  score: number | 'X' | null;
+}
+
 interface ImageAnnotation {
   paperBoundary: [number, number][] | null;
   rings: SplineRing[];
+  arrows: ArrowAnnotation[];
 }
 
 function splineCentroid(ring: SplineRing): [number, number] {
@@ -48,11 +56,15 @@ test.each(imageFiles)(
   'ground truth: %s',
   async (filename) => {
     const { rows } = await db.query(
-      'SELECT paper_boundary, rings FROM annotations WHERE filename = $1',
+      'SELECT paper_boundary, rings, arrows FROM annotations WHERE filename = $1',
       [filename],
     );
     expect(rows.length).toBeGreaterThan(0); // fail if no annotation in DB
-    const ann: ImageAnnotation = { paperBoundary: rows[0].paper_boundary, rings: rows[0].rings };
+    const ann: ImageAnnotation = {
+      paperBoundary: rows[0].paper_boundary,
+      rings: rows[0].rings,
+      arrows: rows[0].arrows ?? [],
+    };
 
     const imgPath = path.join(IMAGES_DIR, filename);
     const { rgba, width, height } = await loadImageNode(imgPath);
@@ -111,6 +123,46 @@ test.each(imageFiles)(
       expect(blue[0]).toBeGreaterThan(190); expect(blue[0]).toBeLessThan(245);
       expect(black[2]).toBeLessThan(0.3);  // V < 0.3
       expect(white[1]).toBeLessThan(0.2);  // S < 0.2
+    }
+
+    // Arrow detection assertions (P9-T8)
+    if (ann.arrows.length > 0) {
+      const detected = findArrows(rgba, width, height, result);
+
+      // Count: exact match
+      expect(detected.length).toBe(ann.arrows.length);
+
+      // Bijective tip matching: each annotated tip within 15 px of exactly one detected tip
+      const matchedDet = new Set<number>();
+      for (const annArrow of ann.arrows) {
+        let bestDist = Infinity, bestIdx = -1;
+        for (let di = 0; di < detected.length; di++) {
+          if (matchedDet.has(di)) continue;
+          const d = Math.hypot(detected[di].tip[0] - annArrow.tip[0], detected[di].tip[1] - annArrow.tip[1]);
+          if (d < bestDist) { bestDist = d; bestIdx = di; }
+        }
+        expect(bestDist).toBeLessThan(15); // tip within 15 px
+        if (bestIdx >= 0) matchedDet.add(bestIdx);
+      }
+
+      // Nock matching: each annotated nock within 40 px of its matched detection's nock (skip if null)
+      const matchedDet2 = new Set<number>();
+      for (const annArrow of ann.arrows) {
+        let bestDist = Infinity, bestIdx = -1;
+        for (let di = 0; di < detected.length; di++) {
+          if (matchedDet2.has(di)) continue;
+          const d = Math.hypot(detected[di].tip[0] - annArrow.tip[0], detected[di].tip[1] - annArrow.tip[1]);
+          if (d < bestDist) { bestDist = d; bestIdx = di; }
+        }
+        if (bestIdx >= 0) {
+          matchedDet2.add(bestIdx);
+          const det = detected[bestIdx];
+          if (det.nock !== null) {
+            const nd = Math.hypot(det.nock[0] - annArrow.nock[0], det.nock[1] - annArrow.nock[1]);
+            expect(nd).toBeLessThan(40); // nock within 40 px
+          }
+        }
+      }
     }
   },
   120000,

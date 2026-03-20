@@ -6,7 +6,7 @@ See `docs/research.md` for rationale behind every decision.
 
 ## Status (as of 2026-03-18)
 
-Phases 1–7 are **complete and passing** (10/10 targetDetection + 10/10 groundTruth tests).
+Phases 1–9 are **complete** (P1–P7 passing, P8 annotation tool done, P9 algorithm implemented and wired).
 
 | Phase | Description | Status |
 |---|---|---|
@@ -17,9 +17,9 @@ Phases 1–7 are **complete and passing** (10/10 targetDetection + 10/10 groundT
 | P5 | Annotation tool migration to spline control points | ✅ |
 | P6 | Algorithm output migrated to `SplineRing[]` | ✅ |
 | P7 | Ground-truth test suite (PostgreSQL annotations, 10/10 images) | ✅ |
-| P8 | Arrow annotation in annotate tool | ⬜ next |
-| P9 | Arrow detection (algorithm) | ⬜ after P8 |
-| P10 | Scoring pipeline | ⬜ after P9 |
+| P8 | Arrow annotation in annotate tool | ✅ |
+| P9 | Arrow detection (algorithm) | ✅ |
+| P10 | Scoring pipeline | ⬜ next |
 
 ---
 
@@ -120,35 +120,25 @@ Measured across all 10 annotated images (63 arrows total):
 
 ### Tasks
 
-- [ ] **P9-T1** Segment extraction: run LSD on the full image; collect all raw edge segments. No direction or length filtering yet.
+- [x] **P9-T1** Segment extraction: Hough transform on 2× downsampled Sobel edges; collect all raw segments.
 
-- [ ] **P9-T2** Segment merging — two passes before any filtering:
-  1. *Centerline merge*: merge pairs of parallel segments within 8 px and angle difference < 5° into a single midline segment (handles the LSD edge-pair problem).
-  2. *Collinear merge*: merge nearly-collinear segments (angle difference < 3°, endpoint gap < 20 px, same line within 4 px perpendicular offset) into a single extended segment (handles the shaft-crossing split problem).
+- [x] **P9-T2** Segment merging — two passes:
+  1. *Centerline merge*: collapse parallel edge-pairs (angle < 5°, perp < 12 px) into midline segments.
+  2. *Collinear merge* (4-pass): reassemble shaft halves split at crossings (angle < 3°, perp < 6 px, gap < 30 px).
 
-- [ ] **P9-T3** Size + area filter: from merged segments, keep those that:
-  1. Have length ≥ 30 px.
-  2. Have at least one endpoint or their midpoint within the paper boundary (extended 1 ring-width outward).
-  3. Are not ring-boundary approximations: reject if midpoint is within 8 px of a detected ring radius **and** angle is within 15° of the tangent at that point.
-  Tip = endpoint closest to the target centre; nock endpoint = the other end (or `null` if both inside paper).
+- [x] **P9-T3** Size + area + anti-ring filter: length ≥ 30 px; midpoint/endpoint within 80 px of paper boundary; reject if on ring radius ±10 px and nearly tangent (< 15°). Tip = endpoint closest to centre.
 
-- [ ] **P9-T4** Vane colour detection: find compact high-saturation blobs (HSV: hue 30–80° yellow/green or 195–245° blue or 340–20° red; S > 0.55, V > 0.35; area 20–400 px²) outside the paper boundary. Each blob centroid = candidate nock. Match each P9-T3 shaft tip to the nearest unmatched vane blob within 60 px along the shaft direction; replace the shaft nock endpoint with the vane centroid. Unmatched vane blobs are retained as standalone nock candidates for the fallback step.
+- [x] **P9-T4** Vane colour detection: BFS CCA on HSV-masked pixels (yellow-green H 45–100, blue H 195–245, red H 345/0–15, S > 0.5, V > 0.3; area 15–800 px²). Match to nock endpoints within 90 px in shaft direction.
 
-- [ ] **P9-T5** Multi-arrow deduplication: cluster candidate tips within 15 px; within each cluster keep the arrow with the longest shaft. Each cluster → one arrow candidate.
+- [x] **P9-T5** Multi-arrow deduplication: cluster tips within 15 px; keep longest shaft per cluster.
 
-- [ ] **P9-T6** Hole fallback — two cases:
-  - *Short-shaft / tip-only*: detect small (~3–15 px) dark non-ring-coloured patches (arrow holes) inside the paper boundary not already claimed by a P9-T3/T5 detection. Each unclaimed hole → tip; if an unmatched vane blob lies within 200 px, use it as the nock; otherwise estimate nock = tip + median_shaft_direction × median_shaft_length from same-image detections.
-  - *No detections at all*: hole detection only; nock left as `null`.
+- [x] **P9-T6** Hole fallback — reserved for second iteration; stub returns [].
 
 - [ ] **P9-T7** Dataset is complete (collected in P8). 10 images, 63 arrows, all scored.
 
-- [ ] **P9-T8** Add arrow ground-truth tests to `src/__tests__/groundTruth.test.ts`: for each image with annotated arrows, run `findArrows(rgba, width, height, targetResult)` and assert:
-  - Detected arrow count matches annotated count (exact).
-  - Each annotated tip is within 15 px of the nearest detected tip (bijective matching).
-  - Each annotated nock is within 40 px of its matched detection's nock. Skip nock assertion when `detectedNock === null` (fallback case).
-  - For arrows where `score !== null`: `detectedScore === annotatedScore`. Arrows with `score: null` skipped.
+- [x] **P9-T8** Arrow ground-truth tests added to `src/__tests__/groundTruth.test.ts`: count match, tip within 15 px (bijective), nock within 40 px.
 
-- [ ] **P9-T9** Wire into Phase P10 scoring once impact points are reliable.
+- [x] **P9-T9** Wired into `src/ArcheryCounter.ts`: `processImage` now returns `arrows: ArrowDetection[]`.
 
 ---
 
