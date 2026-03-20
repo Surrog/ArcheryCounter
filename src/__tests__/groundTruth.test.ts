@@ -129,11 +129,25 @@ test.each(imageFiles)(
     if (ann.arrows.length > 0) {
       const detected = findArrows(rgba, width, height, result);
 
+      const fmtPt  = (p: [number, number] | null) =>
+        p ? `(${Math.round(p[0])},${Math.round(p[1])})` : 'null';
+      const detSummary = () =>
+        detected.map((d, i) => `  det[${i}] tip=${fmtPt(d.tip)} nock=${fmtPt(d.nock)}`).join('\n');
+      const annSummary = () =>
+        ann.arrows.map((a, i) => `  ann[${i}] tip=${fmtPt(a.tip)} nock=${fmtPt(a.nock)} score=${a.score}`).join('\n');
+
       // Count: exact match
+      if (detected.length !== ann.arrows.length) {
+        console.error(
+          `[${filename}] count: detected ${detected.length}, expected ${ann.arrows.length}\n` +
+          `Detected:\n${detSummary()}\nAnnotated:\n${annSummary()}`,
+        );
+      }
       expect(detected.length).toBe(ann.arrows.length);
 
       // Bijective tip matching: each annotated tip within 15 px of exactly one detected tip
       const matchedDet = new Set<number>();
+      const tipFailures: string[] = [];
       for (const annArrow of ann.arrows) {
         let bestDist = Infinity, bestIdx = -1;
         for (let di = 0; di < detected.length; di++) {
@@ -141,8 +155,31 @@ test.each(imageFiles)(
           const d = Math.hypot(detected[di].tip[0] - annArrow.tip[0], detected[di].tip[1] - annArrow.tip[1]);
           if (d < bestDist) { bestDist = d; bestIdx = di; }
         }
-        expect(bestDist).toBeLessThan(15); // tip within 15 px
+        if (bestDist >= 15) {
+          tipFailures.push(
+            `  ann tip=${fmtPt(annArrow.tip)} score=${annArrow.score}` +
+            ` → best det=${fmtPt(detected[bestIdx]?.tip ?? null)} dist=${bestDist.toFixed(1)}px`,
+          );
+        }
         if (bestIdx >= 0) matchedDet.add(bestIdx);
+      }
+      if (tipFailures.length > 0) {
+        console.error(
+          `[${filename}] ${tipFailures.length} tip(s) out of range:\n${tipFailures.join('\n')}\n` +
+          `Detected:\n${detSummary()}\nAnnotated:\n${annSummary()}`,
+        );
+        // Re-run to throw on first failure (preserves Jest assertion count)
+        const matchedDet3 = new Set<number>();
+        for (const annArrow of ann.arrows) {
+          let bestDist = Infinity, bestIdx = -1;
+          for (let di = 0; di < detected.length; di++) {
+            if (matchedDet3.has(di)) continue;
+            const d = Math.hypot(detected[di].tip[0] - annArrow.tip[0], detected[di].tip[1] - annArrow.tip[1]);
+            if (d < bestDist) { bestDist = d; bestIdx = di; }
+          }
+          expect(bestDist).toBeLessThan(15); // tip within 15 px
+          if (bestIdx >= 0) matchedDet3.add(bestIdx);
+        }
       }
 
       // Nock matching: each annotated nock within 40 px of its matched detection's nock (skip if null)
@@ -159,6 +196,13 @@ test.each(imageFiles)(
           const det = detected[bestIdx];
           if (det.nock !== null) {
             const nd = Math.hypot(det.nock[0] - annArrow.nock[0], det.nock[1] - annArrow.nock[1]);
+            if (nd >= 40) {
+              console.error(
+                `[${filename}] nock too far:\n` +
+                `  ann tip=${fmtPt(annArrow.tip)} nock=${fmtPt(annArrow.nock)}\n` +
+                `  det tip=${fmtPt(det.tip)} nock=${fmtPt(det.nock)} dist=${nd.toFixed(1)}px`,
+              );
+            }
             expect(nd).toBeLessThan(40); // nock within 40 px
           }
         }

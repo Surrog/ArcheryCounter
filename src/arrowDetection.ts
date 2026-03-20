@@ -2,13 +2,22 @@
  * Phase 9 — Arrow detection pipeline.
  * See docs/plan.md §Phase 9 for design rationale.
  *
- * Pipeline:
- *   P9-T1  Hough segment extraction (downsampled 2×)
- *   P9-T2  Segment merging: centerline (edge-pair → midline) + collinear (crossing splits)
- *   P9-T3  Size + area + anti-ring filter
- *   P9-T4  Vane colour detection + match to shaft nock end
- *   P9-T5  Deduplication: cluster tips within 15 px
- *   P9-T6  Hole fallback (skipped in first iteration — wired but returns [])
+ * Pipeline stages:
+ *   [D1]  Hough segment extraction — raw segment count from shaftMask
+ *   [D2]  Collinear merge — segment count after each mergeCollinear pass
+ *   [D3]  filterSegments — per-rejection-reason counts + per-survivor PASS lines
+ *   [D4]  After verifyDarkStripe + second merge + length filter
+ *   [D5]  deduplicateTips — which tips were suppressed and why
+ *   [D6]  removeMidshaftDuplicates — which arrows were suppressed (case 1/2/3)
+ *   [D7]  matchVanes — vane blob count + per-arrow vane match results
+ *   [D8]  Final arrow list
+ *
+ * Enable debug output:
+ *   DEBUG_ARROWS=1 npx jest groundTruth 2>&1 | grep '\[D6\]'
+ *
+ * All stages write to stderr so Jest's own stdout output is unaffected.
+ * Stage labels are prefixed [D1]–[D8]; grep isolates individual stages:
+ *   DEBUG_ARROWS=1 npx jest 2>&1 | grep -E '\[D[1-8]\]'
  */
 
 import type { ArcheryResult } from './targetDetection';
@@ -395,11 +404,22 @@ function filterSegments(
   boundary: Pt[],
   ringRadii: number[], cx: number, cy: number,
   minLen: number,
+  debug = false,
 ): Seg[] {
-  const DEBUG_FS = !!process.env.DEBUG_ARROWS;
-  return segs.filter(seg => {
-    const near6 = DEBUG_FS && (Math.hypot(seg[0][0]-367,seg[0][1]-583)<30 || Math.hypot(seg[1][0]-367,seg[1][1]-583)<30);
-    if (segLen(seg) < minLen) { if(near6) console.error(`[FS] REJECT len seg:(${Math.round(seg[0][0])},${Math.round(seg[0][1])})→(${Math.round(seg[1][0])},${Math.round(seg[1][1])})`); return false; }
+  // Rejection counters — visible in [D3] debug output.
+  // Use these to understand which filter is removing the most segments:
+  //   len       — segment too short (< minLen)
+  //   tipOOB    — tip endpoint is outside the paper boundary (hay-bale / frame lines)
+  //   nockFar   — nock is > 120 px outside the paper (hay-bale lines exit far)
+  //   radial    — radial profile shows a U-shape interior minimum (ring arc tangent)
+  //   antiRing  — tip + nock both sit at a ring radius at a tangent angle (ring arc)
+  let nLen = 0, nTipOOB = 0, nNockFar = 0, nRadial = 0, nAntiRing = 0;
+
+  const out: Seg[] = [];
+  for (const seg of segs) {
+    const r = (reason: string) => { if (debug) console.error(`  [D3] REJECT ${reason} tip=(${Math.round(tipX0)},${Math.round(tipY0)}) len=${Math.round(segLen(seg))}`); };
+
+    if (segLen(seg) < minLen) { nLen++; continue; }
 
     // Assign tip (closer to centre) and nock (farther from centre)
     const d0c = Math.hypot(seg[0][0] - cx, seg[0][1] - cy);
@@ -411,13 +431,13 @@ function filterSegments(
     // Tip must be inside the paper boundary (where arrows land).
     // Hay-bale lines approaching from outside have their closer endpoint
     // outside or just on the boundary.
-    if (!ptInPoly(tipX0, tipY0, boundary)) { if(near6) console.error(`[FS] REJECT tip-not-in-poly tip=(${Math.round(tipX0)},${Math.round(tipY0)})`); return false; }
+    if (!ptInPoly(tipX0, tipY0, boundary)) { nTipOOB++; r('tip-OOB'); continue; }
 
     // Nock: if outside the boundary, it must be within 120 px of the boundary.
     // Real arrows have nocks just outside the paper (< 100 px outside);
     // hay-bale lines extend 150-400 px beyond the boundary.
     if (!ptInPoly(nockX0, nockY0, boundary)) {
-      if (distToBoundary(nockX0, nockY0, boundary) > 120) { if(near6) console.error(`[FS] REJECT nock-too-far nock=(${Math.round(nockX0)},${Math.round(nockY0)})`); return false; }
+      if (distToBoundary(nockX0, nockY0, boundary) > 120) { nNockFar++; r('nock-far'); continue; }
     }
 
     const ep0In = ptInPoly(seg[0][0], seg[0][1], boundary);
@@ -437,33 +457,37 @@ function filterSegments(
       const minD = Math.min(...rads);
 
       // Minimum distance in the INTERIOR of the segment → ring arc tangent.
-      // (long segment). For Hough tangent lines, the tangent point (= closest
-      // point to centre) falls in the MIDDLE of the detected segment; for arrow
-      // shafts the tip is at one endpoint so the minimum is at k=0 or k=6.
-      // Allow the minimum to be in the first or last 2 samples (in case the tip
-      // is slightly inset from the segment endpoint after collinear merge).
+      // For Hough tangent lines, the tangent point (= closest point to centre)
+      // falls in the MIDDLE of the detected segment; for arrow shafts the tip
+      // is at one endpoint so the minimum is at k=0 or k=6.
       const tipRad = d0c <= d1c ? rads[0] : rads[NUM_R - 1];
       const minIdx = rads.indexOf(minD);
-      // Reject if min is in interior AND tip is close to min (ring arc tangent).
-      // Arrow 2 has tipRad/minD ≈ 5.9 (shaft crosses perp foot); ring arcs have ratio ≈ 1.
-      if (minIdx >= 2 && minIdx <= NUM_R - 3 && tipRad < 2 * minD) { if(near6) console.error(`[FS] REJECT radial-profile minIdx=${minIdx} tipRad=${Math.round(tipRad)} minD=${Math.round(minD)}`); return false; }
+      if (minIdx >= 2 && minIdx <= NUM_R - 3 && tipRad < 2 * minD) {
+        nRadial++;
+        if (debug) console.error(`  [D3] REJECT radial-interior tip=(${Math.round(tipX0)},${Math.round(tipY0)}) minIdx=${minIdx} tipR=${Math.round(tipRad)} minR=${Math.round(minD)}`);
+        continue;
+      }
     }
 
     // Anti-ring: check the TIP endpoint (closer to centre) rather than the midpoint.
     // Only reject if the NOCK is also near the same ring radius — real arrow shafts have
     // their nock far from the tip's ring, whereas ring arcs have both endpoints at the ring.
-    const [tipX, tipY] = [tipX0, tipY0];
     const tipDist = Math.min(d0c, d1c);
     const nockDist = Math.max(d0c, d1c);
     const segAng = segAngle(seg);
-    const tangentAngTip = Math.atan2(tipY - cy, tipX - cx) + Math.PI / 2;
+    const tangentAngTip = Math.atan2(tipY0 - cy, tipX0 - cx) + Math.PI / 2;
     const tNormTip = ((tangentAngTip % Math.PI) + Math.PI) % Math.PI;
+    let rejected = false;
     for (const rr of ringRadii) {
       if (Math.abs(tipDist - rr) < 25 && angleDiff(segAng, tNormTip) < 35 * Math.PI / 180) {
         if (Math.abs(nockDist - rr) > 15) continue; // nock is far from this ring → real arrow
-        if(near6) console.error(`[FS] REJECT anti-ring-tip rr=${Math.round(rr)} tipDist=${Math.round(tipDist)} nockDist=${Math.round(nockDist)}`); return false;
+        nAntiRing++;
+        if (debug) console.error(`  [D3] REJECT anti-ring-tip tip=(${Math.round(tipX0)},${Math.round(tipY0)}) rr=${Math.round(rr)} tipR=${Math.round(tipDist)} nockR=${Math.round(nockDist)}`);
+        rejected = true; break;
       }
     }
+    if (rejected) continue;
+
     // Belt-and-suspenders: also check midpoint (catches arcs whose endpoints are not at the ring)
     const mx = (seg[0][0] + seg[1][0]) / 2;
     const my = (seg[0][1] + seg[1][1]) / 2;
@@ -473,12 +497,28 @@ function filterSegments(
         if (Math.abs(nockDist - rr) > 20) continue; // nock far from ring → real arrow
         const tangentAng = Math.atan2(my - cy, mx - cx) + Math.PI / 2;
         const tNorm = ((tangentAng % Math.PI) + Math.PI) % Math.PI;
-        if (angleDiff(segAng, tNorm) < 35 * Math.PI / 180) { if(near6) console.error(`[FS] REJECT anti-ring-mid rr=${Math.round(rr)} dToCenter=${Math.round(dToCenter)} nockDist=${Math.round(nockDist)}`); return false; }
+        if (angleDiff(segAng, tNorm) < 35 * Math.PI / 180) {
+          nAntiRing++;
+          if (debug) console.error(`  [D3] REJECT anti-ring-mid tip=(${Math.round(tipX0)},${Math.round(tipY0)}) rr=${Math.round(rr)} midR=${Math.round(dToCenter)}`);
+          rejected = true; break;
+        }
       }
     }
-    if(near6) console.error(`[FS] PASS seg:(${Math.round(seg[0][0])},${Math.round(seg[0][1])})→(${Math.round(seg[1][0])},${Math.round(seg[1][1])}) len=${Math.round(segLen(seg))}`);
-    return true;
-  });
+    if (!rejected) out.push(seg);
+  }
+
+  if (debug) {
+    console.error(`[D3] filterSegments: ${segs.length} → ${out.length}` +
+      ` (len=${nLen} tipOOB=${nTipOOB} nockFar=${nNockFar} radial=${nRadial} antiRing=${nAntiRing})`);
+    for (const seg of out) {
+      const d0c = Math.hypot(seg[0][0]-cx, seg[0][1]-cy);
+      const d1c = Math.hypot(seg[1][0]-cx, seg[1][1]-cy);
+      const [tx,ty] = d0c<=d1c ? [seg[0][0],seg[0][1]] : [seg[1][0],seg[1][1]];
+      const [nx,ny] = d0c<=d1c ? [seg[1][0],seg[1][1]] : [seg[0][0],seg[0][1]];
+      console.error(`  PASS tip=(${Math.round(tx)},${Math.round(ty)}) nock=(${Math.round(nx)},${Math.round(ny)}) len=${Math.round(segLen(seg))} tipR=${Math.round(Math.min(d0c,d1c))}`);
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -568,7 +608,9 @@ function matchVanes(
   vanes: VaneBlob[],
   matchRadius: number,
   targetCx: number, targetCy: number,
+  debug = false,
 ): { tip: Pt; nock: Pt | null }[] {
+  if (debug) console.error(`[D7] matchVanes: ${vanes.length} vane blobs, ${arrows.length} arrows`);
   const usedVane = new Uint8Array(vanes.length);
   return arrows.map(arrow => {
     if (!arrow.nock) return arrow;
@@ -596,6 +638,7 @@ function matchVanes(
       if (dist < bestDist) { bestDist = dist; bestVane = vi; }
     }
     if (bestVane >= 0) {
+      if (debug) console.error(`  [D7] match tip=(${Math.round(tx)},${Math.round(ty)}) nock=(${Math.round(nx)},${Math.round(ny)}) → vane=(${Math.round(vanes[bestVane].cx)},${Math.round(vanes[bestVane].cy)}) dist=${bestDist.toFixed(1)}`);
       usedVane[bestVane] = 1;
       return { tip: arrow.tip, nock: [vanes[bestVane].cx, vanes[bestVane].cy] };
     }
@@ -674,12 +717,12 @@ function verifyDarkStripe(
 function removeMidshaftDuplicates(
   arrows: { tip: Pt; nock: Pt | null }[],
   perpTolPx: number, angleTolDeg: number,
+  debug = false,
 ): { tip: Pt; nock: Pt | null }[] {
   const angleTol = angleTolDeg * Math.PI / 180;
   const byLen = [...arrows]
     .map((a, i) => ({ a, i, len: a.nock ? Math.hypot(a.nock[0] - a.tip[0], a.nock[1] - a.tip[1]) : 0 }))
     .sort((x, y) => y.len - x.len);
-  const DEBUG_RMD = !!process.env.DEBUG_ARROWS;
   const suppressed = new Uint8Array(arrows.length);
   for (const { a, i } of byLen) {
     if (suppressed[i] || !a.nock) continue;
@@ -691,15 +734,16 @@ function removeMidshaftDuplicates(
       let da = Math.abs(angA - angB) % (2 * Math.PI);
       if (da > Math.PI) da = 2 * Math.PI - da;
       if (da > Math.PI / 2) da = Math.PI - da;
-      const near = DEBUG_RMD && (Math.hypot(a.tip[0]-277,a.tip[1]-565)<5 || Math.hypot(b.tip[0]-278,b.tip[1]-608)<5);
-      if (near) console.error(`[RMD] A=(${Math.round(a.tip[0])},${Math.round(a.tip[1])})→(${Math.round(a.nock[0])},${Math.round(a.nock[1])}) B=(${Math.round(b.tip[0])},${Math.round(b.tip[1])}) da=${(da*180/Math.PI).toFixed(1)}° perpD=${perpDist(b.tip[0], b.tip[1], a.tip[0], a.tip[1], a.nock[0], a.nock[1]).toFixed(1)} tol=${angleTol*180/Math.PI}°/${perpTolPx}`);
       const pd = perpDist(b.tip[0], b.tip[1], a.tip[0], a.tip[1], a.nock[0], a.nock[1]);
       // Case 1: collinear fragment — same direction, tip on shaft (t ∈ [-0.05, 1.05])
       if (da <= angleTol && pd < perpTolPx) {
         const sdx = a.nock[0] - a.tip[0], sdy = a.nock[1] - a.tip[1];
         const sLen2 = sdx * sdx + sdy * sdy;
         const t = sLen2 < 1 ? 0 : ((b.tip[0] - a.tip[0]) * sdx + (b.tip[1] - a.tip[1]) * sdy) / sLen2;
-        if (t >= -0.05 && t <= 1.05) { suppressed[j] = 1; continue; }
+        if (t >= -0.05 && t <= 1.05) {
+          if (debug) console.error(`  [D6] Case1 suppress tip=(${Math.round(b.tip[0])},${Math.round(b.tip[1])}) da=${(da*180/Math.PI).toFixed(1)}° pd=${pd.toFixed(1)} t=${t.toFixed(2)} by=(${Math.round(a.tip[0])},${Math.round(a.tip[1])})`);
+          suppressed[j] = 1; continue;
+        }
       }
       // Case 2: intersection artifact — tip crosses another arrow's shaft at a
       // large angle (≥ 30°).  Nearly-collinear pairs (da < 30°) are handled by
@@ -708,7 +752,10 @@ function removeMidshaftDuplicates(
         const sdx = a.nock[0] - a.tip[0], sdy = a.nock[1] - a.tip[1];
         const sLen2 = sdx * sdx + sdy * sdy;
         const t = sLen2 < 1 ? 0 : ((b.tip[0] - a.tip[0]) * sdx + (b.tip[1] - a.tip[1]) * sdy) / sLen2;
-        if (t >= 0 && t <= 1) suppressed[j] = 1;
+        if (t >= 0 && t <= 1) {
+          if (debug) console.error(`  [D6] Case2 suppress tip=(${Math.round(b.tip[0])},${Math.round(b.tip[1])}) da=${(da*180/Math.PI).toFixed(1)}° pd=${pd.toFixed(1)} t=${t.toFixed(2)} by=(${Math.round(a.tip[0])},${Math.round(a.tip[1])})`);
+          suppressed[j] = 1;
+        }
       }
       // Case 3: nock-sharing fragment — two segments from the same physical
       // arrow share nearly the same nock point.  The longer detection (a) is
@@ -720,11 +767,15 @@ function removeMidshaftDuplicates(
           const sdx = a.nock[0] - a.tip[0], sdy = a.nock[1] - a.tip[1];
           const sLen2 = sdx * sdx + sdy * sdy;
           const t = sLen2 < 1 ? 0 : ((b.tip[0] - a.tip[0]) * sdx + (b.tip[1] - a.tip[1]) * sdy) / sLen2;
-          if (t >= 0 && t <= 1) { suppressed[j] = 1; continue; }
+          if (t >= 0 && t <= 1) {
+            if (debug) console.error(`  [D6] Case3 suppress tip=(${Math.round(b.tip[0])},${Math.round(b.tip[1])}) nockDist=${nockDist.toFixed(1)} t=${t.toFixed(2)} by=(${Math.round(a.tip[0])},${Math.round(a.tip[1])})`);
+            suppressed[j] = 1; continue;
+          }
         }
       }
     }
   }
+  if (debug) console.error(`[D6] removeMidshaftDuplicates: ${arrows.length} → ${arrows.filter((_, i) => !suppressed[i]).length}`);
   return arrows.filter((_, i) => !suppressed[i]);
 }
 
@@ -734,6 +785,7 @@ function removeMidshaftDuplicates(
 
 function deduplicateTips(
   arrows: { tip: Pt; nock: Pt | null }[], clusterRadius: number,
+  debug = false,
 ): { tip: Pt; nock: Pt | null }[] {
   const byLen = arrows
     .map((a, i) => ({ a, i, len: a.nock ? Math.hypot(a.nock[0] - a.tip[0], a.nock[1] - a.tip[1]) : 0 }))
@@ -746,11 +798,15 @@ function deduplicateTips(
     used[i] = 1;
     for (let j = 0; j < arrows.length; j++) {
       if (used[j]) continue;
-      if (Math.hypot(arrows[j].tip[0] - a.tip[0], arrows[j].tip[1] - a.tip[1]) <= clusterRadius)
+      const d = Math.hypot(arrows[j].tip[0] - a.tip[0], arrows[j].tip[1] - a.tip[1]);
+      if (d <= clusterRadius) {
+        if (debug) console.error(`  [D5] suppress tip=(${Math.round(arrows[j].tip[0])},${Math.round(arrows[j].tip[1])}) dist=${d.toFixed(1)}px from keeper=(${Math.round(a.tip[0])},${Math.round(a.tip[1])})`);
         used[j] = 1;
+      }
     }
     out.push(a);
   }
+  if (debug) console.error(`[D5] deduplicateTips: ${arrows.length} → ${out.length}`);
   return out;
 }
 
@@ -808,48 +864,18 @@ export function findArrows(
     /* minVotes */ 15, /* minLen */ 30, /* maxGap */ 8, /* maxPeaks */ 500,
   );
   const DEBUG = !!process.env.DEBUG_ARROWS;
-  if (DEBUG) console.error(`[arrow] rel-dark-hough: ${rawDown.length} segs`);
+  if (DEBUG) console.error(`[D1] Hough raw: ${rawDown.length} segs  cx=(${Math.round(cx)},${Math.round(cy)}) ringRadii=${ringRadii.map(r=>Math.round(r)).join(',')}`);
 
   let segs: Seg[] = rawDown;
 
-  if (DEBUG) {
-    const annPts: [number,number][] = [[279,569],[275,657],[303,544],[303,636],[321,554],[333,670],[318,599],[316,811],[347,566],[354,661],[367,583],[390,697]];
-    for (const s of segs) {
-      for (const ep of [s[0], s[1]]) {
-        for (const [ax,ay] of annPts) {
-          if (Math.hypot(ep[0]-ax,ep[1]-ay)<15)
-            console.error(`[arrow] RAW near=(${ax},${ay}) seg:(${Math.round(s[0][0])},${Math.round(s[0][1])})→(${Math.round(s[1][0])},${Math.round(s[1][1])}) len=${Math.round(segLen(s))}`);
-        }
-      }
-    }
-    // Check shaft mask at expected shaft positions
-    const shafts: [string,[number,number],[number,number]][] = [
-      ['279→275', [279,569],[275,657]],
-      ['303→303', [303,544],[303,636]],
-      ['321→333', [321,554],[333,670]],
-      ['347→354', [347,566],[354,661]],
-      ['367→390', [367,583],[390,697]],
-    ];
-    for (const [lbl, [x0d,y0d], [x1d,y1d]] of shafts) {
-      let cnt=0,total=0;
-      const steps=10;
-      for (let k=0;k<=steps;k++) {
-        const t=k/steps;
-        const xd=Math.round(x0d+t*(x1d-x0d)), yd=Math.round(y0d+t*(y1d-y0d));
-        if(xd>=0&&xd<wd&&yd>=0&&yd<hd){total++;if(shaftMask[yd*wd+xd])cnt++;}
-      }
-      console.error(`[arrow] SHAFT-MASK ${lbl}: ${cnt}/${total} pixels marked`);
-    }
-  }
   // P9-T2a: centerline merge skipped — dark pixels are at the shaft centre,
   // not at edges, so there's no edge-pair to merge.
-  if (DEBUG) console.error(`[arrow] after centerline merge (skipped): ${segs.length} segs`);
   // P9-T2b: reassemble shaft halves split at crossings or across zone gaps
   // (gap ≤ 60 px: upper blue-zone end to lower white-zone start can be ~57 px)
   segs = mergeCollinear(segs, /* angleTolDeg */ 3, /* perpTolPx */ 6, /* gapTolPx */ 60);
-  if (DEBUG) console.error(`[arrow] after collinear merge: ${segs.length} segs`);
+  if (DEBUG) console.error(`[D2] after first mergeCollinear: ${segs.length} segs`);
 
-  segs = filterSegments(segs, boundary, ringRadii, cx, cy, /* minLen */ 30);
+  segs = filterSegments(segs, boundary, ringRadii, cx, cy, /* minLen */ 30, DEBUG);
   // Reject segments with no continuous dark stripe (V < 0.55 within ±6 px of centerline).
   // This eliminates false positives whose Hough votes come from scattered dark pixels
   // (e.g. scattered JPEG artefacts in the gold zone at V=0.55–0.64) rather than a real shaft.
@@ -860,17 +886,13 @@ export function findArrows(
   // Drop any short fragments that remain after the second merge.
   segs = segs.filter(seg => segLen(seg) >= 50);
   if (DEBUG) {
-    console.error(`[arrow] after filterSegments: ${segs.length} segs`);
-    const sortedSegs2 = segs.slice().sort((a,b)=>segLen(b)-segLen(a));
-    for (const s of sortedSegs2.slice(0,20)) {
+    console.error(`[D4] after darkStripe+merge2+len50: ${segs.length} segs`);
+    for (const s of segs.slice().sort((a, b) => segLen(b) - segLen(a)).slice(0, 20)) {
       const d0c = Math.hypot(s[0][0]-cx, s[0][1]-cy), d1c = Math.hypot(s[1][0]-cx, s[1][1]-cy);
-      const tipR2 = Math.min(d0c,d1c), nockR2 = Math.max(d0c,d1c);
-      console.error(`[arrow] SEG tip=(${Math.round(d0c<=d1c?s[0][0]:s[1][0])},${Math.round(d0c<=d1c?s[0][1]:s[1][1])}) len=${Math.round(segLen(s))} tipR=${Math.round(tipR2)} nockR=${Math.round(nockR2)}`);
+      const [tx, ty] = d0c <= d1c ? [s[0][0], s[0][1]] : [s[1][0], s[1][1]];
+      const [nx, ny] = d0c <= d1c ? [s[1][0], s[1][1]] : [s[0][0], s[0][1]];
+      console.error(`  [D4] tip=(${Math.round(tx)},${Math.round(ty)}) nock=(${Math.round(nx)},${Math.round(ny)}) len=${Math.round(segLen(s))} tipR=${Math.round(Math.min(d0c,d1c))}`);
     }
-  }
-  if (DEBUG) {
-    console.error(`[arrow] after filterSegments: ${segs.length} segs`);
-    console.error(`[arrow] ringRadii: ${ringRadii.map(r=>Math.round(r)).join(',')}`);
   }
 
   // Assign tip (closer to centre) / nock
@@ -887,20 +909,20 @@ export function findArrows(
 
   // P9-T5: deduplicate and remove midshaft duplicates BEFORE vane matching
   // so that shaft-direction comparison uses the raw Hough segment geometry.
-  arrows = deduplicateTips(arrows, /* clusterRadius */ 15);
-  if (DEBUG) { console.error(`[arrow] before RMD (${arrows.length}):`); for (const a of arrows) { const len = a.nock ? Math.hypot(a.nock[0]-a.tip[0], a.nock[1]-a.tip[1]) : 0; console.error(`  tip=(${Math.round(a.tip[0])},${Math.round(a.tip[1])}) nock=(${a.nock ? Math.round(a.nock[0]) : '?'},${a.nock ? Math.round(a.nock[1]) : '?'}) len=${Math.round(len)}`); } }
-  arrows = removeMidshaftDuplicates(arrows, /* perpTolPx */ 8, /* angleTolDeg */ 15);
+  arrows = deduplicateTips(arrows, /* clusterRadius */ 15, DEBUG);
+  arrows = removeMidshaftDuplicates(arrows, /* perpTolPx */ 8, /* angleTolDeg */ 15, DEBUG);
 
   // P9-T4: detect vanes and match to nock endpoints
   const vanes = detectVanes(rgba, width, height, boundary);
-  arrows = matchVanes(arrows, vanes, /* matchRadius */ 90, cx, cy);
+  arrows = matchVanes(arrows, vanes, /* matchRadius */ 90, cx, cy, DEBUG);
 
   if (DEBUG) {
+    console.error(`[D8] final: ${arrows.length} arrows`);
     for (const a of arrows) {
       const len = a.nock ? Math.hypot(a.nock[0]-a.tip[0], a.nock[1]-a.tip[1]) : 0;
       const tipR = Math.hypot(a.tip[0]-cx, a.tip[1]-cy);
       const nockStr = a.nock ? `(${Math.round(a.nock[0])},${Math.round(a.nock[1])})` : 'null';
-      console.error(`[arrow] tip=(${Math.round(a.tip[0])},${Math.round(a.tip[1])}) nock=${nockStr} len=${Math.round(len)} tipR=${Math.round(tipR)}`);
+      console.error(`  [D8] tip=(${Math.round(a.tip[0])},${Math.round(a.tip[1])}) nock=${nockStr} len=${Math.round(len)} tipR=${Math.round(tipR)}`);
     }
   }
 

@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Jimp } from 'jimp';
 import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel, RayDebugEntry } from '../src/targetDetection';
+import { findArrows, ArrowDetection } from '../src/arrowDetection';
 import { SplineRing, sampleClosedSpline } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
@@ -22,6 +23,7 @@ interface ImageEntry {
   width: number;
   height: number;
   result: ArcheryResult;
+  arrows: ArrowDetection[];
 }
 
 async function processImage(imgPath: string): Promise<ImageEntry> {
@@ -35,7 +37,8 @@ async function processImage(imgPath: string): Promise<ImageEntry> {
   const base64 = await img.getBase64('image/jpeg');
 
   const result = findTarget(rgba, width, height);
-  return { filename, base64, width, height, result };
+  const arrows = result.success ? findArrows(rgba, width, height, result) : [];
+  return { filename, base64, width, height, result, arrows };
 }
 
 function splineCentroid(ring: SplineRing): [number, number] {
@@ -65,6 +68,7 @@ function renderSvg(
   width: number,
   height: number,
   rings: SplineRing[],
+  arrows: ArrowDetection[],
   paperBoundary?: TargetBoundary,
   ringPoints?: Pixel[][],
   rayDebug?: RayDebugEntry[],
@@ -150,6 +154,17 @@ function renderSvg(
     }).join('');
   })();
 
+  // Arrows — shaft line + tip dot + index label
+  const arrowsSvg = arrows.map((a, i) => {
+    const [tx, ty] = a.tip;
+    const shaft = a.nock
+      ? `<line x1="${a.nock[0].toFixed(1)}" y1="${a.nock[1].toFixed(1)}" x2="${tx.toFixed(1)}" y2="${ty.toFixed(1)}" stroke="#FF6600" stroke-width="2.5" opacity="0.9"/>`
+      : '';
+    const dot = `<circle cx="${tx.toFixed(1)}" cy="${ty.toFixed(1)}" r="5" fill="#FF6600" stroke="#fff" stroke-width="1.5"/>`;
+    const label = `<text x="${tx.toFixed(1)}" y="${(ty - 8).toFixed(1)}" font-size="11" font-weight="bold" fill="#FF6600" stroke="#000" stroke-width="2" paint-order="stroke" text-anchor="middle">${i + 1}</text>`;
+    return shaft + dot + label;
+  }).join('\n    ');
+
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="display:block;max-width:100%;height:auto">
     <image href="${base64}" width="${width}" height="${height}"/>
     ${boundarySvg}
@@ -157,6 +172,7 @@ function renderSvg(
     ${pointsSvg}
     ${ctrlSvg}
     ${pathsSvg}
+    ${arrowsSvg}
   </svg>`;
 }
 
@@ -192,6 +208,25 @@ function renderRingTable(rings: SplineRing[], paperBoundary?: TargetBoundary): s
       <th>radius</th><th>pts</th><th>r-ratio</th>
     </tr></thead>
     <tbody>${rows}${boundaryRow}</tbody>
+  </table>`;
+}
+
+function renderArrowTable(arrows: ArrowDetection[]): string {
+  if (arrows.length === 0) return '<p style="color:#666;font-size:0.8rem;padding:4px 0">No arrows detected.</p>';
+  const rows = arrows.map((a, i) => {
+    const [tx, ty] = a.tip;
+    const nockStr = a.nock ? `${a.nock[0].toFixed(0)}, ${a.nock[1].toFixed(0)}` : '—';
+    const len = a.nock ? Math.hypot(a.nock[0] - tx, a.nock[1] - ty).toFixed(0) : '—';
+    return `<tr>
+      <td>${i + 1}</td>
+      <td>${tx.toFixed(0)}, ${ty.toFixed(0)}</td>
+      <td>${nockStr}</td>
+      <td>${len}</td>
+    </tr>`;
+  }).join('\n');
+  return `<table>
+    <thead><tr><th>#</th><th>tip (x, y)</th><th>nock (x, y)</th><th>length px</th></tr></thead>
+    <tbody>${rows}</tbody>
   </table>`;
 }
 
@@ -257,14 +292,14 @@ const HTML_HEAD = `<!DOCTYPE html>
   <h1>ArcheryCounter &#8212; Detection Report</h1>`;
 
 function renderSection(entry: ImageEntry): string {
-  const { filename, base64, width, height, result } = entry;
+  const { filename, base64, width, height, result, arrows } = entry;
   const statusClass = result.success ? 'success' : 'error';
   const statusText = result.success
-    ? `&#10003; ${result.rings.length} rings detected &nbsp;(${width}&times;${height} px)`
+    ? `&#10003; ${result.rings.length} rings &nbsp;&middot;&nbsp; ${arrows.length} arrow${arrows.length !== 1 ? 's' : ''} detected &nbsp;(${width}&times;${height} px)`
     : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
 
   const content = result.success
-    ? renderSvg(base64, width, height, result.rings, result.paperBoundary, result.ringPoints, result.rayDebug)
+    ? renderSvg(base64, width, height, result.rings, arrows, result.paperBoundary, result.ringPoints, result.rayDebug)
     : base64
       ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
       : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
@@ -272,8 +307,11 @@ function renderSection(entry: ImageEntry): string {
   const calibTable = result.success && result.calibration
     ? `<details><summary>Colour calibration</summary>${renderCalibrationTable(result.calibration)}</details>`
     : '';
-  const table = result.success
+  const ringTable = result.success
     ? `<details><summary>Ring data</summary>${renderRingTable(result.rings, result.paperBoundary)}</details>`
+    : '';
+  const arrowTable = result.success
+    ? `<details open><summary>Arrows (${arrows.length})</summary>${renderArrowTable(arrows)}</details>`
     : '';
 
   return `
@@ -281,8 +319,9 @@ function renderSection(entry: ImageEntry): string {
     <h2>${filename}</h2>
     <p class="status">${statusText}</p>
     <div class="svg-wrapper">${content}</div>
+    ${arrowTable}
     ${calibTable}
-    ${table}
+    ${ringTable}
   </section>`;
 }
 
@@ -315,6 +354,7 @@ async function main(): Promise<void> {
         width: 0,
         height: 0,
         result: { success: false, rings: [], error: String(err) },
+        arrows: [],
       } as ImageEntry;
     }
   }));

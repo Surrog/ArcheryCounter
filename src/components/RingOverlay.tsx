@@ -1,33 +1,54 @@
 import React, { useMemo, useState } from 'react';
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
-import Svg, { Path, Polygon } from 'react-native-svg';
+import Svg, { Circle, Line, Path, Polygon } from 'react-native-svg';
 import type { SplineRing } from '../spline';
 import { sampleClosedSpline } from '../spline';
-import type { TargetBoundary } from '../targetDetection';
+import type { TargetBoundary, Pixel } from '../targetDetection';
+import type { ArrowDetection } from '../arrowDetection';
 import { computeLetterboxTransform } from '../letterboxTransform';
+
+export interface OverlayVisibility {
+  rings: boolean;
+  rays: boolean;
+  boundary: boolean;
+  arrows: boolean;
+}
+
+export const DEFAULT_VISIBILITY: OverlayVisibility = {
+  rings: true,
+  rays: false,
+  boundary: true,
+  arrows: true,
+};
 
 interface Props {
   rings: SplineRing[];
   /** Detected target paper boundary polygon in image pixels */
   paperBoundary?: TargetBoundary | null;
+  /** Detected arrows */
+  arrows?: ArrowDetection[] | null;
+  /** Raw per-ray ring transition points (index 0 = innermost ring) */
+  ringPoints?: Pixel[][] | null;
   /** Original pixel dimensions of the source image */
   imageNaturalWidth: number;
   imageNaturalHeight: number;
+  /** Which overlay layers to show */
+  visibility?: OverlayVisibility;
 }
 
-// Ring stroke colours, outermost (index 0) to innermost (index 9).
+// Ring stroke colours, index 0 = innermost (bullseye), index 9 = outermost.
 // Approximate the standard WA/FITA target face colours.
 const RING_STROKE: string[] = [
-  '#AAAAAA', // 1 — white outer
-  '#FFFFFF', // 2 — white inner
-  '#333333', // 3 — black outer
-  '#111111', // 4 — black inner
-  '#4444FF', // 5 — blue outer
-  '#0000CC', // 6 — blue inner
-  '#FF4444', // 7 — red outer
-  '#CC0000', // 8 — red inner
-  '#FFDD00', // 9 — yellow outer
   '#FFB800', // 10 — yellow inner (gold / bullseye)
+  '#FFDD00', // 9 — yellow outer
+  '#CC0000', // 8 — red inner
+  '#FF4444', // 7 — red outer
+  '#0000CC', // 6 — blue inner
+  '#4444FF', // 5 — blue outer
+  '#111111', // 4 — black inner
+  '#333333', // 3 — black outer
+  '#FFFFFF', // 2 — white inner
+  '#AAAAAA', // 1 — white outer
 ];
 
 interface ViewSize {
@@ -40,7 +61,15 @@ interface ViewSize {
  * It compensates for the letterboxing that "contain" introduces so that
  * the ring paths are aligned with the actual pixels of the displayed photo.
  */
-export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNaturalHeight }: Props) {
+export function RingOverlay({
+  rings,
+  paperBoundary,
+  arrows,
+  ringPoints,
+  imageNaturalWidth,
+  imageNaturalHeight,
+  visibility = DEFAULT_VISIBILITY,
+}: Props) {
   const [viewSize, setViewSize] = useState<ViewSize>({ width: 0, height: 0 });
 
   const transform = useMemo(() => {
@@ -53,14 +82,18 @@ export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNatu
     setViewSize({ width, height });
   };
 
+  const tx = (px: number) => px * (transform?.scale ?? 1) + (transform?.offsetX ?? 0);
+  const ty = (py: number) => py * (transform?.scale ?? 1) + (transform?.offsetY ?? 0);
+
   return (
     <View style={StyleSheet.absoluteFill} onLayout={handleLayout} pointerEvents="none">
       {transform && viewSize.width > 0 && (
         <Svg width={viewSize.width} height={viewSize.height}>
-          {/* Target paper boundary — dashed lime quadrilateral */}
-          {paperBoundary && paperBoundary.points.length >= 3 && (() => {
+
+          {/* Paper boundary — dashed lime quadrilateral */}
+          {visibility.boundary && paperBoundary && paperBoundary.points.length >= 3 && (() => {
             const points = paperBoundary.points
-              .map(([px, py]) => `${px * transform.scale + transform.offsetX},${py * transform.scale + transform.offsetY}`)
+              .map(([px, py]) => `${tx(px)},${ty(py)}`)
               .join(' ');
             return (
               <Polygon
@@ -73,20 +106,36 @@ export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNatu
             );
           })()}
 
+          {/* Rays — lines from target centre to each detected ring transition point */}
+          {visibility.rays && ringPoints && ringPoints.length > 0 && (() => {
+            // Compute centre from innermost ring
+            const inner = rings[0];
+            if (!inner) return null;
+            const icx = inner.points.reduce((s, p) => s + p[0], 0) / inner.points.length;
+            const icy = inner.points.reduce((s, p) => s + p[1], 0) / inner.points.length;
+            // Collect all unique ray endpoints from the outermost detected ring
+            const outerPts = ringPoints[ringPoints.length - 1] ?? [];
+            return outerPts.map((pt, i) => (
+              <Line
+                key={i}
+                x1={tx(icx)} y1={ty(icy)}
+                x2={tx(pt.x)} y2={ty(pt.y)}
+                stroke="rgba(255,255,255,0.25)"
+                strokeWidth={0.8}
+              />
+            ));
+          })()}
+
           {/* Scoring rings */}
-          {rings.map((ring, i) => {
+          {visibility.rings && rings.map((ring, i) => {
             const sampled = sampleClosedSpline(ring.points, 120);
             if (sampled.length < 2) return null;
-            // Build SVG path with letterbox transform applied to each point.
             const [first, ...rest] = sampled;
-            const fx = first[0] * transform.scale + transform.offsetX;
-            const fy = first[1] * transform.scale + transform.offsetY;
-            let d = `M ${fx} ${fy}`;
+            let d = `M ${tx(first[0])} ${ty(first[1])}`;
             for (const [px, py] of rest) {
-              d += ` L ${px * transform.scale + transform.offsetX} ${py * transform.scale + transform.offsetY}`;
+              d += ` L ${tx(px)} ${ty(py)}`;
             }
             d += ' Z';
-
             return (
               <Path
                 key={i}
@@ -97,6 +146,33 @@ export function RingOverlay({ rings, paperBoundary, imageNaturalWidth, imageNatu
               />
             );
           })}
+
+          {/* Arrows — shaft line + tip dot */}
+          {visibility.arrows && arrows && arrows.map((arrow, i) => {
+            const [tipX, tipY] = arrow.tip;
+            const nock = arrow.nock;
+            return (
+              <React.Fragment key={i}>
+                {nock && (
+                  <Line
+                    x1={tx(tipX)} y1={ty(tipY)}
+                    x2={tx(nock[0])} y2={ty(nock[1])}
+                    stroke="#FF6600"
+                    strokeWidth={2}
+                  />
+                )}
+                {/* Tip: filled orange circle */}
+                <Circle
+                  cx={tx(tipX)} cy={ty(tipY)}
+                  r={5}
+                  fill="#FF6600"
+                  stroke="#FFFFFF"
+                  strokeWidth={1}
+                />
+              </React.Fragment>
+            );
+          })}
+
         </Svg>
       )}
     </View>

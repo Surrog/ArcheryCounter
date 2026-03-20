@@ -15,6 +15,8 @@ export interface ProcessImageResult {
   paperBoundary?: TargetBoundary;
   calibration?: ColourCalibration;
   arrows: ArrowDetection[];
+  /** Raw per-ray transition points for each ring (index 0 = innermost). */
+  ringPoints?: Pixel[][];
 }
 
 const ArcheryCounter = {
@@ -23,7 +25,7 @@ const ArcheryCounter = {
     const result = findTarget(rgba, width, height);
     if (!result.success) throw new Error(result.error ?? 'Detection failed');
     const arrows = findArrows(rgba, width, height, result);
-    return { rings: result.rings, paperBoundary: result.paperBoundary, calibration: result.calibration, arrows };
+    return { rings: result.rings, paperBoundary: result.paperBoundary, calibration: result.calibration, arrows, ringPoints: result.ringPoints };
   },
 };
 
