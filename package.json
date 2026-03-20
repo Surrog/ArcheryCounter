@@ -10,8 +10,8 @@
     "test": "jest",
     "visualize": "ts-node --transpile-only --project tsconfig.scripts.json scripts/visualize.ts",
     "annotate": "ts-node --transpile-only --project tsconfig.scripts.json scripts/annotate.ts",
-    "dump-annotations": "ts-node --transpile-only --project tsconfig.scripts.json scripts/dump-annotations.ts",
-    "seed-from-parquet": "ts-node --transpile-only --project tsconfig.scripts.json scripts/seed-from-parquet.ts"
+    "dump-annotations": "node --no-warnings --import ts-node/esm scripts/dump-annotations.ts",
+    "seed-from-parquet": "node --no-warnings --import ts-node/esm scripts/seed-from-parquet.ts"
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.84.1",
@@ -49,6 +49,7 @@
     "prettier": "3.8.1",
     "react-test-renderer": "19.2.4",
     "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.8.3"
   },
   "engines": {

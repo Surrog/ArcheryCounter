@@ -2,7 +2,7 @@ import * as path from 'path';
 import { Pool } from 'pg';
 import { parquetWriteFile } from 'hyparquet-writer';
 
-const OUT_PATH = path.resolve(__dirname, '../data/annotations.parquet');
+const OUT_PATH = path.resolve(import.meta.dirname, '../data/annotations.parquet');
 
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',

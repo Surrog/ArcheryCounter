@@ -1,8 +1,8 @@
 import * as path from 'path';
 import { Pool } from 'pg';
-import { asyncBufferFromFile, parquetMetadata, parquetReadObjects } from 'hyparquet';
+import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
 
-const PARQUET_PATH = path.resolve(__dirname, '../data/annotations.parquet');
+const PARQUET_PATH = path.resolve(import.meta.dirname, '../data/annotations.parquet');
 
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
@@ -23,7 +23,7 @@ async function main() {
   `);
 
   const file = await asyncBufferFromFile(PARQUET_PATH);
-  const metadata = parquetMetadata(file);
+  const metadata = await parquetMetadataAsync(file);
   const records = await parquetReadObjects({ file, metadata });
 
   let count = 0;

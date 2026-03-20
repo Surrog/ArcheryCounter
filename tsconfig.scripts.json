@@ -6,11 +6,7 @@
     "esModuleInterop": true,
     "strict": false,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "paths": {
-      "hyparquet": ["node_modules/hyparquet/types/node.d.ts"],
-      "hyparquet-writer": ["node_modules/hyparquet-writer/types/node.d.ts"]
-    }
+    "resolveJsonModule": true
   },
   "include": ["scripts/**/*", "src/**/*"]
 }
