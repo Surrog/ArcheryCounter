@@ -10,8 +10,8 @@
     "test": "jest",
     "visualize": "ts-node --transpile-only --project tsconfig.scripts.json scripts/visualize.ts",
     "annotate": "ts-node --transpile-only --project tsconfig.scripts.json scripts/annotate.ts",
-    "dump-annotations": "ts-node --transpile-only --project tsconfig.scripts.json scripts/dump-annotations.ts",
-    "seed-from-parquet": "ts-node --transpile-only --project tsconfig.scripts.json scripts/seed-from-parquet.ts"
+    "dump-annotations": "node --no-warnings --import ts-node/esm scripts/dump-annotations.ts",
+    "seed-from-parquet": "node --no-warnings --import ts-node/esm scripts/seed-from-parquet.ts"
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.84.1",
@@ -26,7 +26,6 @@
     "@babel/core": "^7.25.2",
     "@babel/preset-env": "^7.25.3",
     "@babel/runtime": "^7.25.0",
-    "@dsnp/parquetjs": "^1.8.7",
     "@react-native-community/cli": "^20.1.2",
     "@react-native-community/cli-platform-android": "20.1.2",
     "@react-native-community/cli-platform-ios": "20.1.2",
@@ -41,6 +40,8 @@
     "@types/react": "^19.2.0",
     "@types/react-test-renderer": "^19.1.0",
     "eslint": "^8.19.0",
+    "hyparquet": "^1.25.1",
+    "hyparquet-writer": "^0.13.0",
     "jest": "^30.0.0",
     "jimp": "^1.6.0",
     "metro-config": "^0.84.2",
@@ -48,6 +49,7 @@
     "prettier": "3.8.1",
     "react-test-renderer": "19.2.4",
     "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.8.3"
   },
   "engines": {
