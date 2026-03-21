@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -8,12 +8,24 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { RingOverlay } from '../components/RingOverlay';
+import { RingOverlay, DEFAULT_VISIBILITY, OverlayVisibility } from '../components/RingOverlay';
 import { useArcheryScorer } from '../useArcheryScorer';
 
+type VisKey = keyof OverlayVisibility;
+const TOGGLE_LABELS: { key: VisKey; label: string }[] = [
+  { key: 'rings',    label: 'Rings'    },
+  { key: 'rays',     label: 'Rays'     },
+  { key: 'boundary', label: 'Boundary' },
+  { key: 'arrows',   label: 'Arrows'   },
+];
+
 export function HomeScreen() {
-  const { imageUri, rings, paperBoundary, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
+  const { imageUri, rings, paperBoundary, arrows, ringPoints, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
     useArcheryScorer();
+  const [visibility, setVisibility] = useState<OverlayVisibility>(DEFAULT_VISIBILITY);
+
+  const toggleLayer = (key: VisKey) =>
+    setVisibility(v => ({ ...v, [key]: !v[key] }));
 
   const hasResult = imageUri && rings && imageWidth && imageHeight;
 
@@ -26,18 +38,20 @@ export function HomeScreen() {
         {hasResult ? (
           <>
             <Image source={{ uri: imageUri }} style={styles.image} resizeMode="contain" />
-            {/* RingOverlay sits on top and compensates for contain letterboxing */}
             <RingOverlay
               rings={rings}
               paperBoundary={paperBoundary}
+              arrows={arrows}
+              ringPoints={ringPoints}
               imageNaturalWidth={imageWidth}
               imageNaturalHeight={imageHeight}
+              visibility={visibility}
             />
           </>
         ) : (
           <View style={styles.placeholder}>
             <Text style={styles.placeholderText}>
-              {loading ? 'Detecting rings…' : 'No image selected'}
+              {loading ? 'Detecting…' : 'No image selected'}
             </Text>
           </View>
         )}
@@ -49,10 +63,26 @@ export function HomeScreen() {
         )}
       </View>
 
-      {/* ── Ring count badge ─────────────────────────────────────── */}
+      {/* ── Layer toggles ─────────────────────────────────────────── */}
       {hasResult && (
-        <Text style={styles.ringCount}>
-          {rings.length} ring{rings.length !== 1 ? 's' : ''} detected
+        <View style={styles.toggleRow}>
+          {TOGGLE_LABELS.map(({ key, label }) => (
+            <Pressable
+              key={key}
+              style={[styles.toggleButton, visibility[key] && styles.toggleButtonOn]}
+              onPress={() => toggleLayer(key)}>
+              <Text style={[styles.toggleText, visibility[key] && styles.toggleTextOn]}>
+                {label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+
+      {/* ── Stats badge ───────────────────────────────────────────── */}
+      {hasResult && (
+        <Text style={styles.statsText}>
+          {rings.length} rings · {arrows?.length ?? 0} arrow{(arrows?.length ?? 0) !== 1 ? 's' : ''} detected
         </Text>
       )}
 
@@ -118,7 +148,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  ringCount: {
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  toggleButton: {
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#555',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: '#222',
+  },
+  toggleButtonOn: {
+    backgroundColor: '#2266CC',
+    borderColor: '#2266CC',
+  },
+  toggleText: {
+    color: '#888',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  toggleTextOn: {
+    color: '#FFF',
+  },
+  statsText: {
     color: '#AAA',
     textAlign: 'center',
     marginBottom: 4,

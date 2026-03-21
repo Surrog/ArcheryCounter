@@ -18,9 +18,11 @@ async function main() {
       filename       TEXT PRIMARY KEY,
       paper_boundary JSONB,
       rings          JSONB NOT NULL DEFAULT '[]',
+      arrows         JSONB NOT NULL DEFAULT '[]',
       updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS arrows JSONB NOT NULL DEFAULT '[]'`);
 
   const file = await asyncBufferFromFile(PARQUET_PATH);
   const metadata = await parquetMetadataAsync(file);
@@ -29,13 +31,14 @@ async function main() {
   let count = 0;
   for (const record of records) {
     await db.query(
-      `INSERT INTO annotations (filename, paper_boundary, rings)
-       VALUES ($1, $2, $3)
+      `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (filename) DO NOTHING`,
       [
         record.filename,
         record.paper_boundary as string,
         record.rings as string,
+        record.arrows as string,
       ],
     );
     count++;

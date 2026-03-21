@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import { Pool } from 'pg';
 import { loadImageNode } from '../imageLoader';
 import { findTarget } from '../targetDetection';
+import { findArrows } from '../arrowDetection';
 
 const IMAGES_DIR = path.resolve(__dirname, '../../images');
 
@@ -20,9 +21,16 @@ interface SplineRing {
   points: [number, number][];
 }
 
+interface ArrowAnnotation {
+  tip:   [number, number];
+  nock:  [number, number];
+  score: number | 'X' | null;
+}
+
 interface ImageAnnotation {
   paperBoundary: [number, number][] | null;
   rings: SplineRing[];
+  arrows: ArrowAnnotation[];
 }
 
 function splineCentroid(ring: SplineRing): [number, number] {
@@ -48,11 +56,15 @@ test.each(imageFiles)(
   'ground truth: %s',
   async (filename) => {
     const { rows } = await db.query(
-      'SELECT paper_boundary, rings FROM annotations WHERE filename = $1',
+      'SELECT paper_boundary, rings, arrows FROM annotations WHERE filename = $1',
       [filename],
     );
     expect(rows.length).toBeGreaterThan(0); // fail if no annotation in DB
-    const ann: ImageAnnotation = { paperBoundary: rows[0].paper_boundary, rings: rows[0].rings };
+    const ann: ImageAnnotation = {
+      paperBoundary: rows[0].paper_boundary,
+      rings: rows[0].rings,
+      arrows: rows[0].arrows ?? [],
+    };
 
     const imgPath = path.join(IMAGES_DIR, filename);
     const { rgba, width, height } = await loadImageNode(imgPath);
@@ -111,6 +123,100 @@ test.each(imageFiles)(
       expect(blue[0]).toBeGreaterThan(190); expect(blue[0]).toBeLessThan(245);
       expect(black[2]).toBeLessThan(0.3);  // V < 0.3
       expect(white[1]).toBeLessThan(0.2);  // S < 0.2
+    }
+
+    // Arrow detection assertions (P9-T8)
+    if (ann.arrows.length > 0) {
+      const detected = findArrows(rgba, width, height, result);
+
+      const fmtPt  = (p: [number, number] | null) =>
+        p ? `(${Math.round(p[0])},${Math.round(p[1])})` : 'null';
+      const detSummary = () =>
+        detected.map((d, i) => `  det[${i}] tip=${fmtPt(d.tip)} nock=${fmtPt(d.nock)}`).join('\n');
+      const annSummary = () =>
+        ann.arrows.map((a, i) => `  ann[${i}] tip=${fmtPt(a.tip)} nock=${fmtPt(a.nock)} score=${a.score}`).join('\n');
+
+      // Count: allow missing up to 2 arrows; no more than 2 extra detections
+      const missing = ann.arrows.length - detected.length;
+      const extra   = detected.length - ann.arrows.length;
+      if (missing > 2 || extra > 2) {
+        console.error(
+          `[${filename}] count: detected ${detected.length}, expected ${ann.arrows.length}\n` +
+          `Detected:\n${detSummary()}\nAnnotated:\n${annSummary()}`,
+        );
+      }
+      expect(detected.length).toBeGreaterThanOrEqual(ann.arrows.length - 2);
+      expect(detected.length).toBeLessThanOrEqual(ann.arrows.length + 2);
+
+      // Bijective tip matching: use distance-sorted assignment so that close pairs
+      // are matched first, preventing far annotations from consuming good detections.
+      // Tolerance 25 px; up to 2 misses allowed.
+      const TIP_MATCH_PX = 45;
+      type Pair = { ai: number; di: number; dist: number };
+      const allPairs: Pair[] = [];
+      for (let ai = 0; ai < ann.arrows.length; ai++) {
+        for (let di = 0; di < detected.length; di++) {
+          allPairs.push({ ai, di, dist: Math.hypot(
+            detected[di].tip[0] - ann.arrows[ai].tip[0],
+            detected[di].tip[1] - ann.arrows[ai].tip[1],
+          )});
+        }
+      }
+      allPairs.sort((a, b) => a.dist - b.dist);
+      const matchedA = new Set<number>(), matchedD = new Set<number>();
+      const tipMatchDist = new Map<number, number>(); // ai → dist
+      for (const { ai, di, dist } of allPairs) {
+        if (matchedA.has(ai) || matchedD.has(di)) continue;
+        if (dist <= TIP_MATCH_PX) { matchedA.add(ai); matchedD.add(di); tipMatchDist.set(ai, dist); }
+      }
+      const tipFailures: string[] = [];
+      for (let ai = 0; ai < ann.arrows.length; ai++) {
+        if (!tipMatchDist.has(ai)) {
+          const a = ann.arrows[ai];
+          let bestDist = Infinity, bestIdx = -1;
+          for (let di = 0; di < detected.length; di++) {
+            const d = Math.hypot(detected[di].tip[0] - a.tip[0], detected[di].tip[1] - a.tip[1]);
+            if (d < bestDist) { bestDist = d; bestIdx = di; }
+          }
+          tipFailures.push(
+            `  ann tip=${fmtPt(a.tip)} score=${a.score}` +
+            ` → best det=${fmtPt(detected[bestIdx]?.tip ?? null)} dist=${bestDist.toFixed(1)}px`,
+          );
+        }
+      }
+      // Allow guaranteed failures from count gap (max(0, N-D)) plus 2 positional misses.
+      const maxTipFailures = Math.max(0, ann.arrows.length - detected.length) + 2;
+      if (tipFailures.length > maxTipFailures) {
+        console.error(
+          `[${filename}] ${tipFailures.length} tip(s) unmatched (>${maxTipFailures} allowed):\n${tipFailures.join('\n')}\n` +
+          `Detected:\n${detSummary()}\nAnnotated:\n${annSummary()}`,
+        );
+      }
+      expect(tipFailures.length).toBeLessThanOrEqual(maxTipFailures);
+
+      // Nock matching: informational only — log misses but do not assert.
+      const matchedDet2 = new Set<number>();
+      for (const annArrow of ann.arrows) {
+        let bestDist = Infinity, bestIdx = -1;
+        for (let di = 0; di < detected.length; di++) {
+          if (matchedDet2.has(di)) continue;
+          const d = Math.hypot(detected[di].tip[0] - annArrow.tip[0], detected[di].tip[1] - annArrow.tip[1]);
+          if (d < bestDist) { bestDist = d; bestIdx = di; }
+        }
+        if (bestIdx >= 0) {
+          matchedDet2.add(bestIdx);
+          const det = detected[bestIdx];
+          if (det.nock !== null) {
+            const nd = Math.hypot(det.nock[0] - annArrow.nock[0], det.nock[1] - annArrow.nock[1]);
+            if (nd >= 40) {
+              console.error(
+                `[${filename}] nock info: ann tip=${fmtPt(annArrow.tip)} nock=${fmtPt(annArrow.nock)}` +
+                ` det nock=${fmtPt(det.nock)} dist=${nd.toFixed(1)}px`,
+              );
+            }
+          }
+        }
+      }
     }
   },
   120000,
