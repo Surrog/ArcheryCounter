@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
 import { findTarget, ArcheryResult } from '../src/targetDetection';
+import { findArrows, ArrowDetection } from '../src/arrowDetection';
 import { ellipseToSplinePoints } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
@@ -34,7 +35,11 @@ interface CachedImageData {
   base64: string;
   width: number;
   height: number;
-  detected: { rings: SplineRing[]; paperBoundary: [number, number][] | null };
+  detected: {
+    rings: SplineRing[];
+    paperBoundary: [number, number][] | null;
+    arrows: { tip: [number, number]; nock: [number, number] | null }[];
+  };
 }
 
 interface ImageEntry {
@@ -62,12 +67,17 @@ async function loadImageBase64(imgPath: string): Promise<{ base64: string; width
   return { base64, width: img.width, height: img.height };
 }
 
-async function processImage(imgPath: string): Promise<ImageEntry> {
+interface ProcessedImage extends ImageEntry {
+  detectedArrows: ArrowDetection[];
+}
+
+async function processImage(imgPath: string): Promise<ProcessedImage> {
   const filename = path.basename(imgPath);
   const { rgba, width, height } = await loadImageNode(imgPath);
   const { base64 } = await loadImageBase64(imgPath);
   const result = findTarget(rgba, width, height);
-  return { filename, base64, width, height, result };
+  const detectedArrows = findArrows(rgba, width, height, result);
+  return { filename, base64, width, height, result, detectedArrows };
 }
 
 function generateHtml(filenames: string[]): string {
@@ -496,8 +506,23 @@ function render() {
     });
   }
 
-  // Arrows (always from annotation store, both modes)
-  if (showA) {
+  // Detected arrows (generated mode only)
+  if (showA && isGenerated && data.detected.arrows) {
+    data.detected.arrows.forEach((arrow, ai) => {
+      const { tip, nock } = arrow;
+      svgContent += \`<line x1="\${tip[0].toFixed(1)}" y1="\${tip[1].toFixed(1)}" x2="\${(nock ? nock[0] : tip[0]).toFixed(1)}" y2="\${(nock ? nock[1] : tip[1]).toFixed(1)}" stroke="#00CFCF" stroke-width="2" stroke-dasharray="8 4"/>\`;
+      svgContent += \`<circle cx="\${tip[0].toFixed(1)}" cy="\${tip[1].toFixed(1)}" r="5" fill="#00CFCF" stroke="#000" stroke-width="1"/>\`;
+      if (nock) {
+        svgContent += \`<circle cx="\${nock[0].toFixed(1)}" cy="\${nock[1].toFixed(1)}" r="4" fill="#00FFFF" stroke="#000" stroke-width="1" opacity="0.7"/>\`;
+      }
+      const mx = ((tip[0] + (nock ? nock[0] : tip[0])) / 2).toFixed(1);
+      const my = ((tip[1] + (nock ? nock[1] : tip[1])) / 2 - 14).toFixed(1);
+      svgContent += \`<text x="\${mx}" y="\${my}" text-anchor="middle" fill="#00CFCF" font-size="10" font-weight="bold" font-family="monospace" pointer-events="none">\${ai}</text>\`;
+    });
+  }
+
+  // Annotated arrows
+  if (showA && !isGenerated) {
     ann.arrows.forEach((arrow, ai) => {
       const { tip, nock, score } = arrow;
       const isMiss = score === 0;
@@ -508,13 +533,8 @@ function render() {
       const my = ((tip[1] + nock[1]) / 2 - 14).toFixed(1);
       svgContent += \`<line x1="\${tip[0].toFixed(1)}" y1="\${tip[1].toFixed(1)}" x2="\${nock[0].toFixed(1)}" y2="\${nock[1].toFixed(1)}" stroke="\${shaftColor}" stroke-width="2" stroke-dasharray="8 4"/>\`;
       const tipDash = isIncomplete ? 'stroke-dasharray="3 2"' : '';
-      if (!isGenerated) {
-        svgContent += \`<circle class="handle" data-handle="arrow_tip" data-ai="\${ai}" cx="\${tip[0].toFixed(1)}" cy="\${tip[1].toFixed(1)}" r="4" fill="#FF4500" stroke="#000" stroke-width="1" \${tipDash}/>\`;
-        svgContent += \`<circle class="handle" data-handle="arrow_nock" data-ai="\${ai}" cx="\${nock[0].toFixed(1)}" cy="\${nock[1].toFixed(1)}" r="6" fill="#FFD700" stroke="#000" stroke-width="1"/>\`;
-      } else {
-        svgContent += \`<circle cx="\${tip[0].toFixed(1)}" cy="\${tip[1].toFixed(1)}" r="4" fill="#FF4500" opacity="0.6" \${tipDash}/>\`;
-        svgContent += \`<circle cx="\${nock[0].toFixed(1)}" cy="\${nock[1].toFixed(1)}" r="6" fill="#FFD700" opacity="0.6"/>\`;
-      }
+      svgContent += \`<circle class="handle" data-handle="arrow_tip" data-ai="\${ai}" cx="\${tip[0].toFixed(1)}" cy="\${tip[1].toFixed(1)}" r="4" fill="#FF4500" stroke="#000" stroke-width="1" \${tipDash}/>\`;
+      svgContent += \`<circle class="handle" data-handle="arrow_nock" data-ai="\${ai}" cx="\${nock[0].toFixed(1)}" cy="\${nock[1].toFixed(1)}" r="6" fill="#FFD700" stroke="#000" stroke-width="1"/>\`;
       svgContent += \`<text x="\${mx}" y="\${my}" text-anchor="middle" fill="white" font-size="10" font-weight="bold" font-family="monospace" pointer-events="none">\${labelText}</text>\`;
     });
 
@@ -916,6 +936,7 @@ async function main(): Promise<void> {
   await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS arrows          JSONB NOT NULL DEFAULT '[]'`);
   await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_rings    JSONB`);
   await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_boundary JSONB`);
+  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_arrows   JSONB`);
   await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS algorithm_hash    TEXT`);
   console.log('Table ready.');
   console.log(`Algorithm hash: ${currentHash}`);
@@ -973,7 +994,7 @@ async function main(): Promise<void> {
         if (isReady) {
           // Fast path: load base64 only, serve stored detections from DB
           const { base64, width, height } = await loadImageBase64(imgPath);
-          entry = { filename, base64, width, height, result: { success: true, rings: [], paperBoundary: undefined } as any };
+          entry = { filename, base64, width, height, result: { success: true, rings: [], paperBoundary: undefined } as any, detectedArrows: [] } as ProcessedImage;
         } else {
           // Slow path: run algorithm
           entry = await processImage(imgPath);
@@ -984,15 +1005,19 @@ async function main(): Promise<void> {
         let detectedRings: SplineRing[];
         let detectedBoundary: [number, number][] | null;
 
+        let detectedArrows: { tip: [number, number]; nock: [number, number] | null }[] = [];
+
         if (isReady) {
           // Load from DB
           const { rows } = await db.query(
-            'SELECT detected_rings, detected_boundary FROM annotations WHERE filename = $1',
+            'SELECT detected_rings, detected_boundary, detected_arrows FROM annotations WHERE filename = $1',
             [filename],
           );
           detectedRings    = rows[0]?.detected_rings    ?? [];
           detectedBoundary = rows[0]?.detected_boundary ?? null;
+          detectedArrows   = rows[0]?.detected_arrows   ?? [];
         } else {
+          const processed = entry as ProcessedImage;
           detectedRings = entry.result.success
             ? entry.result.rings.map((r: any) => ({
                 points: ellipseToSplinePoints(r.centerX, r.centerY, r.width / 2, r.height / 2, r.angle, K_POINTS),
@@ -1001,6 +1026,7 @@ async function main(): Promise<void> {
           detectedBoundary = entry.result.success && entry.result.paperBoundary
             ? entry.result.paperBoundary.points
             : null;
+          detectedArrows = processed.detectedArrows ?? [];
 
           // Seed/update annotation + store detections
           const fromFile = savedAnnotations[filename];
@@ -1009,18 +1035,20 @@ async function main(): Promise<void> {
 
           if (!inDb.has(filename)) {
             await db.query(
-              `INSERT INTO annotations (filename, paper_boundary, rings, arrows, detected_rings, detected_boundary, algorithm_hash)
-               VALUES ($1, $2, $3, '[]', $4, $5, $6)
+              `INSERT INTO annotations (filename, paper_boundary, rings, arrows, detected_rings, detected_boundary, detected_arrows, algorithm_hash)
+               VALUES ($1, $2, $3, '[]', $4, $5, $6, $7)
                ON CONFLICT (filename) DO NOTHING`,
               [filename, JSON.stringify(paperBoundary), JSON.stringify(rings),
-               JSON.stringify(detectedRings), JSON.stringify(detectedBoundary), currentHash],
+               JSON.stringify(detectedRings), JSON.stringify(detectedBoundary),
+               JSON.stringify(detectedArrows), currentHash],
             );
           } else {
             await db.query(
               `UPDATE annotations
-               SET detected_rings = $2, detected_boundary = $3, algorithm_hash = $4
+               SET detected_rings = $2, detected_boundary = $3, detected_arrows = $4, algorithm_hash = $5
                WHERE filename = $1`,
-              [filename, JSON.stringify(detectedRings), JSON.stringify(detectedBoundary), currentHash],
+              [filename, JSON.stringify(detectedRings), JSON.stringify(detectedBoundary),
+               JSON.stringify(detectedArrows), currentHash],
             );
           }
           inDb.set(filename, currentHash);
@@ -1030,7 +1058,7 @@ async function main(): Promise<void> {
           base64: entry.base64,
           width: entry.width,
           height: entry.height,
-          detected: { rings: detectedRings, paperBoundary: detectedBoundary },
+          detected: { rings: detectedRings, paperBoundary: detectedBoundary, arrows: detectedArrows },
         });
       }
 
