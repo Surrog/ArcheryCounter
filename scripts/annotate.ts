@@ -8,7 +8,7 @@ import { ellipseToSplinePoints } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const ANNOTATIONS_PATH = path.resolve(__dirname, '../images/annotate.json');
-const PORT = 3737;
+const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
 
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
