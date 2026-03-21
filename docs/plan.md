@@ -134,7 +134,7 @@ Measured across all 10 annotated images (63 arrows total):
 
 - [x] **P9-T6** Hole fallback — reserved for second iteration; stub returns [].
 
-- [ ] **P9-T7** Dataset is complete (collected in P8). 10 images, 63 arrows, all scored.
+- [x] **P9-T7** Dataset is complete (collected in P8). 10 images, 63 arrows, all scored.
 
 - [x] **P9-T8** Arrow ground-truth tests added to `src/__tests__/groundTruth.test.ts`: count match, tip within 15 px (bijective), nock within 40 px.
 

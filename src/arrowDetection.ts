@@ -460,11 +460,14 @@ function filterSegments(
       // For Hough tangent lines, the tangent point (= closest point to centre)
       // falls in the MIDDLE of the detected segment; for arrow shafts the tip
       // is at one endpoint so the minimum is at k=0 or k=6.
-      const tipRad = d0c <= d1c ? rads[0] : rads[NUM_R - 1];
-      const minIdx = rads.indexOf(minD);
-      if (minIdx >= 2 && minIdx <= NUM_R - 3 && tipRad < 2 * minD) {
+      const tipRad  = d0c <= d1c ? rads[0]         : rads[NUM_R - 1];
+      const nockRad = d0c <= d1c ? rads[NUM_R - 1] : rads[0];
+      const minIdx  = rads.indexOf(minD);
+      // Guard: ring arcs have both endpoints at a similar ring radius (nockRad ≈ tipRad).
+      // Real arrows with tangential shafts have nockRad >> tipRad — skip the rejection.
+      if (minIdx >= 2 && minIdx <= NUM_R - 3 && tipRad < 2 * minD && nockRad < 1.4 * tipRad) {
         nRadial++;
-        if (debug) console.error(`  [D3] REJECT radial-interior tip=(${Math.round(tipX0)},${Math.round(tipY0)}) minIdx=${minIdx} tipR=${Math.round(tipRad)} minR=${Math.round(minD)}`);
+        if (debug) console.error(`  [D3] REJECT radial-interior tip=(${Math.round(tipX0)},${Math.round(tipY0)}) minIdx=${minIdx} tipR=${Math.round(tipRad)} nockR=${Math.round(nockRad)} minR=${Math.round(minD)}`);
         continue;
       }
     }
