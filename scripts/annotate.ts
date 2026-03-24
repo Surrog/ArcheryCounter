@@ -6,7 +6,7 @@ import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
 import { findTarget, ArcheryResult } from '../src/targetDetection';
 import { findArrows, ArrowDetection } from '../src/arrowDetection';
-import { ellipseToSplinePoints } from '../src/spline';
+import { SplineRing } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const ANNOTATIONS_PATH = path.resolve(__dirname, '../images/annotate.json');
@@ -28,8 +28,6 @@ const RING_COLORS = [
   '#888888', '#888888',
   '#FFFFFF', '#FFFFFF',
 ];
-
-interface SplineRing { points: [number, number][]; }
 
 interface CachedImageData {
   base64: string;
@@ -73,12 +71,18 @@ interface ProcessedImage extends ImageEntry {
 
 async function processImage(imgPath: string): Promise<ProcessedImage> {
   const filename = path.basename(imgPath);
+  console.log(`  [1/4] loadImageNode ${filename}…`);
   const { rgba, width, height } = await loadImageNode(imgPath);
+  console.log(`  [2/4] loadImageBase64 ${filename} (${width}×${height})…`);
   const { base64 } = await loadImageBase64(imgPath);
+  console.log(`  [3/4] findTarget ${filename}…`);
   const result = findTarget(rgba, width, height);
+  console.log(`  [4/4] findArrows ${filename} (success=${result.success})…`);
   const detectedArrows = findArrows(rgba, width, height, result);
+  console.log(`  done: ${filename} — ${detectedArrows.length} arrows`);
   return { filename, base64, width, height, result, detectedArrows };
 }
+
 
 function generateHtml(filenames: string[]): string {
   const filenamesJson = JSON.stringify(filenames);
@@ -134,6 +138,11 @@ function generateHtml(filenames: string[]): string {
     #score-picker button.miss { background: #3a2a2a; color: #999; }
     #score-picker button.miss:hover { background: #4a3a3a; }
 
+    #img-filter { display: flex; gap: 0; border: 1px solid #333; border-radius: 4px; overflow: hidden; margin: 6px 14px 0; flex-shrink: 0; }
+    #img-filter button { flex: 1; padding: 4px 6px; font-size: 0.72rem; border: none; cursor: pointer; background: #2a2a2a; color: #666; }
+    #img-filter button:not(:last-child) { border-right: 1px solid #333; }
+    #img-filter button.active { background: #1a3a5c; color: #4a9eff; font-weight: 600; }
+    #img-filter button:hover:not(.active) { background: #333; color: #aaa; }
     #img-list { flex: 1; overflow-y: auto; padding: 8px 0; }
     .img-btn {
       width: 100%; text-align: left; background: none; border: none; color: #ccc;
@@ -224,6 +233,11 @@ function generateHtml(filenames: string[]): string {
       Ctrl+click boundary: add vertex · Shift+click vertex/arrow: remove · A: add arrow
     </div>
   </div>
+  <div id="img-filter">
+    <button id="filter-all" class="active">All</button>
+    <button id="filter-annotated">Annotated</button>
+    <button id="filter-unannotated">Unannotated</button>
+  </div>
   <div id="img-list"></div>
   <div id="data-panel">
     <h3>Current annotation</h3>
@@ -277,6 +291,7 @@ let pendingNock = null;
 let pickerContext = null; // { type: 'new' } | { type: 'edit', ai: number } | null
 let imageDataCache = {}; // filename -> { base64, width, height, detected }
 let viewMode = 'annotated'; // 'annotated' | 'generated'
+let imageFilter = 'all'; // 'all' | 'annotated' | 'unannotated'
 
 // ---- Overlay toggles ----
 function showRings()    { return document.getElementById('chk-rings').checked; }
@@ -405,20 +420,25 @@ async function selectImage(idx) {
   currentIdx = idx;
   updateImageList();
   const filename = IMAGES[idx];
+  console.log('[selectImage] clicked:', filename, 'cached:', !!imageDataCache[filename], 'stale:', staleImages.has(filename));
   if (imageDataCache[filename]) {
     render();
     return;
   }
 
-  // Quick status check: tells us if we need to recompute (~45s) or just load
+  // Show loading immediately using the stale hint we already have from /api/stale-images
   let computing = staleImages.has(filename);
+  renderLoading(computing ? 'Computing rings\u2026 0s' : 'Loading\u2026');
+
+  // Confirm with a lightweight status check (fast DB query), update message if hint was wrong
   try {
+    console.log('[selectImage] fetching status…');
     const r = await fetch('/api/image-status/' + encodeURIComponent(filename));
     const { state } = await r.json();
     computing = state === 'stale' || state === 'new';
-  } catch {}
-
-  renderLoading(computing ? 'Computing rings\u2026 0s' : 'Loading\u2026');
+    console.log('[selectImage] status:', state, 'computing:', computing);
+    updateLoadingMessage(computing ? 'Computing rings\u2026 0s' : 'Loading\u2026');
+  } catch (e) { console.warn('[selectImage] status fetch failed:', e); }
 
   let elapsed = 0;
   const timer = computing ? setInterval(() => {
@@ -426,15 +446,29 @@ async function selectImage(idx) {
     updateLoadingMessage(\`Computing rings\u2026 \${elapsed}s\`);
   }, 1000) : null;
 
+  let loadError = null;
   try {
+    console.log('[selectImage] fetching image data…');
+    const t0 = Date.now();
     const res = await fetch('/api/image/' + encodeURIComponent(filename));
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    console.log('[selectImage] response received in', ((Date.now()-t0)/1000).toFixed(1)+'s  status:', res.status);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || 'HTTP ' + res.status);
+    }
+    console.log('[selectImage] parsing JSON…');
     imageDataCache[filename] = await res.json();
+    console.log('[selectImage] done, detected rings:', imageDataCache[filename]?.detected?.rings?.length, 'arrows:', imageDataCache[filename]?.detected?.arrows?.length);
     staleImages.delete(filename);
   } catch (e) {
-    console.error('Failed to load image:', filename, e);
+    console.error('[selectImage] failed:', filename, e);
+    loadError = String(e);
   } finally {
     if (timer) clearInterval(timer);
+  }
+  if (loadError) {
+    renderLoading('\u26a0 ' + loadError);
+    return;
   }
   render();
 }
@@ -459,7 +493,7 @@ function render() {
   let svgContent = '';
 
   // Boundary polygon
-  if (boundary && showB) {
+  if (boundary && showB && boundary.every(p => p[0] != null && p[1] != null)) {
     const pts = boundary.map(p => \`\${p[0].toFixed(1)},\${p[1].toFixed(1)}\`).join(' ');
     svgContent += \`<polygon points="\${pts}" fill="none" stroke="#00FF88" stroke-width="3" stroke-dasharray="12 6" opacity="0.85"/>\`;
   }
@@ -469,6 +503,7 @@ function render() {
     for (let i = rings.length - 1; i >= 0; i--) {
       const ring = rings[i];
       if (!ring.points || ring.points.length < 3) continue;
+      if (ring.points.some(p => p[0] == null || p[1] == null)) continue; // skip corrupt points
       const color = RING_COLORS[i] || '#FFFFFF';
       const d = splineToPath(ring.points);
       if (i >= 8) {
@@ -675,10 +710,23 @@ function attachSvgListeners() {
 }
 
 // ---- Image list ----
+function isAnnotated(filename) {
+  const ann = store.annotations[filename];
+  return ann && (
+    (ann.arrows && ann.arrows.length > 0) ||
+    (ann.rings  && ann.rings.length  > 0) ||
+    ann.paperBoundary != null
+  );
+}
+
 function updateImageList() {
   const list = document.getElementById('img-list');
   list.innerHTML = '';
   IMAGES.forEach((filename, i) => {
+    const annotated = isAnnotated(filename);
+    if (imageFilter === 'annotated'   && !annotated) return;
+    if (imageFilter === 'unannotated' &&  annotated) return;
+
     const isModified = store.modified.includes(filename);
     const isActive = i === currentIdx;
     const isStale = staleImages.has(filename) && !imageDataCache[filename];
@@ -861,6 +909,15 @@ document.getElementById('chk-arrows').addEventListener('change', render);
 document.getElementById('btn-view-annotated').addEventListener('click', () => setViewMode('annotated'));
 document.getElementById('btn-view-generated').addEventListener('click', () => setViewMode('generated'));
 
+['all', 'annotated', 'unannotated'].forEach(f => {
+  document.getElementById('filter-' + f).addEventListener('click', () => {
+    imageFilter = f;
+    document.querySelectorAll('#img-filter button').forEach(b => b.classList.remove('active'));
+    document.getElementById('filter-' + f).classList.add('active');
+    updateImageList();
+  });
+});
+
 document.getElementById('btn-add-arrow').addEventListener('click', () => {
   if (viewMode === 'generated') return;
   if (addArrowMode === 'idle') {
@@ -938,6 +995,17 @@ async function main(): Promise<void> {
   await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_boundary JSONB`);
   await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_arrows   JSONB`);
   await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS algorithm_hash    TEXT`);
+  // Wipe rows whose rings/detected_rings contain null coordinates (written by the old
+  // buggy ellipseToSplinePoints call that passed SplineRing fields as ellipse params,
+  // producing NaN → JSON null). Reset everything so they recompute cleanly.
+  const { rowCount: wiped } = await db.query(`
+    UPDATE annotations
+       SET rings = '[]', detected_rings = NULL, detected_boundary = NULL,
+           detected_arrows = NULL, algorithm_hash = NULL
+     WHERE (rings::text LIKE '%null%' AND rings <> 'null'::jsonb)
+        OR (detected_rings IS NOT NULL AND detected_rings::text LIKE '%null%')
+  `);
+  if (wiped) console.log(`Wiped ${wiped} rows with corrupt ring data — will recompute on selection.`);
   console.log('Table ready.');
   console.log(`Algorithm hash: ${currentHash}`);
 
@@ -982,33 +1050,27 @@ async function main(): Promise<void> {
 
     } else if (req.method === 'GET' && req.url?.startsWith('/api/image/')) {
       const filename = decodeURIComponent(req.url.slice('/api/image/'.length));
-
+      try {
       if (!imageCache.has(filename)) {
         const imgPath = path.join(IMAGES_DIR, filename);
         if (!fs.existsSync(imgPath)) { respond(404, '{"error":"not found"}'); return; }
 
         const hashInDb = inDb.get(filename);
         const isReady  = hashInDb === currentHash;
+        console.log(`image request: ${filename}  hashInDb=${hashInDb ?? 'null'}  currentHash=${currentHash}  isReady=${isReady}`);
 
-        let entry: ImageEntry;
-        if (isReady) {
-          // Fast path: load base64 only, serve stored detections from DB
-          const { base64, width, height } = await loadImageBase64(imgPath);
-          entry = { filename, base64, width, height, result: { success: true, rings: [], paperBoundary: undefined } as any, detectedArrows: [] } as ProcessedImage;
-        } else {
-          // Slow path: run algorithm
-          entry = await processImage(imgPath);
-          console.log(`  ${filename} ... ${entry.result.success ? 'ok' : `FAILED: ${(entry.result as any).error}`}`);
-        }
-
-        // Build detected data
+        let base64: string;
+        let width: number;
+        let height: number;
         let detectedRings: SplineRing[];
         let detectedBoundary: [number, number][] | null;
-
-        let detectedArrows: { tip: [number, number]; nock: [number, number] | null }[] = [];
+        let detectedArrows: { tip: [number, number]; nock: [number, number] | null }[];
 
         if (isReady) {
-          // Load from DB
+          // Fast path: load base64 only, serve stored detections from DB
+          console.log(`  fast path: loading base64 for ${filename}…`);
+          ({ base64, width, height } = await loadImageBase64(imgPath));
+          console.log(`  fast path: querying DB detections for ${filename}…`);
           const { rows } = await db.query(
             'SELECT detected_rings, detected_boundary, detected_arrows FROM annotations WHERE filename = $1',
             [filename],
@@ -1017,16 +1079,16 @@ async function main(): Promise<void> {
           detectedBoundary = rows[0]?.detected_boundary ?? null;
           detectedArrows   = rows[0]?.detected_arrows   ?? [];
         } else {
-          const processed = entry as ProcessedImage;
-          detectedRings = entry.result.success
-            ? entry.result.rings.map((r: any) => ({
-                points: ellipseToSplinePoints(r.centerX, r.centerY, r.width / 2, r.height / 2, r.angle, K_POINTS),
-              }))
-            : [];
+          // Slow path: run detection synchronously (blocks event loop ~45s per image)
+          const entry = await processImage(imgPath);
+          console.log(`  ${filename} ... ${entry.result.success ? 'ok' : `FAILED: ${(entry.result as any).error}`}`);
+          base64 = entry.base64;
+          width = entry.width;
+          height = entry.height;
+          detectedRings = entry.result.success ? entry.result.rings : [];
           detectedBoundary = entry.result.success && entry.result.paperBoundary
-            ? entry.result.paperBoundary.points
-            : null;
-          detectedArrows = processed.detectedArrows ?? [];
+            ? entry.result.paperBoundary.points : null;
+          detectedArrows = entry.detectedArrows;
 
           // Seed/update annotation + store detections
           const fromFile = savedAnnotations[filename];
@@ -1055,14 +1117,18 @@ async function main(): Promise<void> {
         }
 
         imageCache.set(filename, {
-          base64: entry.base64,
-          width: entry.width,
-          height: entry.height,
+          base64,
+          width,
+          height,
           detected: { rings: detectedRings, paperBoundary: detectedBoundary, arrows: detectedArrows },
         });
       }
 
       respond(200, JSON.stringify(imageCache.get(filename)!));
+      } catch (err) {
+        console.error(`Error processing ${filename}:`, err);
+        respond(500, JSON.stringify({ error: String(err) }));
+      }
 
     } else if (req.method === 'GET' && req.url === '/api/annotations') {
       const { rows } = await db.query('SELECT filename, paper_boundary, rings, arrows FROM annotations');

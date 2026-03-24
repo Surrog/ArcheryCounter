@@ -33,7 +33,11 @@ async function main() {
     await db.query(
       `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
        VALUES ($1, $2, $3, $4)
-       ON CONFLICT (filename) DO NOTHING`,
+       ON CONFLICT (filename) DO UPDATE
+         SET paper_boundary = EXCLUDED.paper_boundary,
+             rings          = EXCLUDED.rings,
+             arrows         = EXCLUDED.arrows,
+             updated_at     = NOW()`,
       [
         record.filename,
         record.paper_boundary as string,
