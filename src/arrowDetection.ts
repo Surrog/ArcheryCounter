@@ -169,7 +169,7 @@ function buildRelativeDarkMask(
       else if (r <= rBlue)  thr = blueThr;
       else if (r <= rBlack) continue;  // black zone: shaft V≈background V, indistinguishable → skip
       else if (r <= rWhite) thr = whiteThr;
-      else                  thr = outerThr;
+      else                  continue; // outside outermost ring → skip (hay-bale, frame)
 
       const i4 = (y * width + x) * 4;
       const [, , v] = rgbToHsv(rgba[i4], rgba[i4 + 1], rgba[i4 + 2]);

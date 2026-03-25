@@ -1335,6 +1335,41 @@ export function findTarget(
       pts => filterRingOutliers(pts, cx, cy, w * 0.15),
     );
 
+    // Fix R2: ratio-based sanity clamp for ring[7].
+    // Expected r7/r5 ≈ 8/6 ≈ 1.333 (WA zone boundaries at 8w and 6w respectively).
+    // Under uneven evening/indoor lighting the luminance-gradient scan can latch onto
+    // the wrong grey→white transition, placing ring[7] at the wrong radius.  When
+    // the measured r7/r5 ratio is outside [1.05, 1.65], or when ring[7] has too few
+    // detected points (< 3), we rebuild ring[7] from ring[5] points scaled outward by
+    // the expected 8/6 factor.  Using ring[5] (not ring[7]) as the source ensures the
+    // rebuilt ring inherits the full 32-ray angular coverage and correct centre.
+    {
+      const R7_R5_EXPECTED = 8 / 6;
+      const r5pts = transitionPoints[5];
+      const r7pts = transitionPoints[7];
+      if (r5pts.length >= 3) {
+        const medianR = (pts: Pixel[]) => {
+          const sorted = pts.map(p => Math.hypot(p.x - cx, p.y - cy)).sort((a, b) => a - b);
+          return sorted[Math.floor(sorted.length / 2)];
+        };
+        const r5med = medianR(r5pts);
+        const r7med = r7pts.length >= 3 ? medianR(r7pts) : 0;
+        const ratio = r5med > 0 && r7pts.length >= 3 ? r7med / r5med : 0;
+        if (r5med > 0 && (r7pts.length < 3 || ratio < 1.05 || ratio > 1.65)) {
+          const predictedR7 = r5med * R7_R5_EXPECTED;
+          transitionPoints[7] = r5pts.map(p => {
+            const d = Math.hypot(p.x - cx, p.y - cy);
+            if (d === 0) return p;
+            const s = predictedR7 / d;
+            return { x: cx + (p.x - cx) * s, y: cy + (p.y - cy) * s };
+          });
+          if (process.env.DEBUG_RINGS) {
+            console.error(`[debug] R2 clamp: r7/r5=${ratio.toFixed(3)} n7=${r7pts.length} → rebuilt ring[7] from ring[5] at ${predictedR7.toFixed(1)}px`);
+          }
+        }
+      }
+    }
+
     const maxBoundaryR = Math.max(...smoothedDists);
 
     // Build splines for the 5 directly-detected rings [1,3,5,7,9] plus regression-

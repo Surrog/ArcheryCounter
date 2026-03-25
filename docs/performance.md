@@ -180,9 +180,10 @@ solely on luminance transitions. The grey blob centroid radius can be compared a
 the expected WA ratio (grey outer ≈ 7.2w) to sanity-check.
 
 **Fix R2 — Ratio-based sanity clamp for ring[7].**
-After detecting ring[7], compute `r7 / r5`. The WA standard ratio is ≈ 2.28. If the
-measured ratio falls outside, say, [1.9, 2.7], snap ring[7] to the predicted position
-`r5 × 2.28`. This catches the luminance mistracking without requiring a better detector.
+After detecting ring[7], compute `r7 / r5`. The WA standard ratio is ≈ 8/6 = 1.333
+(ring[7] ≈ 8w, ring[5] ≈ 6w). If the measured ratio falls outside [1.05, 1.65], snap
+ring[7] to the predicted position `r5 × 1.333`. This catches luminance mistracking
+without requiring a better detector.
 
 **Fix R3 — Per-zone adaptive luminance calibration.**
 The grey zone is currently detected with a fixed luminance threshold. Measure the actual
