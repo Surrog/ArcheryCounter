@@ -192,6 +192,9 @@ function generateHtml(filenames: string[]): string {
     #controls button.danger:hover { background: #9a3232; }
     #controls button.active-mode { background: #8a5a00; }
     #controls button.active-mode:hover { background: #aa7200; }
+    #controls button.save-disabled { background: #1e4428; color: #666; cursor: default; }
+    #controls button.save-disabled:hover { background: #1e4428; }
+    #save-msg { font-size: 0.75rem; color: #e07070; padding: 4px 0 0; display: none; line-height: 1.4; }
 
     #toolbar { padding: 8px 14px; border-bottom: 1px solid #333; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
     #toolbar label { font-size: 0.78rem; color: #aaa; display: flex; align-items: center; gap: 4px; cursor: pointer; }
@@ -297,6 +300,7 @@ function generateHtml(filenames: string[]): string {
     <h1>Annotation Tool</h1>
     <div id="controls">
       <button id="btn-save">Save</button>
+      <div id="save-msg"></div>
       <button id="btn-reset">Reset image</button>
       <button id="btn-add-arrow">Add arrow (A)</button>
       <button id="btn-reset-all" class="danger">Reset all</button>
@@ -977,7 +981,15 @@ function updateDataPanel() {
 
   const saveBtn = document.getElementById('btn-save');
   const valid = isAnnotationValid(ann);
-  saveBtn.disabled = !valid;
+  saveBtn.classList.toggle('save-disabled', !valid);
+  if (!valid) {
+    const reasons = [];
+    if (!ann.paperBoundary || ann.paperBoundary.length < 3)
+      reasons.push(\`boundary=\${ann.paperBoundary ? ann.paperBoundary.length + ' pts (need ≥3)' : 'null'}\`);
+    if (!ann.rings || ann.rings.length === 0) reasons.push('rings=0');
+    if (!ann.arrows || ann.arrows.length === 0) reasons.push('arrows=0');
+    console.log(\`[save-btn] disabled for \${IMAGES[currentIdx]}: \${reasons.join(', ')}\`);
+  }
   saveBtn.title = valid ? '' : 'Cannot save: annotation needs a target border, rings, and at least one arrow';
 
   document.querySelectorAll('#data-table .score-cell').forEach(cell => {
@@ -990,11 +1002,38 @@ function updateDataPanel() {
 }
 
 // ---- Save to DB ----
+function showSaveMsg(text) {
+  const el = document.getElementById('save-msg');
+  el.textContent = text;
+  el.style.display = 'block';
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
 async function save() {
+  console.log(\`[save] clicked — modified: [\${store.modified.join(', ') || 'none'}]\`);
+  const ann = getAnnotation(currentIdx);
+  if (!isAnnotationValid(ann)) {
+    const missing = [];
+    if (!ann.paperBoundary || ann.paperBoundary.length < 3) missing.push('boundary');
+    if (!ann.rings || ann.rings.length === 0) missing.push('rings');
+    if (!ann.arrows || ann.arrows.length === 0) missing.push('at least one arrow');
+    const msg = 'Missing: ' + missing.join(', ');
+    showSaveMsg(msg);
+    console.log(\`[save] blocked — \${msg}\`);
+    return;
+  }
   const out = {};
   for (const filename of Object.keys(store.annotations)) {
     const ann = store.annotations[filename];
     out[filename] = { paperBoundary: ann.paperBoundary, rings: ann.rings, arrows: ann.arrows || [] };
+  }
+  const total = Object.keys(out).length;
+  console.log(\`[save] sending \${total} annotation(s) (all known, server skips invalid ones)\`);
+  for (const [filename, ann] of Object.entries(out)) {
+    const modified = store.modified.includes(filename);
+    const valid = isAnnotationValid(ann);
+    console.log(\`[save]   \${modified ? '* ' : '  '}\${filename}: boundary=\${ann.paperBoundary ? ann.paperBoundary.length + ' pts' : 'null'} rings=\${ann.rings.length} arrows=\${ann.arrows.length} valid=\${valid}\${!valid ? ' ← will be skipped by server' : ''}\`);
   }
   try {
     const res = await fetch('/api/save', {
@@ -1002,8 +1041,12 @@ async function save() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(out),
     });
+    console.log(\`[save] response HTTP \${res.status}\`);
     if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+    const body = await res.json();
+    console.log(\`[save] server response:\`, body);
   } catch (e) {
+    console.error('[save] failed:', e);
     alert('Save failed: ' + e);
     return;
   }
@@ -1451,13 +1494,26 @@ async function main(): Promise<void> {
       req.on('end', async () => {
         try {
           const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          const received = Object.keys(data).length;
+          console.log(`[save] received ${received} annotation(s)`);
+          let saved = 0, skipped = 0;
           for (const [filename, ann] of Object.entries(data) as [string, any][]) {
             const normalized = {
               paperBoundary: ann.paperBoundary ?? null,
               rings: ann.rings ?? [],
               arrows: ann.arrows ?? [],
             };
-            if (!isValidAnnotation(normalized)) continue;
+            if (!isValidAnnotation(normalized)) {
+              const reasons: string[] = [];
+              if (!normalized.paperBoundary || normalized.paperBoundary.length < 3)
+                reasons.push(`boundary=${normalized.paperBoundary ? normalized.paperBoundary.length + ' pts (need ≥3)' : 'null'}`);
+              if (normalized.rings.length === 0) reasons.push('rings=0');
+              if (normalized.arrows.length === 0) reasons.push('arrows=0');
+              console.log(`[save]   SKIP ${filename}: ${reasons.join(', ')}`);
+              logEvent('warn', 'save-skipped', filename, reasons.join(', '));
+              skipped++;
+              continue;
+            }
             await db.query(
               `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
                VALUES ($1, $2, $3, $4)
@@ -1473,11 +1529,15 @@ async function main(): Promise<void> {
                 JSON.stringify(normalized.arrows),
               ],
             );
+            console.log(`[save]   OK ${filename}: boundary=${normalized.paperBoundary!.length} pts, rings=${normalized.rings.length}, arrows=${normalized.arrows.length}`);
+            logEvent('info', 'save-ok', filename, `rings=${normalized.rings.length} arrows=${normalized.arrows.length}`);
+            saved++;
           }
-          console.log(`Saved ${Object.keys(data).length} annotations`);
-          respond(200, '{"ok":true}');
+          console.log(`[save] done: saved=${saved} skipped=${skipped}`);
+          respond(200, JSON.stringify({ ok: true, saved, skipped }));
         } catch (e) {
           console.error('Save error:', e);
+          logEvent('error', 'save-error', '', String(e));
           respond(500, `{"error":"${e}"}`);
         }
       });

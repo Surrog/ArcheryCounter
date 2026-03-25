@@ -179,16 +179,6 @@ function buildRelativeDarkMask(
   return mask;
 }
 
-/** Mark pixels darker than vThreshold (V channel in HSV) as 255, rest 0.  */
-function buildDarkMask(rgba: Uint8Array, w: number, h: number, vThreshold: number): Uint8Array {
-  const mask = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    const [, , v] = rgbToHsv(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]);
-    if (v < vThreshold) mask[i] = 255;
-  }
-  return mask;
-}
-
 // ---------------------------------------------------------------------------
 // P9-T1: Hough line segment extraction
 // ---------------------------------------------------------------------------
@@ -793,7 +783,6 @@ export function findArrows(
     rgba, width, height, boundary, ringRadii, cx, cy,
     result.calibration,
   );
-  const darkMask = buildDarkMask(rgba, width, height, /* vThreshold */ 0.45);
   const wd = width, hd = height;
 
   const bb = polyBBox(boundary);

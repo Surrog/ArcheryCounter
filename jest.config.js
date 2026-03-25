@@ -7,14 +7,9 @@ module.exports = {
     'src/**/*.ts',
     '!src/**/__tests__/**',
     '!src/**/__mocks__/**',
-    '!src/NativeArcheryCounter.ts',
   ],
   coverageReporters: ['text', 'lcov'],
-  moduleNameMapper: {
-    // Map the native module to our mock
-    '^./NativeArcheryCounter$': '<rootDir>/src/__mocks__/NativeArcheryCounter.ts',
-    '^../NativeArcheryCounter$': '<rootDir>/src/__mocks__/NativeArcheryCounter.ts',
-  },
+  moduleNameMapper: {},
   transformIgnorePatterns: [
     'node_modules/(?!(react-native|@react-native|react-native-svg|react-native-image-picker)/)',
   ],
