@@ -82,6 +82,19 @@ describe('useArcheryScorer', () => {
     expect(result.current.rings).toBeNull();
   });
 
+  it('sets error state when processImage rejects with a non-Error value', async () => {
+    mockLaunch.mockResolvedValue({
+      didCancel: false,
+      assets: [{ uri: 'file:///bad.jpg', width: 100, height: 100 }],
+    });
+    (ArcheryCounter.processImage as jest.Mock).mockRejectedValueOnce('plain string error');
+
+    const { result } = renderHook(() => useArcheryScorer());
+    await act(async () => { await result.current.pickAndProcess(); });
+
+    expect(result.current.error).toBe('plain string error');
+  });
+
   it('reset clears state', async () => {
     mockLaunch.mockResolvedValue({
       didCancel: false,

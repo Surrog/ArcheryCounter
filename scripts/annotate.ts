@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import { spawn } from 'child_process';
 import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
 import { findTarget, ArcheryResult } from '../src/targetDetection';
@@ -9,7 +10,6 @@ import { findArrows, ArrowDetection } from '../src/arrowDetection';
 import { SplineRing } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
-const ANNOTATIONS_PATH = path.resolve(__dirname, '../images/annotate.json');
 const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
 
 const db = new Pool({
@@ -46,6 +46,87 @@ interface ImageEntry {
   width: number;
   height: number;
   result: ArcheryResult;
+}
+
+// ---------------------------------------------------------------------------
+// Logging (AW-6)
+// ---------------------------------------------------------------------------
+
+const LOG_PATH = path.resolve(__dirname, '../logs/annotate.log');
+fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+
+function logEvent(level: 'info' | 'warn' | 'error', event: string, filename: string, detail = '') {
+  const line = JSON.stringify({ ts: new Date().toISOString(), level, event, filename, detail });
+  fs.appendFileSync(LOG_PATH, line + '\n');
+  if (level === 'warn')  console.warn(`[warn]  ${event}: ${filename}${detail ? ' — ' + detail : ''}`);
+  if (level === 'error') console.error(`[error] ${event}: ${filename}${detail ? ' — ' + detail : ''}`);
+}
+
+// ---------------------------------------------------------------------------
+// Validity check (AW-2)
+// ---------------------------------------------------------------------------
+
+function isValidDetected(
+  rings: SplineRing[],
+  boundary: [number, number][] | null,
+): boolean {
+  const ringsOk = rings.every(r => r.points?.every(p => p[0] != null && p[1] != null));
+  const boundaryOk = boundary == null || boundary.every(p => p[0] != null && p[1] != null);
+  return ringsOk && boundaryOk;
+}
+
+function isValidAnnotation(ann: {
+  paperBoundary: [number, number][] | null;
+  rings: any[];
+  arrows: any[];
+}): boolean {
+  return (
+    ann.paperBoundary != null && ann.paperBoundary.length >= 3 &&
+    ann.rings.length > 0 &&
+    ann.arrows.length > 0
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Worker process for background detection (AW-5)
+// ---------------------------------------------------------------------------
+
+const TSX_BIN = path.resolve(__dirname, '../node_modules/.bin/tsx');
+const DETECT_WORKER = path.resolve(__dirname, 'detect-worker.ts');
+const WORKER_TIMEOUT_MS = 5 * 60 * 1000;
+
+interface DetectionOutput {
+  rings: SplineRing[];
+  paperBoundary: [number, number][] | null;
+  arrows: { tip: [number, number]; nock: [number, number] | null }[];
+  success: boolean;
+  error?: string;
+}
+
+function runWorkerProcess(imgPath: string): Promise<DetectionOutput> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(TSX_BIN, [DETECT_WORKER, imgPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGTERM'); } catch {}
+      reject(new Error('Worker timed out after 5 min'));
+    }, WORKER_TIMEOUT_MS);
+    proc.on('error', err => { clearTimeout(timer); reject(err); });
+    proc.on('close', code => {
+      clearTimeout(timer);
+      if (code !== 0 && code !== null) {
+        reject(new Error(`Worker exited ${code}: ${stderr.slice(0, 500)}`));
+        return;
+      }
+      try { resolve(JSON.parse(stdout)); }
+      catch { reject(new Error(`Failed to parse worker output: ${stdout.slice(0, 200)}`)); }
+    });
+  });
 }
 
 /** Hash of algorithm source files — used to detect stale detections in DB. */
@@ -152,17 +233,35 @@ function generateHtml(filenames: string[]): string {
     .img-btn:hover { background: #2a2a2a; }
     .img-btn.active { background: #1a3a5c; border-left-color: #4a9eff; color: #fff; }
     .img-btn.modified { color: #f0a030; }
-    .img-btn.stale { color: #888; font-style: italic; }
-    .img-btn .dot { width: 6px; height: 6px; border-radius: 50%; background: #f0a030; flex-shrink: 0; }
-    .img-btn .spacer { width: 6px; flex-shrink: 0; }
+    .img-btn .mod-dot { width: 6px; height: 6px; border-radius: 50%; background: #f0a030; flex-shrink: 0; }
+    .img-btn .spacer  { width: 6px; flex-shrink: 0; }
+    /* AW-5: generation status dot */
+    .gen-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; margin-left: auto; }
+    .gen-dot.ready    { background: #4a9eff; }
+    .gen-dot.annotated{ background: #2ecc71; }
+    .gen-dot.computing{ background: #f0a030; animation: gen-pulse 1s ease-in-out infinite; }
+    .gen-dot.queued   { background: #555; }
+    @keyframes gen-pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
-    #data-panel { padding: 10px 14px; border-top: 1px solid #333; font-size: 0.72rem; overflow-y: auto; max-height: 240px; }
-    #data-panel h3 { color: #888; margin-bottom: 6px; font-size: 0.75rem; font-weight: 600; }
+    /* AW-3: collapsible data panel */
+    #data-panel { border-top: 1px solid #333; font-size: 0.72rem; flex-shrink: 0; }
+    #data-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 14px 6px; cursor: pointer; user-select: none;
+    }
+    #data-panel-header h3 { color: #888; font-size: 0.75rem; font-weight: 600; margin: 0; }
+    #btn-collapse-data { background: none; border: none; color: #555; cursor: pointer; font-size: 0.75rem; padding: 0 2px; }
+    #btn-collapse-data:hover { color: #aaa; }
+    #data-table-wrap { padding: 0 14px 10px; overflow-y: auto; max-height: 220px; }
+    #data-panel.collapsed #data-table-wrap { display: none; }
     #data-panel table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
     #data-panel th { color: #666; font-weight: 600; padding: 2px 4px; text-align: left; }
     #data-panel td { color: #aaa; font-family: monospace; padding: 2px 4px; border-top: 1px solid #2a2a2a; }
     #data-panel td.score-cell { cursor: pointer; color: #FF8C00; }
     #data-panel td.score-cell:hover { text-decoration: underline; }
+
+    /* AW-4: suggested score highlight */
+    #score-picker button.suggested { outline: 2px solid #4a9eff; outline-offset: 1px; }
 
     #main { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; background: #111; padding: 16px; }
     #svg-container { position: relative; }
@@ -230,7 +329,7 @@ function generateHtml(filenames: string[]): string {
       <button class="miss" id="score-skip">?</button>
     </div>
     <div id="legend">
-      Ctrl+click boundary: add vertex · Shift+click vertex/arrow: remove · A: add arrow
+      Ctrl+click boundary: add vertex · Alt+click ring: add point · Shift+click vertex/ring pt/arrow: remove · A: add arrow
     </div>
   </div>
   <div id="img-filter">
@@ -240,8 +339,11 @@ function generateHtml(filenames: string[]): string {
   </div>
   <div id="img-list"></div>
   <div id="data-panel">
-    <h3>Current annotation</h3>
-    <div id="data-table"></div>
+    <div id="data-panel-header">
+      <h3>Current annotation</h3>
+      <button id="btn-collapse-data" title="Toggle panel">▼</button>
+    </div>
+    <div id="data-table-wrap"><div id="data-table"></div></div>
   </div>
 </div>
 
@@ -280,9 +382,32 @@ function splineToPath(pts) {
   return sampled.map((p, i) => \`\${i===0?'M':'L'}\${p[0].toFixed(1)},\${p[1].toFixed(1)}\`).join(' ') + ' Z';
 }
 
+// ---- Geometry helpers (AW-4) ----
+function ptInPoly(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+
+function deduceScore(tipX, tipY, rings, boundary) {
+  for (let i = 0; i < rings.length; i++) {
+    if (!rings[i] || !rings[i].points || rings[i].points.length < 3) continue;
+    if (rings[i].points.some(p => p[0] == null)) continue;
+    const poly = sampleClosedSpline(rings[i].points, 64);
+    if (ptInPoly(tipX, tipY, poly)) return 10 - i;
+  }
+  if (boundary && boundary.length >= 3 && ptInPoly(tipX, tipY, boundary)) return 1;
+  return 0;
+}
+
 // ---- State ----
 let store = { annotations: {}, modified: [] };
 let staleImages = new Set(); // filenames with stale/missing detections
+let generationStatus = {}; // filename → 'ready'|'queued'|'computing'
 let currentIdx = 0;
 let drag = null;
 let addArrowMode = 'idle'; // 'idle' | 'place-tip' | 'place-nock' | 'score-input'
@@ -317,6 +442,11 @@ function getAnnotation(idx) {
   return ann;
 }
 
+function isAnnotationValid(ann) {
+  return ann.paperBoundary != null && ann.paperBoundary.length >= 3 &&
+         ann.rings.length > 0 && ann.arrows.length > 0;
+}
+
 function markModified(idx) {
   const filename = IMAGES[idx];
   if (!store.modified.includes(filename)) store.modified.push(filename);
@@ -346,11 +476,46 @@ function nearestBoundaryEdge(boundary, x, y) {
   return { edge: bestEdge, dist: bestDist, pt: bestPt };
 }
 
-// ---- Score picker ----
-function showScorePicker(label) {
+// ---- Ring segment insertion ----
+function nearestRingSegment(rings, x, y) {
+  let bestRi = -1, bestSeg = -1, bestDist = Infinity;
+  rings.forEach((ring, ri) => {
+    if (!ring.points || ring.points.length < 3) return;
+    const K = ring.points.length;
+    const sps = Math.ceil(120 / K);
+    const samples = sampleClosedSpline(ring.points, 120);
+    samples.forEach((s, k) => {
+      const nx = samples[(k + 1) % samples.length];
+      const dx = nx[0] - s[0], dy = nx[1] - s[1];
+      const len2 = dx * dx + dy * dy;
+      let dist;
+      if (len2 < 1) {
+        dist = Math.hypot(x - s[0], y - s[1]);
+      } else {
+        const t = Math.max(0, Math.min(1, ((x - s[0]) * dx + (y - s[1]) * dy) / len2));
+        dist = Math.hypot(x - (s[0] + t * dx), y - (s[1] + t * dy));
+      }
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestRi = ri;
+        bestSeg = Math.floor(k / sps) % K;
+      }
+    });
+  });
+  return { ri: bestRi, seg: bestSeg, dist: bestDist };
+}
+
+// ---- Score picker (AW-4: suggested score) ----
+function showScorePicker(label, suggested) {
   const picker = document.getElementById('score-picker');
   picker.style.display = 'flex';
   document.getElementById('score-prompt').textContent = label || 'Score:';
+  // Highlight suggested button
+  picker.querySelectorAll('button[data-score]').forEach(btn => {
+    const raw = btn.getAttribute('data-score');
+    const val = raw === 'X' ? 'X' : parseInt(raw, 10);
+    btn.classList.toggle('suggested', suggested !== undefined && val === suggested);
+  });
 }
 
 function hideScorePicker() {
@@ -614,6 +779,20 @@ function attachSvgListeners() {
       return;
     }
 
+    if (e.altKey) {
+      const ann = getAnnotation(currentIdx);
+      if (!ann.rings || ann.rings.length === 0) return;
+      const mpt = svgPt(svg, e);
+      const { ri, seg } = nearestRingSegment(ann.rings, mpt.x, mpt.y);
+      if (ri >= 0) {
+        ann.rings[ri].points.splice(seg + 1, 0, [mpt.x, mpt.y]);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      }
+      return;
+    }
+
     if (e.target.closest && e.target.closest('.handle')) return;
 
     if (addArrowMode === 'place-tip') {
@@ -626,7 +805,13 @@ function attachSvgListeners() {
       pendingNock = [mpt.x, mpt.y];
       addArrowMode = 'score-input';
       pickerContext = { type: 'new' };
-      showScorePicker('Score:');
+      // AW-4: deduce score from rings
+      const ann = getAnnotation(currentIdx);
+      const rings = ann.rings && ann.rings.length ? ann.rings
+        : (imageDataCache[IMAGES[currentIdx]]?.detected?.rings ?? []);
+      const boundary = ann.paperBoundary ?? imageDataCache[IMAGES[currentIdx]]?.detected?.paperBoundary ?? null;
+      const suggested = deduceScore(pendingTip[0], pendingTip[1], rings, boundary);
+      showScorePicker('Score:', suggested === 0 ? 0 : suggested || undefined);
       render();
     }
   });
@@ -645,6 +830,15 @@ function attachSvgListeners() {
         markModified(currentIdx);
         updateImageList();
         render();
+      } else if (handleType === 'ring_pt') {
+        const ri = parseInt(el.getAttribute('data-ri'), 10);
+        const pi = parseInt(el.getAttribute('data-pi'), 10);
+        if (ann.rings[ri] && ann.rings[ri].points.length > 3) {
+          ann.rings[ri].points.splice(pi, 1);
+          markModified(currentIdx);
+          updateImageList();
+          render();
+        }
       } else if (handleType === 'arrow_tip' || handleType === 'arrow_nock') {
         const ai = parseInt(el.getAttribute('data-ai'), 10);
         ann.arrows.splice(ai, 1);
@@ -728,16 +922,17 @@ function updateImageList() {
     if (imageFilter === 'unannotated' &&  annotated) return;
 
     const isModified = store.modified.includes(filename);
-    const isActive = i === currentIdx;
-    const isStale = staleImages.has(filename) && !imageDataCache[filename];
+    const isActive   = i === currentIdx;
+    const genState   = generationStatus[filename] || (staleImages.has(filename) ? 'queued' : 'ready');
     const btn = document.createElement('button');
-    btn.className = 'img-btn'
-      + (isActive ? ' active' : '')
-      + (isModified ? ' modified' : '')
-      + (isStale ? ' stale' : '');
-    const dot = isModified ? '<span class="dot"></span>' : '<span class="spacer"></span>';
-    btn.innerHTML = dot + '<span>' + filename + (isStale ? ' ·' : '') + '</span>';
-    btn.title = isStale ? 'Detections stale — will recompute on selection' : '';
+    btn.className = 'img-btn' + (isActive ? ' active' : '') + (isModified ? ' modified' : '');
+    // Modified dot (left)
+    const modDot = isModified ? '<span class="mod-dot"></span>' : '<span class="spacer"></span>';
+    // Generation status dot (right, AW-5)
+    const dotClass = annotated ? 'annotated' : genState;
+    const dotTitle = annotated ? 'has annotation' : genState === 'ready' ? 'detected' : genState === 'computing' ? 'computing…' : 'queued';
+    const genDot = \`<span class="gen-dot \${dotClass}" title="\${dotTitle}"></span>\`;
+    btn.innerHTML = modDot + '<span style="flex:1">' + filename + '</span>' + genDot;
     btn.addEventListener('click', () => selectImage(i));
     list.appendChild(btn);
   });
@@ -779,6 +974,11 @@ function updateDataPanel() {
   }
 
   document.getElementById('data-table').innerHTML = html;
+
+  const saveBtn = document.getElementById('btn-save');
+  const valid = isAnnotationValid(ann);
+  saveBtn.disabled = !valid;
+  saveBtn.title = valid ? '' : 'Cannot save: annotation needs a target border, rings, and at least one arrow';
 
   document.querySelectorAll('#data-table .score-cell').forEach(cell => {
     cell.addEventListener('click', () => {
@@ -941,25 +1141,70 @@ document.querySelectorAll('#score-picker button[data-score]').forEach(btn => {
 });
 document.getElementById('score-skip').addEventListener('click', () => onScoreSelect(null));
 
+// ---- Collapsible data panel (AW-3) ----
+(function() {
+  const panel = document.getElementById('data-panel');
+  const btn   = document.getElementById('btn-collapse-data');
+  function setCollapsed(v) {
+    panel.classList.toggle('collapsed', v);
+    btn.textContent = v ? '▶' : '▼';
+    try { localStorage.setItem('dataPanelCollapsed', v ? '1' : ''); } catch {}
+  }
+  const saved = (() => { try { return localStorage.getItem('dataPanelCollapsed'); } catch { return null; } })();
+  if (saved === '1') setCollapsed(true);
+  btn.addEventListener('click', () => setCollapsed(!panel.classList.contains('collapsed')));
+  document.getElementById('data-panel-header').addEventListener('click', (e) => {
+    if (e.target === btn) return; // handled above
+    setCollapsed(!panel.classList.contains('collapsed'));
+  });
+})();
+
+// ---- SSE subscription (AW-5) ----
+(function() {
+  const es = new EventSource('/api/events');
+  es.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'status' && msg.filename) {
+        generationStatus[msg.filename] = msg.state;
+        // Update image list dot without full re-render
+        const idx = IMAGES.indexOf(msg.filename);
+        if (idx >= 0) updateImageList();
+        // If user is looking at this image and it just became ready, reload it
+        if (msg.state === 'ready' && idx === currentIdx && !imageDataCache[msg.filename]) {
+          selectImage(idx);
+        }
+      }
+    } catch {}
+  };
+  es.onerror = () => {}; // silently reconnect
+})();
+
 // ---- Init ----
-fetch('/api/annotations')
+fetch('/api/generation-status')
   .then(r => r.json())
-  .then(data => {
-    for (const [filename, ann] of Object.entries(data)) {
-      store.annotations[filename] = {
-        paperBoundary: ann.paperBoundary || null,
-        rings: ann.rings || [],
-        arrows: ann.arrows || [],
-      };
-    }
-  })
+  .then(data => { generationStatus = data; })
   .catch(() => {})
   .finally(() => {
-    fetch('/api/stale-images')
+    fetch('/api/annotations')
       .then(r => r.json())
-      .then(({ stale }) => { staleImages = new Set(stale); })
+      .then(data => {
+        for (const [filename, ann] of Object.entries(data)) {
+          store.annotations[filename] = {
+            paperBoundary: ann.paperBoundary || null,
+            rings: ann.rings || [],
+            arrows: ann.arrows || [],
+          };
+        }
+      })
       .catch(() => {})
-      .finally(() => { updateImageList(); selectImage(0); });
+      .finally(() => {
+        fetch('/api/stale-images')
+          .then(r => r.json())
+          .then(({ stale }) => { staleImages = new Set(stale); })
+          .catch(() => {})
+          .finally(() => { updateImageList(); selectImage(0); });
+      });
   });
 </script>
 </body>
@@ -981,46 +1226,64 @@ async function main(): Promise<void> {
   const filenames = jpgFiles.map(f => path.basename(f));
   const currentHash = computeAlgorithmHash();
 
-  // --- DB setup ---
+  // --- DB setup (AW-1) ---
+  // annotations: human-authored data only
   await db.query(`
     CREATE TABLE IF NOT EXISTS annotations (
       filename       TEXT PRIMARY KEY,
       paper_boundary JSONB,
       rings          JSONB NOT NULL DEFAULT '[]',
+      arrows         JSONB NOT NULL DEFAULT '[]',
       updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
-  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS arrows          JSONB NOT NULL DEFAULT '[]'`);
-  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_rings    JSONB`);
-  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_boundary JSONB`);
-  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS detected_arrows   JSONB`);
-  await db.query(`ALTER TABLE annotations ADD COLUMN IF NOT EXISTS algorithm_hash    TEXT`);
-  // Wipe rows whose rings/detected_rings contain null coordinates (written by the old
-  // buggy ellipseToSplinePoints call that passed SplineRing fields as ellipse params,
-  // producing NaN → JSON null). Reset everything so they recompute cleanly.
-  const { rowCount: wiped } = await db.query(`
-    UPDATE annotations
-       SET rings = '[]', detected_rings = NULL, detected_boundary = NULL,
-           detected_arrows = NULL, algorithm_hash = NULL
-     WHERE (rings::text LIKE '%null%' AND rings <> 'null'::jsonb)
-        OR (detected_rings IS NOT NULL AND detected_rings::text LIKE '%null%')
+  // generated: algorithm output, keyed by source hash
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS generated (
+      filename       TEXT PRIMARY KEY,
+      algorithm_hash TEXT NOT NULL,
+      paper_boundary JSONB,
+      rings          JSONB NOT NULL DEFAULT '[]',
+      arrows         JSONB NOT NULL DEFAULT '[]',
+      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
   `);
-  if (wiped) console.log(`Wiped ${wiped} rows with corrupt ring data — will recompute on selection.`);
-  console.log('Table ready.');
+
+  // Wipe annotations rows with corrupt ring data (null coords from old buggy code)
+  const { rowCount: wiped } = await db.query(`
+    UPDATE annotations SET rings = '[]', paper_boundary = NULL
+     WHERE rings::text LIKE '%null%' AND rings <> 'null'::jsonb
+  `);
+  if (wiped) {
+    console.log(`Wiped ${wiped} annotation rows with corrupt ring data.`);
+    logEvent('warn', 'db_wipe', '', `${wiped} rows with null coordinates reset`);
+  }
+
+  console.log('Tables ready.');
   console.log(`Algorithm hash: ${currentHash}`);
 
-  const savedAnnotations = fs.existsSync(ANNOTATIONS_PATH)
-    ? JSON.parse(fs.readFileSync(ANNOTATIONS_PATH, 'utf8'))
-    : {};
+  const { rows: genRows } = await db.query('SELECT filename, algorithm_hash FROM generated');
+  const inGenerated = new Map<string, string>(genRows.map((r: any) => [r.filename, r.algorithm_hash as string]));
 
-  const { rows: existing } = await db.query(
-    'SELECT filename, algorithm_hash FROM annotations',
+  const { rows: annRows } = await db.query('SELECT filename FROM annotations');
+  const inAnnotations = new Set<string>(annRows.map((r: any) => r.filename as string));
+
+  const readyCount = [...inGenerated.values()].filter(h => h === currentHash).length;
+  const staleCount = filenames.length - readyCount;
+  console.log(`Images: ${filenames.length} total — ${readyCount} ready, ${staleCount} stale/new`);
+
+  // generation status map for SSE (AW-5)
+  type GenState = 'ready' | 'queued' | 'computing';
+  const generationStatus = new Map<string, GenState>(
+    filenames.map(f => [f, inGenerated.get(f) === currentHash ? 'ready' : 'queued']),
   );
-  const inDb = new Map<string, string | null>(existing.map((r: any) => [r.filename, r.algorithm_hash]));
-
-  const readyCount  = [...inDb.values()].filter(h => h === currentHash).length;
-  const staleCount  = filenames.length - readyCount;
-  console.log(`Images: ${filenames.length} total — ${readyCount} ready, ${staleCount} stale/new (computed on selection)`);
+  const sseClients = new Set<http.ServerResponse>();
+  function broadcastSSE(data: object) {
+    const msg = `data: ${JSON.stringify(data)}\n\n`;
+    for (const client of sseClients) {
+      try { client.write(msg); } catch { sseClients.delete(client); }
+    }
+  }
 
   // Server-side in-memory image cache
   const imageCache = new Map<string, CachedImageData>();
@@ -1038,14 +1301,29 @@ async function main(): Promise<void> {
       respond(200, html, 'text/html; charset=utf-8');
 
     } else if (req.method === 'GET' && req.url === '/api/stale-images') {
-      const stale = filenames.filter(f => inDb.get(f) !== currentHash);
+      const stale = filenames.filter(f => inGenerated.get(f) !== currentHash);
       respond(200, JSON.stringify({ stale }));
+
+    } else if (req.method === 'GET' && req.url === '/api/generation-status') {
+      const out: Record<string, string> = {};
+      for (const [f, s] of generationStatus) out[f] = s;
+      respond(200, JSON.stringify(out));
+
+    } else if (req.method === 'GET' && req.url === '/api/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+      sseClients.add(res);
+      req.on('close', () => sseClients.delete(res));
 
     } else if (req.method === 'GET' && req.url?.startsWith('/api/image-status/')) {
       const filename = decodeURIComponent(req.url.slice('/api/image-status/'.length));
       if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
-      if (!inDb.has(filename)) { respond(200, '{"state":"new"}'); return; }
-      if (inDb.get(filename) !== currentHash) { respond(200, '{"state":"stale"}'); return; }
+      if (!inGenerated.has(filename)) { respond(200, '{"state":"new"}'); return; }
+      if (inGenerated.get(filename) !== currentHash) { respond(200, '{"state":"stale"}'); return; }
       respond(200, '{"state":"ready"}');
 
     } else if (req.method === 'GET' && req.url?.startsWith('/api/image/')) {
@@ -1055,9 +1333,9 @@ async function main(): Promise<void> {
         const imgPath = path.join(IMAGES_DIR, filename);
         if (!fs.existsSync(imgPath)) { respond(404, '{"error":"not found"}'); return; }
 
-        const hashInDb = inDb.get(filename);
-        const isReady  = hashInDb === currentHash;
-        console.log(`image request: ${filename}  hashInDb=${hashInDb ?? 'null'}  currentHash=${currentHash}  isReady=${isReady}`);
+        const hashInGen = inGenerated.get(filename);
+        let isReady = hashInGen === currentHash;
+        console.log(`image request: ${filename}  hashInGen=${hashInGen ?? 'null'}  isReady=${isReady}`);
 
         let base64: string;
         let width: number;
@@ -1067,53 +1345,71 @@ async function main(): Promise<void> {
         let detectedArrows: { tip: [number, number]; nock: [number, number] | null }[];
 
         if (isReady) {
-          // Fast path: load base64 only, serve stored detections from DB
-          console.log(`  fast path: loading base64 for ${filename}…`);
+          // Fast path (AW-1): read from generated table
+          console.log(`  fast path: loading ${filename}…`);
           ({ base64, width, height } = await loadImageBase64(imgPath));
-          console.log(`  fast path: querying DB detections for ${filename}…`);
           const { rows } = await db.query(
-            'SELECT detected_rings, detected_boundary, detected_arrows FROM annotations WHERE filename = $1',
+            'SELECT rings, paper_boundary, arrows FROM generated WHERE filename = $1',
             [filename],
           );
-          detectedRings    = rows[0]?.detected_rings    ?? [];
-          detectedBoundary = rows[0]?.detected_boundary ?? null;
-          detectedArrows   = rows[0]?.detected_arrows   ?? [];
-        } else {
+          detectedRings    = rows[0]?.rings          ?? [];
+          detectedBoundary = rows[0]?.paper_boundary ?? null;
+          detectedArrows   = rows[0]?.arrows         ?? [];
+
+          // AW-2: validity check — fall back to slow path if data is corrupt
+          if (!isValidDetected(detectedRings, detectedBoundary)) {
+            logEvent('warn', 'invalid_generated', filename, 'null coordinates in stored data — recomputing');
+            logEvent('info', 'fallback_slow_path', filename, 'invalid cache');
+            await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
+            inGenerated.delete(filename);
+            generationStatus.set(filename, 'queued');
+            isReady = false;
+          }
+        }
+
+        if (!isReady) {
           // Slow path: run detection synchronously (blocks event loop ~45s per image)
+          generationStatus.set(filename, 'computing');
+          broadcastSSE({ type: 'status', filename, state: 'computing' });
           const entry = await processImage(imgPath);
-          console.log(`  ${filename} ... ${entry.result.success ? 'ok' : `FAILED: ${(entry.result as any).error}`}`);
+          const ok = entry.result.success;
+          console.log(`  ${filename} ... ${ok ? 'ok' : `FAILED: ${(entry.result as any).error}`}`);
+          if (!ok) logEvent('error', 'detection_failed', filename, (entry.result as any).error ?? '');
           base64 = entry.base64;
           width = entry.width;
           height = entry.height;
-          detectedRings = entry.result.success ? entry.result.rings : [];
-          detectedBoundary = entry.result.success && entry.result.paperBoundary
-            ? entry.result.paperBoundary.points : null;
-          detectedArrows = entry.detectedArrows;
+          detectedRings    = ok ? entry.result.rings : [];
+          detectedBoundary = ok && entry.result.paperBoundary ? entry.result.paperBoundary.points : null;
+          detectedArrows   = entry.detectedArrows;
 
-          // Seed/update annotation + store detections
-          const fromFile = savedAnnotations[filename];
-          const paperBoundary = fromFile?.paperBoundary ?? detectedBoundary;
-          const rings = fromFile?.rings ?? detectedRings;
+          // Write to generated table
+          await db.query(
+            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (filename) DO UPDATE
+               SET algorithm_hash = EXCLUDED.algorithm_hash,
+                   paper_boundary = EXCLUDED.paper_boundary,
+                   rings          = EXCLUDED.rings,
+                   arrows         = EXCLUDED.arrows,
+                   updated_at     = NOW()`,
+            [filename, currentHash,
+             JSON.stringify(detectedBoundary), JSON.stringify(detectedRings),
+             JSON.stringify(detectedArrows)],
+          );
+          inGenerated.set(filename, currentHash);
+          generationStatus.set(filename, 'ready');
+          broadcastSSE({ type: 'status', filename, state: 'ready' });
 
-          if (!inDb.has(filename)) {
+          // Seed annotations if this image has no human annotation yet
+          if (!inAnnotations.has(filename)) {
             await db.query(
-              `INSERT INTO annotations (filename, paper_boundary, rings, arrows, detected_rings, detected_boundary, detected_arrows, algorithm_hash)
-               VALUES ($1, $2, $3, '[]', $4, $5, $6, $7)
+              `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+               VALUES ($1, $2, $3, '[]')
                ON CONFLICT (filename) DO NOTHING`,
-              [filename, JSON.stringify(paperBoundary), JSON.stringify(rings),
-               JSON.stringify(detectedRings), JSON.stringify(detectedBoundary),
-               JSON.stringify(detectedArrows), currentHash],
+              [filename, JSON.stringify(detectedBoundary), JSON.stringify(detectedRings)],
             );
-          } else {
-            await db.query(
-              `UPDATE annotations
-               SET detected_rings = $2, detected_boundary = $3, detected_arrows = $4, algorithm_hash = $5
-               WHERE filename = $1`,
-              [filename, JSON.stringify(detectedRings), JSON.stringify(detectedBoundary),
-               JSON.stringify(detectedArrows), currentHash],
-            );
+            inAnnotations.add(filename);
           }
-          inDb.set(filename, currentHash);
         }
 
         imageCache.set(filename, {
@@ -1134,7 +1430,18 @@ async function main(): Promise<void> {
       const { rows } = await db.query('SELECT filename, paper_boundary, rings, arrows FROM annotations');
       const out: Record<string, unknown> = {};
       for (const row of rows) {
-        out[row.filename] = { paperBoundary: row.paper_boundary, rings: row.rings, arrows: row.arrows };
+        const ann = {
+          paperBoundary: row.paper_boundary,
+          rings: row.rings ?? [],
+          arrows: row.arrows ?? [],
+        };
+        if (!isValidAnnotation(ann)) {
+          await db.query('DELETE FROM annotations WHERE filename = $1', [row.filename]);
+          inAnnotations.delete(row.filename);
+          logEvent('warn', 'invalid_annotation_deleted', row.filename, 'deleted on load: incomplete annotation');
+          continue;
+        }
+        out[row.filename] = ann;
       }
       respond(200, JSON.stringify(out));
 
@@ -1145,6 +1452,12 @@ async function main(): Promise<void> {
         try {
           const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           for (const [filename, ann] of Object.entries(data) as [string, any][]) {
+            const normalized = {
+              paperBoundary: ann.paperBoundary ?? null,
+              rings: ann.rings ?? [],
+              arrows: ann.arrows ?? [],
+            };
+            if (!isValidAnnotation(normalized)) continue;
             await db.query(
               `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
                VALUES ($1, $2, $3, $4)
@@ -1155,9 +1468,9 @@ async function main(): Promise<void> {
                      updated_at     = NOW()`,
               [
                 filename,
-                JSON.stringify(ann.paperBoundary ?? null),
-                JSON.stringify(ann.rings ?? []),
-                JSON.stringify(ann.arrows ?? []),
+                JSON.stringify(normalized.paperBoundary),
+                JSON.stringify(normalized.rings),
+                JSON.stringify(normalized.arrows),
               ],
             );
           }
@@ -1178,6 +1491,61 @@ async function main(): Promise<void> {
     console.log(`Annotation tool: http://localhost:${PORT}`);
     console.log('Press Ctrl+C to stop.');
     if (!process.env.NO_BROWSER) require('child_process').exec(`open http://localhost:${PORT}`);
+
+    // AW-5: start background detection queue after server is up
+    const toProcess = filenames.filter(f => inGenerated.get(f) !== currentHash);
+    if (toProcess.length === 0) return;
+    console.log(`Background queue: ${toProcess.length} image(s) to process…`);
+
+    (async () => {
+      for (const filename of toProcess) {
+        if (inGenerated.get(filename) === currentHash) continue; // already computed on-demand
+        const imgPath = path.join(IMAGES_DIR, filename);
+        generationStatus.set(filename, 'computing');
+        broadcastSSE({ type: 'status', filename, state: 'computing' });
+        try {
+          const result = await runWorkerProcess(imgPath);
+          if (!result.success) {
+            logEvent('error', 'detection_failed', filename, result.error ?? '');
+          }
+          const { rings, paperBoundary, arrows } = result;
+          await db.query(
+            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (filename) DO UPDATE
+               SET algorithm_hash = EXCLUDED.algorithm_hash,
+                   paper_boundary = EXCLUDED.paper_boundary,
+                   rings          = EXCLUDED.rings,
+                   arrows         = EXCLUDED.arrows,
+                   updated_at     = NOW()`,
+            [filename, currentHash,
+             JSON.stringify(paperBoundary), JSON.stringify(rings), JSON.stringify(arrows)],
+          );
+          inGenerated.set(filename, currentHash);
+          generationStatus.set(filename, 'ready');
+          broadcastSSE({ type: 'status', filename, state: 'ready' });
+
+          // Seed annotations if not yet present
+          if (!inAnnotations.has(filename)) {
+            await db.query(
+              `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+               VALUES ($1, $2, $3, '[]')
+               ON CONFLICT (filename) DO NOTHING`,
+              [filename, JSON.stringify(paperBoundary), JSON.stringify(rings)],
+            );
+            inAnnotations.add(filename);
+          }
+          console.log(`  [bg] ${filename} … ok`);
+        } catch (err) {
+          const msg = String(err);
+          console.error(`  [bg] ${filename} … FAILED: ${msg}`);
+          logEvent('error', 'detection_failed', filename, msg);
+          generationStatus.set(filename, 'queued');
+          broadcastSSE({ type: 'status', filename, state: 'queued' });
+        }
+      }
+      console.log('Background queue complete.');
+    })().catch(err => console.error('Background queue error:', err));
   });
 }
 

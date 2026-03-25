@@ -21,12 +21,16 @@ Browser (HTML/JS)
   ↕ fetch /api/*
 Node.js HTTP server  (scripts/annotate.ts)
   ↕ pg Pool
-PostgreSQL  (annotations table)
+PostgreSQL  (annotations + generated tables)
   ↕ npm run seed-from-parquet / dump-annotations
 data/annotations.parquet  (portable snapshot)
 ```
 
-### Database table — `annotations`
+### Database tables
+
+**Target schema** (see AW-1 in `annotation_works.md` for migration plan):
+
+#### `annotations` — human-authored data only
 
 | Column | Type | Description |
 |---|---|---|
@@ -35,16 +39,29 @@ data/annotations.parquet  (portable snapshot)
 | `rings` | JSONB | Human-annotated spline rings `SplineRing[]` |
 | `arrows` | JSONB | Human-annotated arrows `ArrowAnnotation[]` |
 | `updated_at` | TIMESTAMPTZ | Last save timestamp |
-| `detected_rings` | JSONB | Algorithm-detected rings (cached) |
-| `detected_boundary` | JSONB | Algorithm-detected boundary (cached) |
-| `detected_arrows` | JSONB | Algorithm-detected arrows (cached) |
-| `algorithm_hash` | TEXT | SHA-256 (16 chars) of source files at detection time |
+
+#### `generated` — algorithm-detected data, keyed by source hash
+
+| Column | Type | Description |
+| `filename` | TEXT PK | JPEG filename |
+| `algorithm_hash` | TEXT | SHA-256 (16 chars) of detection source files |
+| `paper_boundary` | JSONB | Detected boundary polygon or null |
+| `rings` | JSONB | Detected spline rings `SplineRing[]` |
+| `arrows` | JSONB | Detected arrows `ArrowDetection[]` |
+| `updated_at` | TIMESTAMPTZ | When detection ran |
+
+Keeping the two tables separate means a save can never accidentally overwrite cached
+detections, and a recompute can never overwrite a human annotation.
+
+**Current schema** (pre-migration): all columns live in a single `annotations` table,
+with `detected_rings`, `detected_boundary`, `detected_arrows`, and `algorithm_hash`
+columns alongside the human annotation columns.
 
 ### Algorithm hash and cache invalidation
 
 At startup the server hashes `src/targetDetection.ts` and `src/arrowDetection.ts`.
-Any DB row whose stored `algorithm_hash` differs from the current hash is treated as **stale**:
-its `detected_*` columns are out of date and will be recomputed the next time the image is selected.
+Any row in `generated` whose stored `algorithm_hash` differs from the current hash is
+treated as **stale** and will be recomputed the next time the image is selected.
 
 ---
 
@@ -67,8 +84,8 @@ its `detected_*` columns are out of date and will be recomputed the next time th
   width:  number;          // pixel width of the scaled image
   height: number;          // pixel height of the scaled image
   detected: {
-    rings:         SplineRing[];                                 // algorithm output
-    paperBoundary: [number, number][] | null;                   // algorithm output
+    rings:         SplineRing[];
+    paperBoundary: [number, number][] | null;
     arrows:        { tip: [number, number]; nock: [number, number] | null }[];
   };
 }
@@ -78,14 +95,19 @@ its `detected_*` columns are out of date and will be recomputed the next time th
 
 When a user selects an image:
 
-1. **Fast path** (`algorithm_hash` matches): the server loads the base64 via Jimp and reads
-   `detected_*` from the DB. No algorithm runs. Typical response time: ~1–2 s.
+1. **Fast path** (`algorithm_hash` matches and stored data is valid): the server loads the
+   base64 via Jimp and reads detected values from the DB. No algorithm runs.
+   Typical response time: ~1–2 s.
+   If the stored data contains invalid values (null coordinates, corrupt JSON), the server
+   falls back to the slow path and recomputes. Invalid data events are written to a log file
+   (see AW-6 in `annotation_works.md`).
 
-2. **Slow path** (stale or new): the server runs the full detection pipeline synchronously
-   (`findTarget` → `findArrows`), stores results in the DB, and responds.
+2. **Slow path** (stale, new, or invalid cache): the server runs the full detection pipeline
+   synchronously (`findTarget` → `findArrows`), stores results in the DB, and responds.
    Typical response time: ~30–60 s (blocks the event loop — single-user tool).
+   The browser shows a `Computing rings… Xs` animated counter while waiting.
 
-The browser shows a `Computing rings… Xs` counter while waiting on the slow path.
+See AW-5 in `annotation_works.md` for the planned non-blocking background generation.
 
 ---
 
@@ -99,9 +121,11 @@ The browser shows a `Computing rings… Xs` counter while waiting on the slow pa
 │  ─ checkboxes   │                                     │
 │  ─ score picker │                                     │
 │  ─ image list   │                                     │
-│  ─ data panel   │                                     │
+│  ─ data panel ▼ │                                     │  ← collapsible (AW-3)
 └─────────────────┴─────────────────────────────────────┘
 ```
+
+The data panel is collapsible so the image list remains fully visible on short screens (see AW-3).
 
 ---
 
@@ -141,6 +165,8 @@ Ring index 0 = innermost (bullseye, gold), index 9 = outermost (white).
 Colour mapping: 0–1 gold, 2–3 red, 4–5 blue, 6–7 grey, 8–9 white.
 
 **Drag a control point** to reshape the ring.
+**Alt + click** anywhere on the canvas to insert a new control point on the nearest ring segment.
+**Shift + click** a control point to remove it (minimum 3 points enforced).
 Control-point handles are small filled circles; index 0 is labelled with the ring number.
 
 Enable/disable the ring overlay with the **Rings** checkbox.
@@ -183,6 +209,9 @@ interface ArrowAnnotation {
    - Or type: `x`/`X` → X, `m`/`M` → miss, `1`–`9` → that score.
    - **Escape** commits the arrow with `score: null`.
 5. The arrow is added to `ann.arrows`, mode returns to `idle`.
+
+When detected rings are available, the score picker pre-selects the ring the tip falls in
+(see AW-4 for implementation plan).
 
 Press **Escape** during `place-tip` or `place-nock` to cancel the whole arrow.
 Press **A** again during `place-tip` to cancel and return to idle.
@@ -247,6 +276,8 @@ The bottom of the sidebar shows a summary of the current annotation:
 - Per-ring: index, control-point count, centroid (cx, cy).
 - Per-arrow: index, tip coords, nock coords, score (clickable to re-score).
 
+The panel is collapsible via a toggle button at its header (see AW-3).
+
 ---
 
 ## Keyboard shortcuts
@@ -268,10 +299,4 @@ The DB is the live store. The parquet file (`data/annotations.parquet`) is a por
 
 - **`npm run dump-annotations`** — exports all rows (filename, paper_boundary, rings, arrows) to parquet.
 - **`npm run seed-from-parquet`** — upserts parquet rows into the DB, restoring
-  `paper_boundary`, `rings`, and `arrows` without touching `detected_*` or `algorithm_hash`.
-
----
-
-## Planned improvements
-
-<!-- Add future work here -->
+  `paper_boundary`, `rings`, and `arrows` without touching detection data.

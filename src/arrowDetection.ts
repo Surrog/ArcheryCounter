@@ -284,66 +284,6 @@ function houghSegments(
 }
 
 // ---------------------------------------------------------------------------
-// P9-T2a: Centerline merge — collapse LSD edge-pairs into shaft midlines
-// ---------------------------------------------------------------------------
-
-function mergeCenterlines(segs: Seg[], angleTolDeg: number, perpTolPx: number): Seg[] {
-  const angleTol = angleTolDeg * Math.PI / 180;
-  const used = new Uint8Array(segs.length);
-  const out: Seg[] = [];
-
-  for (let i = 0; i < segs.length; i++) {
-    if (used[i]) continue;
-    const a = segs[i];
-    const angA = segAngle(a);
-    const dirX = Math.cos(angA), dirY = Math.sin(angA);
-    // Reference midpoint
-    const mAx = (a[0][0] + a[1][0]) / 2;
-    const mAy = (a[0][1] + a[1][1]) / 2;
-
-    let sumMidPerpOff = 0; // perpendicular offset of B midpoints from A's line, for averaging
-    let partnerCount = 0;
-    const allEndpts: Pt[] = [a[0], a[1]];
-
-    for (let j = i + 1; j < segs.length; j++) {
-      if (used[j]) continue;
-      const b = segs[j];
-      if (angleDiff(angA, segAngle(b)) > angleTol) continue;
-      const mBx = (b[0][0] + b[1][0]) / 2;
-      const mBy = (b[0][1] + b[1][1]) / 2;
-      if (perpDist(mBx, mBy, mAx, mAy, mAx + dirX, mAy + dirY) > perpTolPx) continue;
-      // Also require endpoint proximity
-      const epd = Math.min(
-        perpDist(b[0][0], b[0][1], a[0][0], a[0][1], a[1][0], a[1][1]),
-        perpDist(b[1][0], b[1][1], a[0][0], a[0][1], a[1][0], a[1][1]),
-      );
-      if (epd > perpTolPx) continue;
-      used[j] = 1;
-      // Perpendicular offset of B midpoint relative to A midpoint (normal direction)
-      const normX = -dirY, normY = dirX;
-      sumMidPerpOff += (mBx - mAx) * normX + (mBy - mAy) * normY;
-      partnerCount++;
-      allEndpts.push(b[0], b[1]);
-    }
-
-    // Merged midline: average perpendicular offset, union extent along direction
-    const perpOff = partnerCount > 0 ? sumMidPerpOff / (partnerCount + 1) : 0;
-    const normX = -dirY, normY = dirX;
-    const baseMx = mAx + perpOff * normX;
-    const baseMy = mAy + perpOff * normY;
-    const projs = allEndpts.map(p => (p[0] - baseMx) * dirX + (p[1] - baseMy) * dirY);
-    const tMin = Math.min(...projs), tMax = Math.max(...projs);
-
-    used[i] = 1;
-    out.push([
-      [Math.round(baseMx + tMin * dirX), Math.round(baseMy + tMin * dirY)],
-      [Math.round(baseMx + tMax * dirX), Math.round(baseMy + tMax * dirY)],
-    ]);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
 // P9-T2b: Collinear merge — reassemble shaft halves split at crossings
 // ---------------------------------------------------------------------------
 

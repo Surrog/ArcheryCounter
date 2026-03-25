@@ -245,7 +245,7 @@ const GAUSS_KERNEL = gaussianKernel(15, 1.5);
 
 function pretreat(rgba: Uint8Array, width: number, height: number): Uint8Array {
   const n = width * height;
-  let r = new Uint8Array(n), g = new Uint8Array(n), b = new Uint8Array(n);
+  let r: Uint8Array = new Uint8Array(n), g: Uint8Array = new Uint8Array(n), b: Uint8Array = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     r[i] = rgba[i * 4]; g[i] = rgba[i * 4 + 1]; b[i] = rgba[i * 4 + 2];
   }
@@ -256,7 +256,7 @@ function pretreat(rgba: Uint8Array, width: number, height: number): Uint8Array {
     return c;
   }
   r = process(r); g = process(g); b = process(b);
-  const out = new Uint8Array(rgba);
+  const out = rgba.slice();
   for (let i = 0; i < n; i++) {
     out[i * 4] = r[i]; out[i * 4 + 1] = g[i]; out[i * 4 + 2] = b[i];
   }
@@ -431,7 +431,7 @@ function detectColorBlob(
   pretreated: Uint8Array, rgba: Uint8Array,
   width: number, height: number,
   color: 'yellow' | 'red' | 'blue',
-  hsvCache: Float32Array,
+  hsvCache: Float64Array,
 ): ColorBlob | null {
   const minPx = width * height * 0.001;
 
@@ -1083,52 +1083,6 @@ function collectRingPoints(
   }
 
   return transitionPoints;
-}
-
-// ---------------------------------------------------------------------------
-// Quadrilateral fitting — rectangular paper boundary
-// ---------------------------------------------------------------------------
-
-
-/**
- * Fits a perspective-projected rectangle to a set of boundary points.
- *
- * Uses four fixed axis-aligned diagonal projections (x+y, x−y) to locate the
- * four corners.  For any convex quadrilateral — including a perspective-
- * projected rectangle at any orientation — the four corners are exactly the
- * points that are most extreme in these four directions:
- *
- *   TL → min(x + y)   (upper-left  in image coords, y-down)
- *   TR → max(x − y)   (upper-right)
- *   BR → max(x + y)   (lower-right)
- *   BL → min(x − y)   (lower-left)
- *
- * No PCA rotation is needed: rotating the coordinate frame by the PCA angle
- * would work for a perfectly uniform point distribution but is biased when
- * boundary points are denser on some sides (e.g. when the image crops the
- * top of the target), causing the PCA angle to deviate and picking the wrong
- * corners.  The unrotated diagonal projections are parameter-free and robust.
- *
- * Returns [topLeft, topRight, bottomRight, bottomLeft] in image coordinates,
- * or null if there are fewer than 4 points.
- */
-function fitQuadrilateral(pts: Pixel[]): [Pixel, Pixel, Pixel, Pixel] | null {
-  if (pts.length < 4) return null;
-
-  let tlS =  Infinity, trS = -Infinity;
-  let brS = -Infinity, blS =  Infinity;
-  let tl = pts[0], tr = pts[0], br = pts[0], bl = pts[0];
-
-  for (const p of pts) {
-    const pp = p.x + p.y;   // sum  → selects TL (min) and BR (max)
-    const pm = p.x - p.y;   // diff → selects TR (max) and BL (min)
-    if (pp < tlS) { tlS = pp; tl = p; }
-    if (pm > trS) { trS = pm; tr = p; }
-    if (pp > brS) { brS = pp; br = p; }
-    if (pm < blS) { blS = pm; bl = p; }
-  }
-
-  return [tl, tr, br, bl];
 }
 
 /**

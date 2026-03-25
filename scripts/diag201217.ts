@@ -1,6 +1,19 @@
 import * as path from 'path';
 import { loadImageNode } from '../src/imageLoader';
 import { findTarget } from '../src/targetDetection';
+import { SplineRing } from '../src/spline';
+
+function ringCenter(ring: SplineRing): [number, number] {
+  const n = ring.points.length;
+  return [
+    ring.points.reduce((s, p) => s + p[0], 0) / n,
+    ring.points.reduce((s, p) => s + p[1], 0) / n,
+  ];
+}
+
+function ringRadius(ring: SplineRing, cx: number, cy: number): number {
+  return Math.max(...ring.points.map(p => Math.hypot(p[0] - cx, p[1] - cy)));
+}
 
 function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
   const rn=r/255,gn=g/255,bn=b/255;
@@ -32,20 +45,28 @@ async function main() {
 
   console.log('Image: ' + width + 'x' + height);
   console.log('Rings:');
-  for(let i=0;i<result.rings.length;i++){
-    const r=result.rings[i];
-    const ratio = i>0 ? (r.width/result.rings[i-1].width).toFixed(3) : '-   ';
-    console.log('  ring['+i+']: w='+r.width.toFixed(1)+' h='+r.height.toFixed(1)+' cx='+r.centerX.toFixed(0)+' cy='+r.centerY.toFixed(0)+' ratio='+ratio);
+  for (let i = 0; i < result.rings.length; i++) {
+    const ring = result.rings[i];
+    const [cx, cy] = ringCenter(ring);
+    const r = ringRadius(ring, cx, cy);
+    const prevRing = i > 0 ? result.rings[i - 1] : null;
+    const ratio = prevRing ? (r / ringRadius(prevRing, cx, cy)).toFixed(3) : '-   ';
+    console.log('  ring['+i+']: radius='+r.toFixed(1)+' cx='+cx.toFixed(0)+' cy='+cy.toFixed(0)+' ratio='+ratio);
   }
 
-  const cx=result.rings[0].centerX, cy=result.rings[0].centerY;
+  const [cx, cy] = ringCenter(result.rings[0]);
   console.log('\nRadial scan right (dx=1, dy=0) from cx='+cx.toFixed(0)+' cy='+cy.toFixed(0)+':');
-  for(let d=5; d<=310; d+=5) {
-    const x=Math.round(cx+d), y=Math.round(cy);
-    if(x>=width||y>=height||x<0||y<0) { console.log('  d='+d+': OUT'); break; }
-    const i=(y*width+x)*4;
-    const col=colorLabel(rgba[i],rgba[i+1],rgba[i+2]);
-    const ringIdx = result.rings.findIndex((r,ri)=>r.width/2>=d && (ri===0||result.rings[ri-1].width/2<d));
+  for (let d = 5; d <= 310; d += 5) {
+    const x = Math.round(cx + d), y = Math.round(cy);
+    if (x >= width || y >= height || x < 0 || y < 0) { console.log('  d='+d+': OUT'); break; }
+    const i = (y * width + x) * 4;
+    const col = colorLabel(rgba[i], rgba[i+1], rgba[i+2]);
+    const ringIdx = result.rings.findIndex((ring, ri) => {
+      const [rcx, rcy] = ringCenter(ring);
+      const rr = ringRadius(ring, rcx, rcy);
+      const prevRr = ri > 0 ? ringRadius(result.rings[ri - 1], rcx, rcy) : 0;
+      return rr >= d && prevRr < d;
+    });
     console.log('  d='+String(d).padStart(3)+': '+col+' ring='+ringIdx+' rgb=('+rgba[i]+','+rgba[i+1]+','+rgba[i+2]+')');
   }
 }

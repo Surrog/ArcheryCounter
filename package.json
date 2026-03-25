@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
+    "test:coverage": "jest --coverage",
     "visualize": "ts-node --transpile-only --project tsconfig.scripts.json scripts/visualize.ts",
     "annotate": "ts-node --transpile-only --project tsconfig.scripts.json scripts/annotate.ts",
     "dump-annotations": "node --no-warnings --import ts-node/esm scripts/dump-annotations.ts",
