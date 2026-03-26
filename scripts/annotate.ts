@@ -629,6 +629,16 @@ async function selectImage(idx) {
     imageDataCache[filename] = await res.json();
     console.log('[selectImage] done, detected rings:', imageDataCache[filename]?.detected?.rings?.length, 'arrows:', imageDataCache[filename]?.detected?.arrows?.length);
     staleImages.delete(filename);
+    // Reload annotation from DB if it was cleared (e.g. after recompute reset)
+    if (!store.annotations[filename]) {
+      try {
+        const annRes = await fetch('/api/annotation/' + encodeURIComponent(filename));
+        if (annRes.ok) {
+          const ann = await annRes.json();
+          if (ann) store.annotations[filename] = ann;
+        }
+      } catch (e) { console.warn('[selectImage] annotation reload failed:', e); }
+    }
   } catch (e) {
     console.error('[selectImage] failed:', filename, e);
     loadError = String(e);
@@ -1057,14 +1067,19 @@ async function save() {
 // ---- Reset ----
 function resetCurrent() {
   const filename = IMAGES[currentIdx];
-  store.annotations[filename] = { ...getDetected(currentIdx), arrows: [] };
+  // Clear local state
+  delete imageDataCache[filename];
+  delete store.annotations[filename];
   store.modified = store.modified.filter(f => f !== filename);
   addArrowMode = 'idle';
   pendingTip = null;
   pendingNock = null;
   hideScorePicker();
   document.getElementById('btn-add-arrow').classList.remove('active-mode');
-  updateImageList(); render();
+  updateImageList();
+  renderLoading('Recomputing\u2026');
+  // Ask server to re-run detection; SSE ready event will trigger selectImage reload
+  fetch('/api/recompute/' + encodeURIComponent(filename), { method: 'POST' }).catch(() => {});
 }
 
 function resetAll() {
@@ -1488,6 +1503,71 @@ async function main(): Promise<void> {
         out[row.filename] = ann;
       }
       respond(200, JSON.stringify(out));
+
+    } else if (req.method === 'GET' && req.url?.startsWith('/api/annotation/')) {
+      const filename = decodeURIComponent(req.url.slice('/api/annotation/'.length));
+      if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
+      const { rows } = await db.query(
+        'SELECT paper_boundary, rings, arrows FROM annotations WHERE filename = $1',
+        [filename],
+      );
+      if (rows.length === 0) { respond(404, '{"error":"not found"}'); return; }
+      respond(200, JSON.stringify({
+        paperBoundary: rows[0].paper_boundary,
+        rings: rows[0].rings ?? [],
+        arrows: rows[0].arrows ?? [],
+      }));
+
+    } else if (req.method === 'POST' && req.url?.startsWith('/api/recompute/')) {
+      const filename = decodeURIComponent(req.url.slice('/api/recompute/'.length));
+      if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
+      // Clear caches so the next /api/image/ fetch re-runs detection
+      imageCache.delete(filename);
+      inGenerated.delete(filename);
+      inAnnotations.delete(filename);
+      await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
+      await db.query('DELETE FROM annotations WHERE filename = $1', [filename]);
+      generationStatus.set(filename, 'computing');
+      broadcastSSE({ type: 'status', filename, state: 'computing' });
+      respond(202, '{"status":"computing"}');
+      // Run detection in background
+      (async () => {
+        try {
+          const imgPath = path.join(IMAGES_DIR, filename);
+          const entry = await processImage(imgPath);
+          const ok = entry.result.success;
+          if (!ok) logEvent('error', 'detection_failed', filename, (entry.result as any).error ?? '');
+          const detectedRings    = ok ? entry.result.rings : [];
+          const detectedBoundary = ok && entry.result.paperBoundary ? entry.result.paperBoundary.points : null;
+          const detectedArrows   = entry.detectedArrows;
+          await db.query(
+            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (filename) DO UPDATE
+               SET algorithm_hash = EXCLUDED.algorithm_hash,
+                   paper_boundary = EXCLUDED.paper_boundary,
+                   rings          = EXCLUDED.rings,
+                   arrows         = EXCLUDED.arrows,
+                   updated_at     = NOW()`,
+            [filename, currentHash,
+             JSON.stringify(detectedBoundary), JSON.stringify(detectedRings),
+             JSON.stringify(detectedArrows)],
+          );
+          await db.query(
+            `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+             VALUES ($1, $2, $3, '[]')`,
+            [filename, JSON.stringify(detectedBoundary), JSON.stringify(detectedRings)],
+          );
+          inGenerated.set(filename, currentHash);
+          inAnnotations.add(filename);
+          generationStatus.set(filename, 'ready');
+          broadcastSSE({ type: 'status', filename, state: 'ready' });
+        } catch (err) {
+          console.error('Recompute error:', err);
+          generationStatus.set(filename, 'queued');
+          broadcastSSE({ type: 'status', filename, state: 'queued' });
+        }
+      })();
 
     } else if (req.method === 'POST' && req.url === '/api/save') {
       const chunks: Buffer[] = [];

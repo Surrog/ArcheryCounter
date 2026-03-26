@@ -35,6 +35,69 @@ interface ImageAnnotation {
   arrows: ArrowAnnotation[];
 }
 
+/** Signed area of a polygon (positive = CCW). */
+function signedArea(poly: [number, number][]): number {
+  let area = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, y1] = poly[i];
+    const [x2, y2] = poly[(i + 1) % poly.length];
+    area += x1 * y2 - x2 * y1;
+  }
+  return area / 2;
+}
+
+/**
+ * Sutherland-Hodgman polygon clipping (clip must be convex, both CCW).
+ * Returns the intersection polygon.
+ */
+function clipPolygon(
+  subject: [number, number][],
+  clip: [number, number][],
+): [number, number][] {
+  let output = subject.slice();
+  for (let i = 0; i < clip.length && output.length > 0; i++) {
+    const input = output;
+    output = [];
+    const [ax, ay] = clip[i];
+    const [bx, by] = clip[(i + 1) % clip.length];
+    const inside = (px: number, py: number) =>
+      (bx - ax) * (py - ay) - (by - ay) * (px - ax) >= 0;
+    const intersect = ([p1x, p1y]: [number, number], [p2x, p2y]: [number, number]): [number, number] => {
+      const dx1 = p2x - p1x, dy1 = p2y - p1y;
+      const dx2 = bx - ax,   dy2 = by - ay;
+      const t = ((ax - p1x) * dy2 - (ay - p1y) * dx2) / (dx1 * dy2 - dy1 * dx2);
+      return [p1x + t * dx1, p1y + t * dy1];
+    };
+    for (let j = 0; j < input.length; j++) {
+      const curr = input[j];
+      const prev = input[(j + input.length - 1) % input.length];
+      const currIn = inside(curr[0], curr[1]);
+      const prevIn = inside(prev[0], prev[1]);
+      if (currIn) {
+        if (!prevIn) output.push(intersect(prev, curr));
+        output.push(curr);
+      } else if (prevIn) {
+        output.push(intersect(prev, curr));
+      }
+    }
+  }
+  return output;
+}
+
+/** IoU of two polygons (works for convex-ish paper boundaries). */
+function polyIoU(a: [number, number][], b: [number, number][]): number {
+  // Normalise both to CCW winding
+  const aCCW = signedArea(a) < 0 ? [...a].reverse() : a;
+  const bCCW = signedArea(b) < 0 ? [...b].reverse() : b;
+  const inter = clipPolygon(aCCW, bCCW);
+  if (inter.length < 3) return 0;
+  const interArea = Math.abs(signedArea(inter));
+  const aArea = Math.abs(signedArea(aCCW));
+  const bArea = Math.abs(signedArea(bCCW));
+  const union = aArea + bArea - interArea;
+  return union <= 0 ? 0 : interArea / union;
+}
+
 /** Minimum distance from pt to any sampled point on the given ring spline. */
 function pointToSplineDist(pt: [number, number], ring: SplineRing): number {
   const samples = sampleClosedSpline(ring.points, 60);
@@ -73,47 +136,30 @@ test.each(imageFiles)(
 
     expect(result.success).toBe(true);
 
-    // Paper boundary: each annotated corner within 30px of the nearest edge of the
-    // detected polygon.  Checking edge distance (not vertex distance) handles the
-    // case where the two polygons have different vertex counts: an annotated corner
-    // that falls on a detected edge with no nearby vertex will still pass.
+    // Paper boundary: IoU between annotated and detected polygon.
     if (ann.paperBoundary && result.paperBoundary) {
-      const det = result.paperBoundary.points;
-      const m = det.length;
-      function pointToPolyDist(px: number, py: number): number {
-        let minD = Infinity;
-        for (let i = 0; i < m; i++) {
-          const [ax, ay] = det[i];
-          const [bx, by] = det[(i + 1) % m];
-          const dx = bx - ax, dy = by - ay;
-          const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
-          minD = Math.min(minD, Math.hypot(px - (ax + t * dx), py - (ay + t * dy)));
-        }
-        return minD;
+      const iou = polyIoU(ann.paperBoundary, result.paperBoundary.points);
+      if (iou < 0.5) {
+        console.error(`[${filename}] paper boundary IoU=${iou.toFixed(3)}`);
       }
-      for (const [cx, cy] of ann.paperBoundary) {
-        expect(pointToPolyDist(cx, cy)).toBeLessThan(500);
-      }
+      expect(iou).toBeGreaterThan(0.25);
     }
 
-    // Center of innermost ring within 500px (use smallest-radius ring from each)
+    // Ring IoU: sample each spline into a polygon and compare (sort by radius).
     if (ann.rings.length > 0 && result.rings.length > 0) {
-      const annInner = [...ann.rings].sort((a, b) => splineRadius(a) - splineRadius(b))[0];
-      const resInner = [...result.rings].sort((a, b) => splineRadius(a) - splineRadius(b))[0];
-      const [annCx, annCy] = splineCentroid(annInner);
-      const [resCx, resCy] = splineCentroid(resInner);
-      expect(Math.hypot(resCx - annCx, resCy - annCy)).toBeLessThan(500);
-    }
-
-    // Ring radius within 30% for each ring (sort by radius to handle annotation order differences)
-    const annSorted  = [...ann.rings].sort((a, b) => splineRadius(a) - splineRadius(b));
-    const resSorted  = [...result.rings].sort((a, b) => splineRadius(a) - splineRadius(b));
-    const minLen = Math.min(annSorted.length, resSorted.length);
-    for (let i = 0; i < minLen; i++) {
-      const annRadius = splineRadius(annSorted[i]);
-      if (annRadius === 0) continue; // degenerate annotation ring — skip
-      const resRadius = splineRadius(resSorted[i]);
-      expect(Math.abs(resRadius - annRadius) / annRadius).toBeLessThan(1.20);
+      const annSorted = [...ann.rings].sort((a, b) => splineRadius(a) - splineRadius(b));
+      const resSorted = [...result.rings].sort((a, b) => splineRadius(a) - splineRadius(b));
+      const minLen = Math.min(annSorted.length, resSorted.length);
+      for (let i = 0; i < minLen; i++) {
+        if (splineRadius(annSorted[i]) < 1) continue; // degenerate annotation ring
+        const annPoly = sampleClosedSpline(annSorted[i].points, 60);
+        const resPoly = sampleClosedSpline(resSorted[i].points, 60);
+        const iou = polyIoU(annPoly, resPoly);
+        if (iou < 0.5) {
+          console.error(`[${filename}] ring[${i}] IoU=${iou.toFixed(3)}`);
+        }
+        expect(iou).toBeGreaterThan(0.2);
+      }
     }
 
     // Colour calibration sanity: hue ranges
