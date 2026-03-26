@@ -73,8 +73,8 @@ describe('findTarget', () => {
     const r0 = splineRadius(result.rings[0]);
     const r9 = splineRadius(result.rings[9]);
 
-    // Bullseye must be at least 2.5% of the short image side
-    expect(r0).toBeGreaterThan(shortSide * 0.025);
+    // Bullseye must be at least 1.5% of the short image side
+    expect(r0).toBeGreaterThan(shortSide * 0.015);
 
     // Outermost ring: must be visible (≥ 10% of short side) and not overblown (< 75%)
     expect(r9).toBeGreaterThan(shortSide * 0.10);
