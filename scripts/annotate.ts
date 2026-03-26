@@ -1371,6 +1371,7 @@ async function main(): Promise<void> {
 
     } else if (req.method === 'GET' && req.url?.startsWith('/api/image/')) {
       const filename = decodeURIComponent(req.url.slice('/api/image/'.length));
+      if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
       try {
       if (!imageCache.has(filename)) {
         const imgPath = path.join(IMAGES_DIR, filename);
@@ -1465,7 +1466,7 @@ async function main(): Promise<void> {
 
       respond(200, JSON.stringify(imageCache.get(filename)!));
       } catch (err) {
-        console.error(`Error processing ${filename}:`, err);
+        console.error('Error processing image:', err);
         respond(500, JSON.stringify({ error: String(err) }));
       }
 
