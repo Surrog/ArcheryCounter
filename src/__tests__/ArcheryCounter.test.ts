@@ -37,7 +37,8 @@ describe('ArcheryCounter.processImage', () => {
     expect(findTarget).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H);
     expect(findArrows).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H, expect.objectContaining({ success: true }));
     expect(result.rings).toBe(MOCK_RINGS);
-    expect(result.arrows).toBe(MOCK_ARROWS);
+    // calibration is null → scoring falls back to score: 0 for each arrow
+    expect(result.arrows).toEqual(MOCK_ARROWS.map(a => ({ ...a, score: 0 })));
     expect(result.paperBoundary).toBe(MOCK_BOUNDARY);
   });
 

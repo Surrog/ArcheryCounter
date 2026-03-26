@@ -58,6 +58,21 @@ export function pointInClosedSpline(
   return inside;
 }
 
+/** Returns the mean of all control-point coordinates. */
+export function splineCentroid(ring: SplineRing): [number, number] {
+  const n = ring.points.length;
+  return [
+    ring.points.reduce((s, p) => s + p[0], 0) / n,
+    ring.points.reduce((s, p) => s + p[1], 0) / n,
+  ];
+}
+
+/** Returns the mean distance from the centroid to each control point. */
+export function splineRadius(ring: SplineRing): number {
+  const [cx, cy] = splineCentroid(ring);
+  return ring.points.reduce((s, p) => s + Math.hypot(p[0] - cx, p[1] - cy), 0) / ring.points.length;
+}
+
 /**
  * Samples a rotated ellipse at K evenly-spaced angles to produce K Catmull-Rom
  * control points.  Used to initialise spline rings from ellipse detection output.

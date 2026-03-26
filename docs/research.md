@@ -2,164 +2,104 @@
 
 ---
 
-## §1 Why ellipses and quadrilaterals are wrong (summary)
+## §1 Why free-form splines (not ellipses or quads)
 
 An archery target face is non-planar: gravity sag, arrow damage, edge curl, and humidity deform it. Its image is therefore **not** a projective transform of the canonical flat target.
 
-- **Ellipse fit fails** because rings are only true conics if the surface is flat. Inner rings (bullseye) are most deformed — precisely where accuracy matters most.
-- **4-corner quadrilateral fails** because curved/bowing edges between pins cannot be represented by four straight line segments.
+- **Ellipse fit fails** — inner rings (bullseye) are most deformed; true conics only if the surface is flat.
+- **4-corner quadrilateral fails** — curved edges between pins cannot be represented by four straight segments.
 
-**Resolution:** free-form closed spline rings (§2) for ring boundaries; a 4–8 vertex polygon for the target boundary; radial-profile sampling as the internal detection representation.
+**Resolution:** Catmull-Rom SplineRings (K=12 control points) for ring boundaries; 4–8 vertex polygon for the target boundary.
 
 ---
 
 ## §2 Representations
 
-| Representation | Use | Notes |
+| Representation | Use |
+|---|---|
+| Free-form closed spline (K=12 Catmull-Rom) | Ring output + annotation ground truth |
+| 4–8 vertex polygon | Target boundary |
+| Radial profile (N×10 distances) | Internal detection only — too large to annotate manually |
+
+---
+
+## §3 Detection algorithm (`targetDetection.ts`)
+
+1. **Pretreatment** — Gaussian blur (15×15, σ=1.5) + erode×1 + dilate×3 on 2× downsampled image.
+2. **Colour blob detection** — Two-pass HSV filtering (wide range → adaptive re-centering around measured median hue) for yellow, red, blue zones → centre + ring-width `w`.
+3. **Boundary scan** — 180 rays; circular median filter (±5 rays); fit 4–8 vertex polygon.
+4. **Colour calibration** — `sampleZoneColours` (8 rays × 2 samples/zone); von Kries white-balance correction.
+5. **Colour-guided ring detection** — 32 rays; 5-point mode-smooth zone classifications; detect 4 colour-zone transitions (gold→red, red→blue, blue→black, black→white) per ray with MIN_STREAK=10, MIN_ZONE_WIDTH=0.4w.
+6. **R2 ratio clamp** — After per-ray collection, if `r7/r5 < 1.05` or `> 1.65` (or ring[7] < 3 pts), rebuild ring[7] from ring[5] scaled by 8/6 ≈ 1.333.
+7. **White-ring extrapolation** — OLS linear regression through detected colour transitions; clamped to paper boundary distance.
+8. **Spline construction** — Detected rings [1,3,5,7,9] → SplineRings; [0,2,4,6,8] filled by `lerpSpline` between adjacent detected zone boundaries.
+
+**HSV convention:** H 0–360°, S/V 0–1. Wide initial ranges adaptively re-centred per image.
+
+---
+
+## §4 Arrow detection (`arrowDetection.ts`)
+
+Zone-adaptive relative-dark-pixel Hough on shaft mask (within paper boundary and within outermost ring). Pipeline: raw Hough → collinear merge → filterSegments (tip-in-boundary, anti-ring) → verifyDarkStripe → second merge → length ≥ 50px → deduplicateTips → removeMidshaftDuplicates → matchVanes.
+
+**Design priority: precision over recall.** Missing an arrow is acceptable; a spurious detection is not.
+
+Known failure mode: straw/hay fibres inside ring[9] in evening outdoor images pass the dark-stripe check. See `docs/performance.md` and `docs/improvement_failure.md` for details and attempted fixes.
+
+---
+
+## §5 Scoring pipeline (`src/scoring.ts`)
+
+Score = 10 − i, where i is the index of the innermost ring containing the tip (rings[0..9] walked inward-first via `pointInClosedSpline`). Outside all rings = 0 (miss).
+
+**X-ring:** inside ring[0] AND `dist_from_centre < 0.4 × splineRadius(rings[1])`.
+
+**Colour cross-check:** `samplePatchZone` samples an annular patch (r=4..12 px) around the tip, takes the modal `ZoneName` (excludes S < 0.15 hay pixels), and compares to the geometric score's expected zone. On disagreement, `ScoredArrow.lowConfidence = true` is set — the geometric result is never silently overridden.
+
+| Zone | Expected scores |
+|---|---|
+| gold | 10, 9 (X) |
+| red | 8, 7 |
+| blue | 6, 5 |
+| black | 4, 3 |
+| white | 2, 1 |
+
+Output type: `ScoredArrow { tip, nock, score: number | 'X', lowConfidence? }`. `ProcessImageResult.arrows` is `ScoredArrow[]`.
+
+---
+
+## §6 Neural network approach (future)
+
+Root cause of current failures: colour/luminance rules don't generalise across lighting. A trained network could learn lighting-invariant features.
+
+| Property | Current pipeline | Neural network |
 |---|---|---|
-| Radial profile (N×10 distances) | Internal detection | 3 600 values/image — impractical to annotate manually |
-| Free-form closed spline (K=12 Catmull-Rom control points) | Ring output + annotation ground truth | Expressive, compact, practical to drag-annotate |
-| 4–8 vertex polygon | Target boundary | Handles moderate edge curvature; gift-wrap + simplify |
-| Thin-plate spline warp | Future fallback | Handles arbitrary deformation but requires solving a harder sub-problem |
+| Training data | None (rule-based) | 200–500+ labelled images |
+| Generalisation | Brittle to new lighting | Improves with diverse data |
+| Mobile runtime | Pure TS, no extra dep | Requires TFLite / ONNX runtime (~4 MB INT8) |
+| Inference time | ~500 ms JS | ~30–150 ms on device |
+
+**Architecture:** Two-head MobileNetV2 (pretrained ImageNet, freeze early layers).
+- Ring head: global avg pool → FC → `(cx, cy)` + 9 radii, all normalised by `max(w, h)`.
+- Arrow head: 1×1 Conv + 8× upsample → 80×80 Gaussian heatmap of tip locations.
+
+**Data:** minimum ~200 images; augment with colour jitter ±40%, rotation ±15°, perspective warp, random crop/scale. Semi-supervised expansion: pseudo-label unlabelled photos with the current pipeline, keep only `success === true` with monotonically increasing radii (ratio < 1.5).
+
+**Training:** PyTorch + AdamW, loss = L1(centre) + masked-L1(radii) + 0.1×monotonicity penalty + 0.5×BCE(heatmap). Export ONNX → INT8 TFLite + `.ort` for `onnxruntime-react-native`.
+
+**Post-processing:** model radii → circular `SplineRing[]` (K=12); heatmap peaks via NMS (R=3, threshold=0.5) → tip list; scoring via existing `scoreArrow` from §5.
+
+**Limitations:** rings predicted as circles (no deformation); 80×80 heatmap limits tip precision to ~4 px; needs 200+ images minimum.
 
 ---
 
-## §3 Detection algorithm (implemented — `targetDetection.ts`)
-
-### 3.1 Pipeline
-
-1. **Pretreatment** — Gaussian blur (15×15, σ=1.5) + erode×1 + dilate×3 on 2× downsampled image (BOOTSTRAP_SCALE=2). Float64Array HSV cache computed once per pixel for speed.
-2. **Boundary scan** — 180 rays from image centre; walk outward until hay-bale colour (H∈[15°,65°], S>0.25, V>0.20) or image edge. Circular median filter (±10 rays); convex hull + simplify to ≤8 vertices.
-3. **Colour calibration** — 8 rays × 2 samples/zone. Circular-mean hue + median S/V per zone; von Kries white-balance correction.
-4. **Colour-guided ring detection** — 32 rays; 5-point mode-smooth zone classifications; detect 4 colour-zone transitions (gold→red, red→blue, blue→black, black→white) per ray with MIN_STREAK=3 and 50%-of-expected minimum-distance gate (prevents arrow-hole false positives near centre).
-5. **White ring closure** — black-line scan outward from white zone start; fallback to OLS linear regression through known colour-transition distances.
-6. **Monotonicity enforcement** — forward pass on detected `transitionDist[]` before commit, then final pass on full `result[0..9]`. Violations nulled; missing rings filled by spline interpolation from neighbouring rays.
-7. **Spline construction** — detected rings [1,3,5,7,9] → Catmull-Rom SplineRings directly; interpolated rings [0,2,4,6,8] via point-wise spline interpolation from adjacent detected rings.
-
-### 3.2 HSV convention
-
-Standard RGB→HSV (H 0–360°, S/V 0–1). Wide initial ranges (yellow 20–70°, red 0–18°+342–360°, blue 190–245°) adaptively re-centred around the measured median hue per image.
-
-### 3.3 Known failure mode (fixed): monotonicity violations
-
-Each of the 4 colour-zone transitions was scanned independently from ray origin. A colour false positive (hay bale, arrow shaft, specular reflection) could place an outer transition *closer* than an inner one. Similarly, regression-derived r8/r9 using scale estimate `w` could fall below a detected r5. Fixed by the two-pass monotonicity enforcement described above. Verified by the per-ray distance ordering test in `targetDetection.test.ts`.
-
----
-
-## §4 Scoring approach (deferred — see plan.md §P8)
-
-**Primary: colour-zone classification at the arrow tip.**
-
-1. Sample HSV in a small annular patch around the tip; exclude hay-coloured pixels; take modal zone → score range (pair).
-2. Disambiguate within zone: distance to inner and outer SplineRing boundaries → exact score.
-3. X-ring: distance from centre < ~40% of gold zone radius.
-
-Per-image colour calibration (§3 above) is critical; hardcoded ranges are insufficient under mixed lighting.
-
----
-
-## §5 Migration history
-
-| Phase | Representation | Status |
-|---|---|---|
-| v1 | Native C++ / OpenCV (RotatedRect ellipse fit) | Removed |
-| v2 | Pure-TS ellipse fit (Fitzgibbon/Halir-Flusser) + 4-point quad | Removed |
-| v3 | Boundary-first polygon mask → colour-zone scoring + spline ring output | **Current** |
-| v4 | Thin-plate spline non-rigid warp | Future fallback if needed |
-
----
-
-## §6 Explicitly excluded approaches
+## §7 Excluded approaches
 
 | Approach | Reason |
 |---|---|
 | Homography-based canonical scoring | Corrects perspective only; does not address surface deformation |
 | Lens distortion correction | Algorithm works in image space; no rectified input assumed |
-| Radial profile as annotation format | 3 600 values/image; impractical to annotate manually |
-| Perspective rejection / user notification | Derive from observed failures, not preemptively |
-
----
-
-## §7 Arrow detection (research)
-
-**Deferred until ring and boundary detection are stable (phases 1–7 complete).**
-
-### 7.1 Physical description
-
-An arrow in a target photo has three visually distinct regions:
-
-| Region | Appearance | Notes |
-|---|---|---|
-| **Nock** | Small (~8–12 mm dia.), brightly coloured (yellow, orange, green, blue, red) near-circular disc at the rear end | Most visually distinct element; highest-saturation blob not matching any target zone |
-| **Shaft** | Thin (6–10 mm dia.) line, typically glossy **black** carbon fibre; extends from nock into the target face | 1–5 px wide at 1200 px image width; glossy surface produces a bright specular highlight streak alongside the dark body |
-| **Vanes / fletching** | 3 thin plastic fins (often white or translucent) extending from just behind the nock | ~2–3 cm long; may be folded against the shaft in a tight group |
-
-The **impact point** — where the shaft enters the paper — is the scoring location. The shaft protrudes perpendicular (or near-perpendicular) to the target face. From a slightly-above-centre camera position, all shafts in the same image project as **roughly parallel lines** pointing toward the vanishing point of the camera direction, converging slightly toward the image centre.
-
-### 7.2 Key constraints
-
-- **All shafts are parallel** (to first order): arrows shot at the same target face all travel the same direction, so their projections in the image share a common vanishing point. This is the strongest structural prior for detection.
-- **Nocks float in front of the target plane**: their image position is offset from the impact point by an amount that depends on shaft length and camera angle. For a typical 28" arrow at 30° oblique view, the nock appears 5–30 px displaced from the entry point (at 1200 px image width).
-- **Shafts do not cross colour boundaries**: the entry point is always within the target face; the shaft overlays but does not belong to any ring zone.
-- **Multiple arrows**: 3 or 6 arrows per photo in competition; all from the same direction.
-- **Arrow holes (post-removal)**: 5–15 px dark/warm circular holes (exposed hay) cluster near the centre. Simpler to detect than shafts but less accurate in position.
-
-### 7.3 Detection approaches
-
-#### A. Shaft line detection (Hough / LSD)
-
-The shaft appears as a thin line segment. A Hough line transform (or Line Segment Detector) on a luminance-edge image finds candidate lines. Filter:
-- Within the target boundary
-- Appropriate length (20–200 px at 1200 px width)
-- Consistent direction (within 10° of the estimated shaft vanishing point)
-- One endpoint on or near the target surface (impact point), other endpoint free (nock end)
-
-**Strengths**: directly finds the shaft regardless of nock/vane color.
-
-**Weaknesses**: many false positives (ring-outline edge segments, ring divider lines). Requires a Hough transform implementation in pure TypeScript. The shaft direction prior (all shafts in a frame share the same vanishing point) dramatically reduces false positives.
-
-#### B. Doublet filter (specular shaft signature)
-
-A glossy shaft under directional light shows a bright specular streak ≈1 px to one side of a dark line. This "doublet" (dark–bright or bright–dark depending on light direction) is distinctive. A matched filter tuned to this pattern (width ≈3 px, oriented along the shaft direction) would have high specificity.
-
-**Strengths**: high selectivity against ring-outline edges, which are dark–bright on one side only.
-
-**Weaknesses**: requires knowing the shaft direction and light direction first; a good refinement step after A, not a standalone detector.
-
-#### C. Arrow-hole detection (fallback / post-pull mode)
-
-After arrows are removed, circular holes (5–15 px diameter) expose the hay bale (H∈[15°,65°], S>0.25, V<0.6). These appear as small warm-dark blobs within the target boundary.
-
-1. Subtract the expected colour of each target zone (from calibration) to suppress background.
-2. Look for residual warm-dark blobs of roughly circular shape.
-3. Cluster nearby candidates (arrows land within a few mm of each other in a tight group).
-
-**Strengths**: no shaft or nock needed; works on post-session photos; simpler blob detector.
-
-**Weaknesses**: less accurate (hole position ≈ shaft entry point ± 3–5 px, acceptable for scoring); faint on thick paper; multiple holes from same arrow position (re-shooting) creates ambiguity.
-
-### 7.4 Recommended implementation order
-
-1. **Shaft direction prior** (P9-T1): on a Hough-edge image of the target region, find the dominant line direction (all shafts share one vanishing point). A 1D Hough accumulator over angle is sufficient.
-2. **Shaft line detection** (P9-T2): Hough or LSD filtered to the estimated direction ±10°. Each detected segment with one endpoint on the target surface is a candidate shaft.
-3. **Impact point localisation** (P9-T3): the segment endpoint closest to the target centre is the entry point.
-4. **Arrow-hole fallback** (P9-T5): implement as alternative path when no shaft lines are found.
-5. **Doublet refinement** (later): once the shaft direction is known, use the doublet filter to sub-pixel refine the impact point.
-
-### 7.5 Test dataset requirements
-
-The current test images (`images/*.jpg`) do not contain arrows. A separate dataset is needed:
-
-- 10–20 images with arrows in place (3 or 6 arrows each), varied lighting conditions
-- 5–10 images taken after arrows are removed (hole mode)
-- Ground truth: manually annotated impact points (pixel coordinates) per arrow
-
-Store annotations in the same PostgreSQL `annotations` table used for ring ground truth, adding an `arrows` column: `[{ tip: [x, y], nock: [x, y] | null }]`.
-
-### 7.6 Open questions
-
-| Question | Notes |
-|---|---|
-| Arrow damage to target around impact | Paper tears and crumples at the entry point; do not try to detect hole shape — use the shaft-ray method to project the entry point. |
-| Arrows covering ring boundaries | A shaft crossing a ring boundary occludes 1–3 rays at most; the existing outlier-rejection (angular-local median radius snapping) is likely sufficient. If needed in a future iteration, detect shafts first and mask those ray pixels before ring detection. |
-| Outdoor / directional lighting | Out of scope for current images (indoor / diffuse). Revisit when outdoor test images are available — the doublet filter becomes more valuable under directional sun. |
+| Shaft direction prior (all shafts share vanishing point) | Per-image angle spread 14–111°; no reliable shared direction |
+| Doublet filter (specular shaft signature) | Good refinement step but requires shaft direction first |
+| Arrow-hole detection fallback | Stub reserved for second iteration |
+| Erosion of shaft mask | Shafts are 1–2 px wide — erosion removes shafts and straw alike |

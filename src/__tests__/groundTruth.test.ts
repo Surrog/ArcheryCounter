@@ -4,6 +4,8 @@ import { Pool } from 'pg';
 import { loadImageNode } from '../imageLoader';
 import { findTarget } from '../targetDetection';
 import { findArrows } from '../arrowDetection';
+import { scoreArrow } from '../scoring';
+import { sampleClosedSpline, splineCentroid, splineRadius } from '../spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../../images');
 
@@ -33,18 +35,15 @@ interface ImageAnnotation {
   arrows: ArrowAnnotation[];
 }
 
-function splineCentroid(ring: SplineRing): [number, number] {
-  const n = ring.points.length;
-  return [
-    ring.points.reduce((s, p) => s + p[0], 0) / n,
-    ring.points.reduce((s, p) => s + p[1], 0) / n,
-  ];
-}
-
-function splineRadius(ring: SplineRing): number {
-  const [cx, cy] = splineCentroid(ring);
-  const radii = ring.points.map(([x, y]) => Math.hypot(x - cx, y - cy));
-  return radii.reduce((s, r) => s + r, 0) / radii.length;
+/** Minimum distance from pt to any sampled point on the given ring spline. */
+function pointToSplineDist(pt: [number, number], ring: SplineRing): number {
+  const samples = sampleClosedSpline(ring.points, 60);
+  let min = Infinity;
+  for (const [sx, sy] of samples) {
+    const d = Math.hypot(pt[0] - sx, pt[1] - sy);
+    if (d < min) min = d;
+  }
+  return min;
 }
 
 const imageFiles = fs
@@ -165,9 +164,14 @@ test.each(imageFiles)(
       allPairs.sort((a, b) => a.dist - b.dist);
       const matchedA = new Set<number>(), matchedD = new Set<number>();
       const tipMatchDist = new Map<number, number>(); // ai → dist
+      const tipMatchIdx  = new Map<number, number>(); // ai → di
       for (const { ai, di, dist } of allPairs) {
         if (matchedA.has(ai) || matchedD.has(di)) continue;
-        if (dist <= TIP_MATCH_PX) { matchedA.add(ai); matchedD.add(di); tipMatchDist.set(ai, dist); }
+        if (dist <= TIP_MATCH_PX) {
+          matchedA.add(ai); matchedD.add(di);
+          tipMatchDist.set(ai, dist);
+          tipMatchIdx.set(ai, di);
+        }
       }
       const tipFailures: string[] = [];
       for (let ai = 0; ai < ann.arrows.length; ai++) {
@@ -193,6 +197,34 @@ test.each(imageFiles)(
         );
       }
       expect(tipFailures.length).toBeLessThanOrEqual(maxTipFailures);
+
+      // Scoring assertions (P10-T7)
+      if (result.calibration) {
+        const scoreFailures: string[] = [];
+        for (const [ai, di] of tipMatchIdx) {
+          const annScore = ann.arrows[ai].score;
+          if (annScore === null) continue; // unannotated score — skip
+          const detScore = scoreArrow(detected[di].tip, result.rings);
+
+          // Treat 'X' and 10 as equivalent numeric score (X is a tiebreaker within 10).
+          const numAnn = annScore === 'X' ? 10 : annScore;
+          const numDet = detScore === 'X' ? 10 : detScore;
+          // Near-boundary: tip within 20px of any ring spline → allow ±1 tolerance.
+          // 20px ≈ 20% of a typical ring width; handles ring boundary detection imprecision.
+          const nearBoundary = result.rings.some(r => pointToSplineDist(detected[di].tip, r) < 20);
+          const ok = numDet === numAnn || (nearBoundary && Math.abs(numDet - numAnn) <= 1);
+          if (!ok) {
+            scoreFailures.push(
+              `  ann[${ai}] tip=${fmtPt(ann.arrows[ai].tip)} score=${annScore} → det score=${detScore}` +
+              (nearBoundary ? ' (near boundary)' : ''),
+            );
+          }
+        }
+        if (scoreFailures.length > 0) {
+          console.error(`[${filename}] scoring failures:\n${scoreFailures.join('\n')}`);
+        }
+        expect(scoreFailures.length).toBe(0);
+      }
 
       // Nock matching: informational only — log misses but do not assert.
       const matchedDet2 = new Set<number>();

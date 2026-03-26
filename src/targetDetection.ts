@@ -54,7 +54,7 @@ export interface ArcheryResult {
 // Standard RGB → HSV conversion (H 0–360°, S/V 0–1)
 // ---------------------------------------------------------------------------
 
-function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+export function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
   const r1 = r / 255, g1 = g / 255, b1 = b / 255;
   const max = Math.max(r1, g1, b1);
   const min = Math.min(r1, g1, b1);
@@ -596,7 +596,7 @@ function estimateCenterAndScale(
 // Phase 2 — Per-image colour calibration
 // ---------------------------------------------------------------------------
 
-type ZoneName = 'gold' | 'red' | 'blue' | 'black' | 'white';
+export type ZoneName = 'gold' | 'red' | 'blue' | 'black' | 'white';
 
 // Sample at the midpoint of each ring within the zone (in units of w).
 // Gold: rings 0–1 (radius 0–2w), Red: rings 2–3 (2w–4w), etc.
@@ -737,7 +737,7 @@ function computeCalibration(samples: RawZoneSamples): ColourCalibration | null {
  * black/white (low S or V) are discriminated by S and V.
  * Returns null if the pixel is further from every reference than the threshold.
  */
-function classifyPixelZone(
+export function classifyPixelZone(
   [h, s, v]: [number, number, number],
   cal: ColourCalibration,
 ): ZoneName | null {
