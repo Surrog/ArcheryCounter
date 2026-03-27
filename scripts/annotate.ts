@@ -82,8 +82,8 @@ function isValidAnnotation(ann: {
 }): boolean {
   return (
     ann.paperBoundary != null && ann.paperBoundary.length >= 3 &&
-    ann.rings.length > 0 &&
-    ann.arrows.length > 0
+    ann.rings.length == 10 &&
+    ann.rings.every((r: any) => Array.isArray(r.points) && r.points.length >= 3)
   );
 }
 
