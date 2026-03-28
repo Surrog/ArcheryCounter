@@ -399,11 +399,13 @@ test('annotate: startup wipes corrupt annotation rows; invalid annotations delet
   const CORRUPT_RINGS = JSON.stringify([
     { points: [[null, null], [null, null], [null, null]] },
   ]);
-  // Valid annotation with all required fields
-  const VALID_RINGS    = JSON.stringify([
-    { points: [[120, 200], [160, 200], [160, 250], [120, 250]] },
-    { points: [[100, 180], [180, 180], [180, 270], [100, 270]] },
-  ]);
+  // Valid annotation: 10 rings (required by isValidAnnotation), each with >= 3 points
+  const VALID_RINGS = JSON.stringify(
+    Array.from({ length: 10 }, (_, i) => {
+      const r = 20 + i * 22;
+      return { points: [[500 + r, 400], [500, 400 + r], [500 - r, 400], [500, 400 - r]] };
+    }),
+  );
   const VALID_BOUNDARY = JSON.stringify([[50, 50], [950, 50], [950, 750], [50, 750]]);
   const VALID_ARROWS   = JSON.stringify([{ tip: [500, 400], nock: [600, 500], score: 9 }]);
 
@@ -481,14 +483,27 @@ test('annotate: startup wipes corrupt annotation rows; invalid annotations delet
 // ---------------------------------------------------------------------------
 
 test('annotate: GET /api/annotations deletes incomplete annotations; POST /api/save rejects invalid ones', async () => {
-  const INCOMPLETE_FILE = '20260319_213758.jpg'; // will be seeded with rings but no arrows
+  const INCOMPLETE_FILE = '20260319_213758.jpg'; // will be seeded with only 9 rings (< 10) → invalid
   const VALID_FILE      = '20190321_212956.jpg'; // will be seeded with full valid annotation
 
-  const RINGS    = JSON.stringify([{ points: [[120, 200], [160, 200], [160, 250], [120, 250]] }]);
+  // isValidAnnotation requires exactly 10 rings, each with >= 3 points, plus a boundary.
+  // INCOMPLETE_RINGS has only 9 rings → invalid.
+  const INCOMPLETE_RINGS = JSON.stringify(
+    Array.from({ length: 9 }, (_, i) => {
+      const r = 20 + i * 22;
+      return { points: [[500 + r, 400], [500, 400 + r], [500 - r, 400], [500, 400 - r]] };
+    }),
+  );
+  const RINGS = JSON.stringify(
+    Array.from({ length: 10 }, (_, i) => {
+      const r = 20 + i * 22;
+      return { points: [[500 + r, 400], [500, 400 + r], [500 - r, 400], [500, 400 - r]] };
+    }),
+  );
   const BOUNDARY = JSON.stringify([[50, 50], [950, 50], [950, 750], [50, 750]]);
   const ARROWS   = JSON.stringify([{ tip: [500, 400], nock: [600, 500], score: 9 }]);
 
-  // Seed: INCOMPLETE_FILE has rings + boundary but NO arrows → invalid
+  // Seed: INCOMPLETE_FILE has only 9 rings → invalid (isValidAnnotation requires 10)
   //        VALID_FILE has all three components → valid
   const db = new Pool(DB_CONFIG);
   try {
@@ -497,7 +512,7 @@ test('annotate: GET /api/annotations deletes incomplete annotations; POST /api/s
        VALUES ($1, $2::jsonb, $3::jsonb, '[]')
        ON CONFLICT (filename) DO UPDATE
          SET rings = EXCLUDED.rings, paper_boundary = EXCLUDED.paper_boundary, arrows = '[]'`,
-      [INCOMPLETE_FILE, RINGS, BOUNDARY],
+      [INCOMPLETE_FILE, INCOMPLETE_RINGS, BOUNDARY],
     );
     await db.query(
       `INSERT INTO annotations (filename, rings, paper_boundary, arrows)
@@ -534,8 +549,8 @@ test('annotate: GET /api/annotations deletes incomplete annotations; POST /api/s
       body: JSON.stringify({
         [INCOMPLETE_FILE]: {
           paperBoundary: [[50, 50], [950, 50], [950, 750], [50, 750]],
-          rings: [{ points: [[120, 200], [160, 200], [160, 250], [120, 250]] }],
-          arrows: [], // invalid: no arrows
+          rings: JSON.parse(INCOMPLETE_RINGS), // invalid: only 9 rings
+          arrows: [{ tip: [500, 400], nock: [600, 500], score: 9 }],
         },
       }),
     });

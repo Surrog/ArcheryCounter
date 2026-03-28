@@ -25,6 +25,8 @@ if (!imgPath) {
     rings:         result.success ? result.rings : [],
     paperBoundary: result.success && result.paperBoundary ? result.paperBoundary.points : null,
     arrows,
+    width,
+    height,
     success:       result.success,
     error:         result.success ? undefined : (result as any).error,
   };

@@ -99,6 +99,8 @@ interface DetectionOutput {
   rings: SplineRing[];
   paperBoundary: [number, number][] | null;
   arrows: { tip: [number, number]; nock: [number, number] | null }[];
+  width?: number;
+  height?: number;
   success: boolean;
   error?: string;
 }
@@ -785,7 +787,12 @@ function attachSvgListeners() {
       const mpt = svgPt(svg, e);
       const { edge, pt } = nearestBoundaryEdge(ann.paperBoundary, mpt.x, mpt.y);
       if (edge >= 0) {
-        ann.paperBoundary.splice(edge + 1, 0, [Math.round(pt[0]), Math.round(pt[1])]);
+        const imgData = imageDataCache[IMAGES[currentIdx]];
+        const w = imgData?.width ?? Infinity, h = imgData?.height ?? Infinity;
+        ann.paperBoundary.splice(edge + 1, 0, [
+          Math.round(Math.max(0, Math.min(w, pt[0]))),
+          Math.round(Math.max(0, Math.min(h, pt[1]))),
+        ]);
         markModified(currentIdx);
         updateImageList();
         render();
@@ -892,7 +899,12 @@ function attachSvgListeners() {
         if (drag.type === 'ring_pt') {
           ann.rings[drag.ri].points[drag.pi] = [mpt.x, mpt.y];
         } else if (drag.type === 'boundary' && ann.paperBoundary) {
-          ann.paperBoundary[drag.idx] = [Math.round(mpt.x), Math.round(mpt.y)];
+          const imgData = imageDataCache[IMAGES[currentIdx]];
+          const w = imgData?.width ?? Infinity, h = imgData?.height ?? Infinity;
+          ann.paperBoundary[drag.idx] = [
+            Math.round(Math.max(0, Math.min(w, mpt.x))),
+            Math.round(Math.max(0, Math.min(h, mpt.y))),
+          ];
         } else if (drag.type === 'arrow_tip') {
           ann.arrows[drag.ai].tip = [mpt.x, mpt.y];
         } else if (drag.type === 'arrow_nock') {
@@ -1141,6 +1153,15 @@ document.addEventListener('keydown', (e) => {
     else if (e.key === 'm' || e.key === 'M') score = 0;
     else if (e.key >= '1' && e.key <= '9') score = parseInt(e.key, 10);
     if (score !== undefined) { onScoreSelect(score); return; }
+  }
+
+  if (e.key === 'b' || e.key === 'B') {
+    if (currentIdx > 0) selectImage(currentIdx - 1);
+    return;
+  }
+  if (e.key === 'n' || e.key === 'N') {
+    if (currentIdx < IMAGES.length - 1) selectImage(currentIdx + 1);
+    return;
   }
 
   if ((e.key === 'a' || e.key === 'A') && addArrowMode !== 'score-input' && viewMode === 'annotated') {
@@ -1443,17 +1464,19 @@ async function main(): Promise<void> {
 
           // Write to generated table
           await db.query(
-            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (filename) DO UPDATE
                SET algorithm_hash = EXCLUDED.algorithm_hash,
                    paper_boundary = EXCLUDED.paper_boundary,
                    rings          = EXCLUDED.rings,
                    arrows         = EXCLUDED.arrows,
+                   width          = EXCLUDED.width,
+                   height         = EXCLUDED.height,
                    updated_at     = NOW()`,
             [filename, currentHash,
              JSON.stringify(detectedBoundary), JSON.stringify(detectedRings),
-             JSON.stringify(detectedArrows)],
+             JSON.stringify(detectedArrows), entry.width ?? null, entry.height ?? null],
           );
           inGenerated.set(filename, currentHash);
           generationStatus.set(filename, 'ready');
@@ -1541,17 +1564,19 @@ async function main(): Promise<void> {
           const detectedBoundary = ok && entry.result.paperBoundary ? entry.result.paperBoundary.points : null;
           const detectedArrows   = entry.detectedArrows;
           await db.query(
-            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (filename) DO UPDATE
                SET algorithm_hash = EXCLUDED.algorithm_hash,
                    paper_boundary = EXCLUDED.paper_boundary,
                    rings          = EXCLUDED.rings,
                    arrows         = EXCLUDED.arrows,
+                   width          = EXCLUDED.width,
+                   height         = EXCLUDED.height,
                    updated_at     = NOW()`,
             [filename, currentHash,
              JSON.stringify(detectedBoundary), JSON.stringify(detectedRings),
-             JSON.stringify(detectedArrows)],
+             JSON.stringify(detectedArrows), entry.width ?? null, entry.height ?? null],
           );
           await db.query(
             `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
@@ -1649,18 +1674,21 @@ async function main(): Promise<void> {
           if (!result.success) {
             logEvent('error', 'detection_failed', filename, result.error ?? '');
           }
-          const { rings, paperBoundary, arrows } = result;
+          const { rings, paperBoundary, arrows, width: imgW, height: imgH } = result;
           await db.query(
-            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (filename) DO UPDATE
                SET algorithm_hash = EXCLUDED.algorithm_hash,
                    paper_boundary = EXCLUDED.paper_boundary,
                    rings          = EXCLUDED.rings,
                    arrows         = EXCLUDED.arrows,
+                   width          = EXCLUDED.width,
+                   height         = EXCLUDED.height,
                    updated_at     = NOW()`,
             [filename, currentHash,
-             JSON.stringify(paperBoundary), JSON.stringify(rings), JSON.stringify(arrows)],
+             JSON.stringify(paperBoundary), JSON.stringify(rings), JSON.stringify(arrows),
+             imgW ?? null, imgH ?? null],
           );
           inGenerated.set(filename, currentHash);
           generationStatus.set(filename, 'ready');

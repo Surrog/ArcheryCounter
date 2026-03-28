@@ -1,6 +1,7 @@
 module.exports = {
   preset: 'react-native',
   maxWorkers: 2,
+  globalSetup: '<rootDir>/src/__tests__/globalSetup.ts',
   testMatch: ['<rootDir>/src/__tests__/**/*.test.(ts|tsx)'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   collectCoverageFrom: [
