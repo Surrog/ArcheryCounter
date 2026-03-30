@@ -68,28 +68,33 @@ Output type: `ScoredArrow { tip, nock, score: number | 'X', lowConfidence? }`. `
 
 ---
 
-## §6 Neural network approach (future)
+## §6 Neural network arrow detector (P11)
 
-Root cause of current failures: colour/luminance rules don't generalise across lighting. A trained network could learn lighting-invariant features.
+Root cause of Hough pipeline failures: colour/luminance rules don't generalise across lighting, and collinear arrows on the same shaft line cannot be distinguished by geometry alone. A trained network learns lighting-invariant shaft features from data.
 
-| Property | Current pipeline | Neural network |
+| Property | Hough pipeline (P9) | NN detector (P11) |
 |---|---|---|
-| Training data | None (rule-based) | 200–500+ labelled images |
+| Training data | None (rule-based) | 54 images / 273 arrows (+ augmentation) |
+| Recall (eval set) | ~0.70 @ 45 px | Target ≥ 0.85 @ 45 px |
 | Generalisation | Brittle to new lighting | Improves with diverse data |
-| Mobile runtime | Pure TS, no extra dep | Requires TFLite / ONNX runtime (~4 MB INT8) |
-| Inference time | ~500 ms JS | ~30–150 ms on device |
+| Mobile runtime | Pure TS, no extra dep | `onnxruntime-react-native` (~4 MB INT8) |
+| Inference time | ~500 ms JS | ~50–150 ms (INT8 on device) |
 
-**Architecture:** Two-head MobileNetV2 (pretrained ImageNet, freeze early layers).
-- Ring head: global avg pool → FC → `(cx, cy)` + 9 radii, all normalised by `max(w, h)`.
-- Arrow head: 1×1 Conv + 8× upsample → 80×80 Gaussian heatmap of tip locations.
+**Scope:** Arrow tip detection only. Ring detection remains rule-based (IoU ≈ 0.92). Scoring reuses geometric `scoreArrow` (P10-T3) with rule-based rings.
 
-**Data:** minimum ~200 images; augment with colour jitter ±40%, rotation ±15°, perspective warp, random crop/scale. Semi-supervised expansion: pseudo-label unlabelled photos with the current pipeline, keep only `success === true` with monotonically increasing radii (ratio < 1.5).
+**Architecture:** CenterNet-style heatmap on MobileNetV2 backbone.
+- Input: 512×512 RGB, full image letterbox-resized (no crop — paper boundary detection is too inaccurate to use as a crop region).
+- Backbone: MobileNetV2 ImageNet pretrained (freeze first 7 layers).
+- Neck: 3-layer FPN (32/64/128 channels, bilinear upsample).
+- Head: Conv → 128×128 heatmap (Gaussian peaks, σ=3 px in heatmap space).
+- Loss: Focal loss (α=2, β=4).
+- Export: ONNX → INT8 `.ort` for `onnxruntime-react-native`.
 
-**Training:** PyTorch + AdamW, loss = L1(centre) + masked-L1(radii) + 0.1×monotonicity penalty + 0.5×BCE(heatmap). Export ONNX → INT8 TFLite + `.ort` for `onnxruntime-react-native`.
+**Post-processing:** NMS (kernel=5, threshold=0.35) on 128×128 heatmap → peaks → rescale to original image coords → `scoreArrow`.
 
-**Post-processing:** model radii → circular `SplineRing[]` (K=12); heatmap peaks via NMS (R=3, threshold=0.5) → tip list; scoring via existing `scoreArrow` from §5.
+**Data augmentation:** `albumentations` — colour jitter ±40%, rotation ±20°, flip, scale ±25%, perspective warp, Gaussian blur. Effective dataset: ~2 000–5 000 crops from 54 source images.
 
-**Limitations:** rings predicted as circles (no deformation); 80×80 heatmap limits tip precision to ~4 px; needs 200+ images minimum.
+**Limitations:** 128×128 heatmap = 4 px precision in original coords at full 512 input; small dataset risks overfitting (mitigated by heavy augmentation + frozen backbone); no nock prediction (shaft direction unavailable without second head).
 
 ---
 
