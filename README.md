@@ -1,3 +1,3 @@
 # ArcheryCounter
 
-Attempt to create an app that count arrow's score in a target
+Tools to detect and grade arrows on a FITA Target Faces

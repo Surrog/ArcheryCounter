@@ -1,12 +1,53 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { Jimp } from 'jimp';
+import { Pool } from 'pg';
 import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel, RayDebugEntry } from '../src/targetDetection';
 import { findArrows, ArrowDetection } from '../src/arrowDetection';
 import { SplineRing, sampleClosedSpline } from '../src/spline';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const OUTPUT_PATH = path.resolve(__dirname, '../report.html');
+
+// ── algorithm cache (mirrors regen-generated.ts) ──────────────────────────────
+
+const db = new Pool({
+  host:     process.env.DB_HOST     || 'localhost',
+  port:     parseInt(process.env.DB_PORT || '5432'),
+  user:     process.env.DB_USER     || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  database: process.env.DB_NAME     || 'postgres',
+});
+
+function computeAlgorithmHash(): string {
+  const files = [
+    path.resolve(__dirname, '../src/targetDetection.ts'),
+    path.resolve(__dirname, '../src/arrowDetection.ts'),
+  ].filter(f => fs.existsSync(f)).map(f => fs.readFileSync(f));
+  return crypto.createHash('sha256').update(Buffer.concat(files)).digest('hex').slice(0, 16);
+}
+
+function scalePoints(points: [number, number][], sx: number, sy: number): [number, number][] {
+  return points.map(([x, y]) => [x * sx, y * sy]);
+}
+
+function scaleRings(rings: { points: [number, number][] }[], sx: number, sy: number): SplineRing[] {
+  return rings.map(r => ({ points: scalePoints(r.points, sx, sy) as [number, number][] }));
+}
+
+function scaleBoundary(pb: any, sx: number, sy: number): TargetBoundary | undefined {
+  if (!pb) return undefined;
+  const pts: [number, number][] = Array.isArray(pb) ? pb : pb.points;
+  return { points: scalePoints(pts, sx, sy) } as unknown as TargetBoundary;
+}
+
+function scaleArrows(arrows: any[], sx: number, sy: number): ArrowDetection[] {
+  return arrows.map(a => ({
+    tip:  [a.tip[0] * sx, a.tip[1] * sy] as [number, number],
+    nock: a.nock ? [a.nock[0] * sx, a.nock[1] * sy] as [number, number] : null,
+  }));
+}
 
 // Archery standard ring colours — index 0 (bullseye) to index 9 (outermost)
 const RING_COLORS = [
@@ -26,19 +67,65 @@ interface ImageEntry {
   arrows: ArrowDetection[];
 }
 
-async function processImage(imgPath: string): Promise<ImageEntry> {
+async function processImage(imgPath: string, currentHash: string): Promise<ImageEntry> {
   const filename = path.basename(imgPath);
 
-  // Load once, scale to 1200px — reuse for both detection and base64 thumbnail.
+  // Scale to ≤1200px — matches loadImageNode() used by detect-worker/globalSetup,
+  // so cached DB coordinates are already in the same space as the display image.
   const img = await Jimp.read(imgPath);
   img.scaleToFit({ w: 1200, h: 1200 });
   const { width, height } = img.bitmap;
-  const rgba = new Uint8Array(img.bitmap.data.buffer);
   const base64 = await img.getBase64('image/jpeg');
 
+  // ── cache check ──────────────────────────────────────────────────────────
+  const cached = await db.query(
+    `SELECT algorithm_hash, paper_boundary, rings, arrows, width, height
+     FROM generated WHERE filename = $1`,
+    [filename],
+  );
+
+  if (cached.rows.length > 0 && cached.rows[0].algorithm_hash === currentHash) {
+    const row = cached.rows[0];
+    // Stored coords are in (row.width × row.height) space; scale to current display size.
+    const sx = width  / (row.width  ?? width);
+    const sy = height / (row.height ?? height);
+    const rings    = scaleRings(row.rings ?? [], sx, sy);
+    const boundary = scaleBoundary(row.paper_boundary, sx, sy);
+    const arrows   = scaleArrows(row.arrows ?? [], sx, sy);
+    const result: ArcheryResult = { success: rings.length > 0, rings, paperBoundary: boundary };
+    return { filename, base64, width, height, result, arrows };
+  }
+
+  // ── cache miss: run detection on the same ≤1200px image ──────────────────
+  const rgba = new Uint8Array(img.bitmap.data.buffer);
   const result = findTarget(rgba, width, height);
-  const arrows = result.success ? findArrows(rgba, width, height, result) : [];
-  return { filename, base64, width, height, result, arrows };
+  const arrowsFull = result.success ? findArrows(rgba, width, height, result) : [];
+
+  // Persist to DB
+  await db.query(
+    `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (filename) DO UPDATE SET
+       algorithm_hash = EXCLUDED.algorithm_hash,
+       paper_boundary = EXCLUDED.paper_boundary,
+       rings          = EXCLUDED.rings,
+       arrows         = EXCLUDED.arrows,
+       width          = EXCLUDED.width,
+       height         = EXCLUDED.height`,
+    [
+      filename, currentHash,
+      result.paperBoundary ? JSON.stringify(result.paperBoundary) : null,
+      JSON.stringify(result.rings ?? []),
+      JSON.stringify(arrowsFull),
+      width, height,
+    ],
+  );
+
+  const displayResult: ArcheryResult = {
+    success: result.success, rings: result.rings ?? [],
+    paperBoundary: result.paperBoundary, error: result.error,
+  };
+  return { filename, base64, width, height, result: displayResult, arrows: arrowsFull };
 }
 
 function splineCentroid(ring: SplineRing): [number, number] {
@@ -326,6 +413,8 @@ function renderSection(entry: ImageEntry): string {
 }
 
 async function main(): Promise<void> {
+  const currentHash = computeAlgorithmHash();
+
   const jpgFiles = fs
     .readdirSync(IMAGES_DIR)
     .filter(f => /\.(jpg|jpeg)$/i.test(f))
@@ -337,12 +426,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  console.log(`Algorithm hash: ${currentHash}`);
   console.log(`Processing ${jpgFiles.length} image(s) from ${IMAGES_DIR} (parallel)\n`);
 
   const entries = await Promise.all(jpgFiles.map(async imgPath => {
     const filename = path.basename(imgPath);
     try {
-      const entry = await processImage(imgPath);
+      const entry = await processImage(imgPath, currentHash);
       const label = entry.result.success ? 'ok' : `FAILED: ${entry.result.error}`;
       console.log(`  ${filename} ... ${label}`);
       return entry;
@@ -375,6 +465,8 @@ async function main(): Promise<void> {
 
   console.log(`\nWrote: ${OUTPUT_PATH}`);
   console.log(`Result: ${passCount}/${entries.length} passed`);
+
+  await db.end();
 }
 
 main().catch(err => {
