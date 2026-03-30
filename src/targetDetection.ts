@@ -1355,7 +1355,10 @@ export function findTarget(
         const r5med = medianR(r5pts);
         const r7med = r7pts.length >= 3 ? medianR(r7pts) : 0;
         const ratio = r5med > 0 && r7pts.length >= 3 ? r7med / r5med : 0;
-        if (r5med > 0 && (r7pts.length < 3 || ratio < 1.05 || ratio > 1.65)) {
+        if (process.env.DEBUG_RINGS) {
+          console.error(`[debug] R2 check: r5med=${r5med.toFixed(1)} r7med=${r7med.toFixed(1)} ratio=${ratio.toFixed(3)} n7=${r7pts.length}`);
+        }
+        if (r5med > 0 && (r7pts.length < 3 || ratio < 1.05 || ratio > 1.55)) {
           const predictedR7 = r5med * R7_R5_EXPECTED;
           transitionPoints[7] = r5pts.map(p => {
             const d = Math.hypot(p.x - cx, p.y - cy);

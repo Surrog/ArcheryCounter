@@ -414,6 +414,7 @@ function filterSegments(
     for (const rr of ringRadii) {
       if (Math.abs(tipDist - rr) < 25 && angleDiff(segAng, tNormTip) < 35 * Math.PI / 180) {
         if (Math.abs(nockDist - rr) > 15) continue; // nock is far from this ring → real arrow
+        if (tipDist < rr - 10) continue; // tip is well inside the ring → arrow entering from outside
         nAntiRing++;
         if (debug) console.error(`  [D3] REJECT anti-ring-tip tip=(${Math.round(tipX0)},${Math.round(tipY0)}) rr=${Math.round(rr)} tipR=${Math.round(tipDist)} nockR=${Math.round(nockDist)}`);
         rejected = true; break;
@@ -428,6 +429,7 @@ function filterSegments(
     for (const rr of ringRadii) {
       if (Math.abs(dToCenter - rr) < 25) {
         if (Math.abs(nockDist - rr) > 20) continue; // nock far from ring → real arrow
+        if (tipDist < rr - 10) continue; // tip well inside ring → arrow entering from outside
         const tangentAng = Math.atan2(my - cy, mx - cx) + Math.PI / 2;
         const tNorm = ((tangentAng % Math.PI) + Math.PI) % Math.PI;
         if (angleDiff(segAng, tNorm) < 35 * Math.PI / 180) {
@@ -691,10 +693,15 @@ function removeMidshaftDuplicates(
         }
       }
       // Case 3: nock-sharing fragment — two segments from the same physical
-      // arrow share nearly the same nock point.  The longer detection (a) is
-      // kept; the shorter fragment (b) is suppressed when its tip lies along
-      // the shaft of a.
-      if (a.nock && b.nock) {
+      // arrow share nearly the same nock point AND point in the same direction.
+      // The longer detection (a) is kept; the shorter fragment (b) is suppressed
+      // when its tip lies along the shaft of a.
+      // Require angle alignment (da < angleTol) to avoid suppressing distinct
+      // arrows that happen to have nocks in the same direction.
+      // Also require b's tip to be on a's shaft line (pd < perpTolPx) — if pd is
+      // large, a and b are parallel shafts from different arrows that happen to share
+      // a nock direction (e.g. two arrows shot from same position, landing at different rings).
+      if (a.nock && b.nock && da < angleTol && pd < perpTolPx) {
         const nockDist = Math.hypot(a.nock[0] - b.nock[0], a.nock[1] - b.nock[1]);
         if (nockDist < 20) {
           const sdx = a.nock[0] - a.tip[0], sdy = a.nock[1] - a.tip[1];
@@ -763,12 +770,14 @@ export function findArrows(
   const cx = inner.points.reduce((s, p) => s + p[0], 0) / inner.points.length;
   const cy = inner.points.reduce((s, p) => s + p[1], 0) / inner.points.length;
 
-  // Precompute ring radii for anti-ring filter
-  const ringRadii = rings.map(ring => {
-    const rcx = ring.points.reduce((s, p) => s + p[0], 0) / ring.points.length;
-    const rcy = ring.points.reduce((s, p) => s + p[1], 0) / ring.points.length;
-    return ring.points.reduce((s, p) => s + Math.hypot(p[0] - rcx, p[1] - rcy), 0) / ring.points.length;
-  });
+  // Precompute ring radii for zone classification and anti-ring filter.
+  // Measured from the algorithm centre (cx,cy) rather than each ring's own
+  // centroid: sparse rings (points only on one side due to boundary capping)
+  // have a drifted centroid, which understates the ring radius and produces
+  // wrong zone boundaries (e.g. rBlack < rBlue → black zone not skipped).
+  const ringRadii = rings.map(ring =>
+    ring.points.reduce((s, p) => s + Math.hypot(p[0] - cx, p[1] - cy), 0) / ring.points.length,
+  );
 
   // --- Zone-adaptive relative-dark-pixel Hough ---
   // Shaft pixels (V≈0.1–0.3) are marked only where they are significantly
@@ -814,9 +823,20 @@ export function findArrows(
   segs = segs.filter(seg => verifyDarkStripe(seg, rgba, width, height));
   // Second collinear merge: collapse shaft fragments that survived independent filtering.
   // Looser tolerances to handle Hough-bin quantisation differences between fragments.
+  const rBlackOuter = ringRadii.length > 7 ? ringRadii[7] : 145;
   segs = mergeCollinear(segs, /* angleTolDeg */ 8, /* perpTolPx */ 3, /* gapTolPx */ 150);
   // Drop any short fragments that remain after the second merge.
-  segs = segs.filter(seg => segLen(seg) >= 50);
+  // Outer-zone arrows (tip beyond black ring) have limited visible shaft since the
+  // black zone below is masked out; allow slightly shorter segments there (35-49 px)
+  // when the tip endpoint is clearly in the outer/white zone (beyond rBlack * 0.85).
+  segs = segs.filter(seg => {
+    const len = segLen(seg);
+    if (len >= 50) return true;
+    if (len < 35) return false;
+    const d0c = Math.hypot(seg[0][0] - cx, seg[0][1] - cy);
+    const d1c = Math.hypot(seg[1][0] - cx, seg[1][1] - cy);
+    return Math.min(d0c, d1c) > rBlackOuter * 0.85;
+  });
   if (DEBUG) {
     console.error(`[D4] after darkStripe+merge2+len50: ${segs.length} segs`);
     for (const s of segs.slice().sort((a, b) => segLen(b) - segLen(a)).slice(0, 20)) {
