@@ -4,7 +4,7 @@ import Svg, { Circle, Line, Path, Polygon } from 'react-native-svg';
 import type { SplineRing } from '../spline';
 import { sampleClosedSpline } from '../spline';
 import type { TargetBoundary, Pixel } from '../targetDetection';
-import type { ArrowDetection } from '../arrowDetection';
+import type { ScoredArrow } from '../scoring';
 import { computeLetterboxTransform } from '../letterboxTransform';
 
 export interface OverlayVisibility {
@@ -26,7 +26,7 @@ interface Props {
   /** Detected target paper boundary polygon in image pixels */
   paperBoundary?: TargetBoundary | null;
   /** Detected arrows */
-  arrows?: ArrowDetection[] | null;
+  arrows?: ScoredArrow[] | null;
   /** Raw per-ray ring transition points (index 0 = innermost ring) */
   ringPoints?: Pixel[][] | null;
   /** Original pixel dimensions of the source image */
@@ -147,29 +147,18 @@ export function RingOverlay({
             );
           })}
 
-          {/* Arrows — shaft line + tip dot */}
+          {/* Arrows — tip dot */}
           {visibility.arrows && arrows && arrows.map((arrow, i) => {
             const [tipX, tipY] = arrow.tip;
-            const nock = arrow.nock;
             return (
-              <React.Fragment key={i}>
-                {nock && (
-                  <Line
-                    x1={tx(tipX)} y1={ty(tipY)}
-                    x2={tx(nock[0])} y2={ty(nock[1])}
-                    stroke="#FF6600"
-                    strokeWidth={2}
-                  />
-                )}
-                {/* Tip: filled orange circle */}
-                <Circle
-                  cx={tx(tipX)} cy={ty(tipY)}
-                  r={5}
-                  fill="#FF6600"
-                  stroke="#FFFFFF"
-                  strokeWidth={1}
-                />
-              </React.Fragment>
+              <Circle
+                key={i}
+                cx={tx(tipX)} cy={ty(tipY)}
+                r={5}
+                fill="#FF6600"
+                stroke="#FFFFFF"
+                strokeWidth={1}
+              />
             );
           })}
 

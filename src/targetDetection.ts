@@ -1406,7 +1406,13 @@ export function findTarget(
     // Fit a boundary polygon (4–8 vertices) to the full set of boundary points.
     // The extra vertices capture bowed or folded paper edges that a fixed
     // 4-corner quad cannot represent.
-    const paperBoundary = fitBoundaryPolygon(smoothedPoints);
+    const rawBoundary = fitBoundaryPolygon(smoothedPoints);
+    const paperBoundary: TargetBoundary = {
+      points: rawBoundary.points.map(([x, y]) => [
+        Math.max(0, Math.min(width  - 1, x)),
+        Math.max(0, Math.min(height - 1, y)),
+      ]),
+    };
 
     // ringPoints only exposes the 4 directly-detected colour-transition rings
     // (indices 1,3,5,7) plus the regression-derived white rings (8,9).

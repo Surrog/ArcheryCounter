@@ -4,11 +4,18 @@ import * as crypto from 'crypto';
 import { Jimp } from 'jimp';
 import { Pool } from 'pg';
 import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel, RayDebugEntry } from '../src/targetDetection';
-import { findArrows, ArrowDetection } from '../src/arrowDetection';
+import { detectArrowsNN } from '../src/arrowDetector';
+import type { ScoredArrow } from '../src/scoring';
 import { SplineRing, sampleClosedSpline } from '../src/spline';
 
-const IMAGES_DIR = path.resolve(__dirname, '../images');
+const IMAGES_DIR  = path.resolve(__dirname, '../images');
 const OUTPUT_PATH = path.resolve(__dirname, '../report.html');
+
+const args       = process.argv.slice(2);
+const modelIdx   = args.indexOf('--model');
+const MODEL_PATH = modelIdx >= 0
+  ? path.resolve(args[modelIdx + 1])
+  : path.resolve(__dirname, 'nn/arrow_detector_fp32.onnx');
 
 // ── algorithm cache (mirrors regen-generated.ts) ──────────────────────────────
 
@@ -21,11 +28,20 @@ const db = new Pool({
 });
 
 function computeAlgorithmHash(): string {
-  const files = [
+  const hash = crypto.createHash('sha256');
+  // Hash source files
+  for (const f of [
     path.resolve(__dirname, '../src/targetDetection.ts'),
-    path.resolve(__dirname, '../src/arrowDetection.ts'),
-  ].filter(f => fs.existsSync(f)).map(f => fs.readFileSync(f));
-  return crypto.createHash('sha256').update(Buffer.concat(files)).digest('hex').slice(0, 16);
+    path.resolve(__dirname, '../src/arrowDetector.ts'),
+  ]) {
+    if (fs.existsSync(f)) hash.update(fs.readFileSync(f));
+  }
+  // Include model file size+mtime as a lightweight proxy for model version
+  if (fs.existsSync(MODEL_PATH)) {
+    const st = fs.statSync(MODEL_PATH);
+    hash.update(`${MODEL_PATH}:${st.size}:${st.mtimeMs}`);
+  }
+  return hash.digest('hex').slice(0, 16);
 }
 
 function scalePoints(points: [number, number][], sx: number, sy: number): [number, number][] {
@@ -42,10 +58,10 @@ function scaleBoundary(pb: any, sx: number, sy: number): TargetBoundary | undefi
   return { points: scalePoints(pts, sx, sy) } as unknown as TargetBoundary;
 }
 
-function scaleArrows(arrows: any[], sx: number, sy: number): ArrowDetection[] {
+function scaleArrows(arrows: any[], sx: number, sy: number): ScoredArrow[] {
   return arrows.map(a => ({
-    tip:  [a.tip[0] * sx, a.tip[1] * sy] as [number, number],
-    nock: a.nock ? [a.nock[0] * sx, a.nock[1] * sy] as [number, number] : null,
+    tip:   [a.tip[0] * sx, a.tip[1] * sy] as [number, number],
+    score: a.score ?? 0,
   }));
 }
 
@@ -64,7 +80,7 @@ interface ImageEntry {
   width: number;
   height: number;
   result: ArcheryResult;
-  arrows: ArrowDetection[];
+  arrows: ScoredArrow[];
 }
 
 async function processImage(imgPath: string, currentHash: string): Promise<ImageEntry> {
@@ -99,7 +115,9 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
   // ── cache miss: run detection on the same ≤1200px image ──────────────────
   const rgba = new Uint8Array(img.bitmap.data.buffer);
   const result = findTarget(rgba, width, height);
-  const arrowsFull = result.success ? findArrows(rgba, width, height, result) : [];
+  const arrowsFull = result.success
+    ? await detectArrowsNN(rgba, width, height, MODEL_PATH)
+    : [];
 
   // Persist to DB
   await db.query(
@@ -155,7 +173,7 @@ function renderSvg(
   width: number,
   height: number,
   rings: SplineRing[],
-  arrows: ArrowDetection[],
+  arrows: ScoredArrow[],
   paperBoundary?: TargetBoundary,
   ringPoints?: Pixel[][],
   rayDebug?: RayDebugEntry[],
@@ -241,15 +259,13 @@ function renderSvg(
     }).join('');
   })();
 
-  // Arrows — shaft line + tip dot + index label
-  const arrowsSvg = arrows.map((a, i) => {
+  // Arrows — tip dot + score label
+  const arrowsSvg = arrows.map((a) => {
     const [tx, ty] = a.tip;
-    const shaft = a.nock
-      ? `<line x1="${a.nock[0].toFixed(1)}" y1="${a.nock[1].toFixed(1)}" x2="${tx.toFixed(1)}" y2="${ty.toFixed(1)}" stroke="#FF6600" stroke-width="2.5" opacity="0.9"/>`
-      : '';
-    const dot = `<circle cx="${tx.toFixed(1)}" cy="${ty.toFixed(1)}" r="5" fill="#FF6600" stroke="#fff" stroke-width="1.5"/>`;
-    const label = `<text x="${tx.toFixed(1)}" y="${(ty - 8).toFixed(1)}" font-size="11" font-weight="bold" fill="#FF6600" stroke="#000" stroke-width="2" paint-order="stroke" text-anchor="middle">${i + 1}</text>`;
-    return shaft + dot + label;
+    const scoreLabel = a.score === 'X' ? 'X' : String(a.score);
+    const dot   = `<circle cx="${tx.toFixed(1)}" cy="${ty.toFixed(1)}" r="6" fill="#FF6600" stroke="#fff" stroke-width="1.5"/>`;
+    const label = `<text x="${tx.toFixed(1)}" y="${(ty - 9).toFixed(1)}" font-size="13" font-weight="bold" fill="#FF6600" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${scoreLabel}</text>`;
+    return dot + label;
   }).join('\n    ');
 
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="display:block;max-width:100%;height:auto">
@@ -298,21 +314,19 @@ function renderRingTable(rings: SplineRing[], paperBoundary?: TargetBoundary): s
   </table>`;
 }
 
-function renderArrowTable(arrows: ArrowDetection[]): string {
+function renderArrowTable(arrows: ScoredArrow[]): string {
   if (arrows.length === 0) return '<p style="color:#666;font-size:0.8rem;padding:4px 0">No arrows detected.</p>';
   const rows = arrows.map((a, i) => {
     const [tx, ty] = a.tip;
-    const nockStr = a.nock ? `${a.nock[0].toFixed(0)}, ${a.nock[1].toFixed(0)}` : '—';
-    const len = a.nock ? Math.hypot(a.nock[0] - tx, a.nock[1] - ty).toFixed(0) : '—';
+    const scoreLabel = a.score === 'X' ? 'X' : String(a.score);
     return `<tr>
       <td>${i + 1}</td>
       <td>${tx.toFixed(0)}, ${ty.toFixed(0)}</td>
-      <td>${nockStr}</td>
-      <td>${len}</td>
+      <td style="font-weight:bold;color:#FF6600">${scoreLabel}</td>
     </tr>`;
   }).join('\n');
   return `<table>
-    <thead><tr><th>#</th><th>tip (x, y)</th><th>nock (x, y)</th><th>length px</th></tr></thead>
+    <thead><tr><th>#</th><th>tip (x, y)</th><th>score</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -429,25 +443,26 @@ async function main(): Promise<void> {
   console.log(`Algorithm hash: ${currentHash}`);
   console.log(`Processing ${jpgFiles.length} image(s) from ${IMAGES_DIR} (parallel)\n`);
 
-  const entries = await Promise.all(jpgFiles.map(async imgPath => {
+  const entries: ImageEntry[] = [];
+  for (const imgPath of jpgFiles) {
     const filename = path.basename(imgPath);
     try {
       const entry = await processImage(imgPath, currentHash);
       const label = entry.result.success ? 'ok' : `FAILED: ${entry.result.error}`;
       console.log(`  ${filename} ... ${label}`);
-      return entry;
+      entries.push(entry);
     } catch (err) {
       console.log(`  ${filename} ... EXCEPTION: ${err}`);
-      return {
+      entries.push({
         filename,
         base64: '',
         width: 0,
         height: 0,
         result: { success: false, rings: [], error: String(err) },
         arrows: [],
-      } as ImageEntry;
+      } as ImageEntry);
     }
-  }));
+  }
 
   // Stream HTML to disk — avoids holding the full report string in memory.
   const passCount = entries.filter(e => e.result.success).length;

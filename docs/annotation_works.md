@@ -32,14 +32,17 @@ generated(filename TEXT PK, algorithm_hash TEXT, paper_boundary JSONB, rings JSO
 | Add boundary vertex | Ctrl + click on canvas |
 | Add ring control point | Alt + click near ring curve |
 | Remove vertex / ring point / arrow endpoint | Shift + click handle |
-| Add arrow (tip then nock) | A key, or "Add arrow" button |
-| Score picker (after placing nock) | Keys 1–9, X (inner gold), M (miss), Esc (null) |
+| Add arrow (tip) | A key, or "Add arrow" button |
+| Score picker (after placing tip) | Keys 1–9, X (inner gold), M (miss), Esc (null) |
+| Toggle ring overlay + handles | "Rings" checkbox |
+| Toggle boundary overlay + handles | "Boundary" checkbox |
 | Toggle arrows layer | "Arrows" checkbox |
+| Save and go to next image | N key |
 | Save | Save button (shows reason when disabled) |
 
 ---
 
-## Completed features (AW-1 – AW-6)
+## Completed features (AW-1 – AW-9)
 
 | Feature | Notes |
 |---|---|
@@ -52,3 +55,9 @@ generated(filename TEXT PK, algorithm_hash TEXT, paper_boundary JSONB, rings JSO
 | Ring control point insertion | Alt+click inserts point on nearest spline segment |
 | Save button feedback | Inline message explains what's missing when save is disabled |
 | Client + server save logging | Console logs on both sides for diagnosing save failures |
+| Delete image (AW-7) | `DELETE /api/image/:filename`; removes file + DB rows + caches; SSE broadcast |
+| Remove nock annotation (AW-8) | State machine simplified to `idle → place-tip → score-input`; DB migration script (`migrate-remove-nock.ts`) removes stale nock fields |
+| Floating score picker (AW-9) | `position: fixed` overlay appearing near the tip; centered on click, clamped to ±50 px vertically |
+| Handles merged into layer toggles | Rings checkbox controls ring splines + handles; Boundary checkbox controls boundary polygon + handles; standalone Handles checkbox removed |
+| N shortcut saves and advances | Pressing N saves current annotations then moves to the next image |
+| Boundary coordinate clamping | All `paperBoundary` points clamped to `[0, W-1] × [0, H-1]` at source (`targetDetection.ts`), on every server insert path, and in the save endpoint; `migrate-clamp-boundary.ts` fixed existing DB rows |

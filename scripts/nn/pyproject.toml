@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=1.24",
     "onnx>=1.15",
     "onnxruntime>=1.17",
+    "onnxscript>=0.6.2",
     "pillow>=10.0",
     "psycopg2-binary>=2.9.11",
     "scipy>=1.17.1",
@@ -17,7 +18,7 @@ dependencies = [
     "tqdm>=4.67.3",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.0",
 ]

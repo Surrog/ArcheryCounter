@@ -5,7 +5,6 @@ ArrowDataset — loads annotations from PostgreSQL, letterbox-resizes images to
 Outputs per sample:
   image      : (4, 512, 512) float32  — normalised RGB + radial distance channel
   tip_hm     : (1, 128, 128) float32  — Gaussian heatmap of tip positions
-  nock_hm    : (1, 128, 128) float32  — Gaussian heatmap of nock positions
   score_map  : (128, 128)    int64    — score label at each tip pixel, -1 = ignore
   meta       : dict with filename, scale, pad_x, pad_y for coord recovery
 """
@@ -13,6 +12,7 @@ Outputs per sample:
 import os
 import math
 import json
+from functools import lru_cache
 
 import numpy as np
 from PIL import Image
@@ -22,9 +22,9 @@ from torch.utils.data import Dataset
 import albumentations as A
 
 # ── constants ────────────────────────────────────────────────────────────────
-INPUT_SIZE   = 512
-HEATMAP_SIZE = 128
-SIGMA        = 3.0          # Gaussian sigma in heatmap pixels
+INPUT_SIZE   = 640
+HEATMAP_SIZE = 160
+SIGMA        = 2.0          # Gaussian sigma in heatmap pixels
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD  = (0.229, 0.224, 0.225)
 
@@ -52,6 +52,29 @@ def letterbox(img: Image.Image, size: int = INPUT_SIZE):
     out = Image.new('RGB', (size, size), (0, 0, 0))
     out.paste(img, (pad_x, pad_y))
     return out, scale, pad_x, pad_y
+
+
+@lru_cache(maxsize=80)
+def _load_letterboxed(path: str) -> tuple:
+    """Load, pre-scale to ≤1200px, and letterbox an image.
+
+    Cached at module level so each worker process builds its own bounded LRU
+    (maxsize=80 × ~1.2 MB ≈ 96 MB per worker) rather than pre-loading everything
+    into the main process and forking 4+ copies of the full dataset.
+
+    Returns (img_np uint8, scale, pad_x, pad_y, orig_w, orig_h).
+    """
+    MAX_SIDE = 1200
+    img = Image.open(path).convert('RGB')
+    if max(img.size) > MAX_SIDE:
+        pre_scale = MAX_SIDE / max(img.size)
+        img = img.resize(
+            (round(img.width * pre_scale), round(img.height * pre_scale)),
+            Image.BILINEAR,
+        )
+    orig_w, orig_h = img.size
+    img_lb, scale, pad_x, pad_y = letterbox(img)
+    return np.array(img_lb, dtype=np.uint8), scale, pad_x, pad_y, orig_w, orig_h
 
 
 def make_radial_channel(rings, scale: float, pad_x: int, pad_y: int,
@@ -141,9 +164,11 @@ class ArrowDataset(Dataset):
         augment: bool  = True,
         val_split: float = 0.1,
         is_val: bool   = False,
+        use_radial: bool = True,
     ):
         self.images_dir = images_dir
         self.augment    = augment and not is_val
+        self.use_radial = use_radial
 
         # ── load annotations ──────────────────────────────────────────────
         conn = psycopg2.connect(db_url)
@@ -177,6 +202,10 @@ class ArrowDataset(Dataset):
                 continue
             self.samples.append((fname, valid, rings))
 
+        # Images are loaded on demand via _load_letterboxed() (module-level LRU
+        # cache, maxsize=80).  Each worker process builds its own LRU lazily,
+        # so memory is bounded per-worker rather than forked N times from main.
+
         # ── augmentation pipelines ────────────────────────────────────────
         # Spatial transforms (applied identically to image and radial channel
         # via ReplayCompose; keypoints are transformed automatically).
@@ -195,7 +224,7 @@ class ArrowDataset(Dataset):
             ],
             keypoint_params=A.KeypointParams(
                 format='xy',
-                label_fields=['kp_kinds', 'kp_arrow_idxs'],
+                label_fields=['kp_arrow_idxs'],
                 remove_invisible=True,
             ),
         )
@@ -213,87 +242,54 @@ class ArrowDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         fname, arrows, rings = self.samples[idx]
 
-        img = Image.open(os.path.join(self.images_dir, fname)).convert('RGB')
-        img_lb, scale, pad_x, pad_y = letterbox(img)
+        path = os.path.join(self.images_dir, fname)
+        img_np_cached, scale, pad_x, pad_y, orig_w, orig_h = _load_letterboxed(path)
+        img_np = img_np_cached.copy()   # copy so augmentation doesn't mutate the cache
+        radial = make_radial_channel(rings, scale, pad_x, pad_y)
 
-        img_np  = np.array(img_lb, dtype=np.uint8)            # (512, 512, 3)
-        radial  = make_radial_channel(rings, scale, pad_x, pad_y)  # (512, 512)
-
-        # Collect keypoints (tips + nocks) in letterboxed 512-space.
-        # Two separate label fields (kp_kinds, kp_arrow_idxs) instead of one
-        # field of tuples — required for compatibility with newer albumentations.
+        # Collect tip keypoints in letterboxed 512-space.
         keypoints     = []
-        kp_kinds      = []   # 'tip' or 'nock'
         kp_arrow_idxs = []   # arrow index (int)
-        scores_raw    = []   # parallel to tip entries, indexed by arrow index
+        scores_raw    = []   # parallel to keypoints
 
         for i, arrow in enumerate(arrows):
-            tip  = arrow['tip']
-            nock = arrow.get('nock')
-            tx   = tip[0] * scale + pad_x
-            ty   = tip[1] * scale + pad_y
+            tip = arrow['tip']
+            tx  = tip[0] * scale + pad_x
+            ty  = tip[1] * scale + pad_y
+            # Skip tips outside the letterboxed image (annotation out of bounds)
+            if not (0 <= tx < INPUT_SIZE and 0 <= ty < INPUT_SIZE):
+                continue
             keypoints.append((tx, ty))
-            kp_kinds.append('tip')
             kp_arrow_idxs.append(i)
             scores_raw.append(score_tip(tip, rings))
-
-            if nock is not None:
-                nx = nock[0] * scale + pad_x
-                ny = nock[1] * scale + pad_y
-                keypoints.append((nx, ny))
-                kp_kinds.append('nock')
-                kp_arrow_idxs.append(i)
 
         # ── spatial augmentation ──────────────────────────────────────────
         if self.augment and keypoints:
             res = self._spatial(
                 image=img_np,
                 keypoints=keypoints,
-                kp_kinds=kp_kinds,
                 kp_arrow_idxs=kp_arrow_idxs,
             )
-            img_np          = res['image']
-            aug_kps         = res['keypoints']
-            aug_kinds       = res['kp_kinds']
-            aug_arrow_idxs  = res['kp_arrow_idxs']
+            img_np         = res['image']
+            aug_kps        = res['keypoints']
+            aug_arrow_idxs = res['kp_arrow_idxs']
 
             # Replay exact same spatial transform on the radial channel.
-            # Must supply keypoints + label_fields to satisfy ReplayCompose validation.
             rad_rgb = np.stack([radial] * 3, axis=-1)   # fake 3-ch for replay
             rad_res = A.ReplayCompose.replay(
                 res['replay'], image=rad_rgb,
-                keypoints=[], kp_kinds=[], kp_arrow_idxs=[],
+                keypoints=[], kp_arrow_idxs=[],
             )
-            radial  = rad_res['image'][:, :, 0]
+            radial = rad_res['image'][:, :, 0]
 
-            # Rebuild tip/nock dicts from surviving keypoints
-            tip_map  = {}   # arrow_idx -> (x, y)
-            nock_map = {}
-            for (x, y), kind, arr_i in zip(aug_kps, aug_kinds, aug_arrow_idxs):
-                arr_i = int(arr_i)   # albumentations returns label fields as float
-                if kind == 'tip':
-                    tip_map[arr_i]  = (x, y)
-                else:
-                    nock_map[arr_i] = (x, y)
+            # Rebuild surviving tips from augmented keypoints
+            tip_map = {}   # arrow_idx -> (x, y)
+            for (x, y), arr_i in zip(aug_kps, aug_arrow_idxs):
+                tip_map[int(arr_i)] = (x, y)
 
-            # Only keep arrows whose tip survived augmentation
             surviving  = sorted(tip_map)
             keypoints  = [tip_map[i] for i in surviving]
             scores_raw = [scores_raw[i] for i in surviving]
-            nock_pts   = [nock_map.get(i) for i in surviving]
-        else:
-            nock_pts = [
-                next(
-                    ((kp[0], kp[1]) for kp, kind, arr_i in zip(keypoints, kp_kinds, kp_arrow_idxs)
-                     if kind == 'nock' and arr_i == i),
-                    None,
-                )
-                for i in range(len(arrows))
-            ]
-            tip_pts  = [kp for kp, kind in zip(keypoints, kp_kinds) if kind == 'tip']
-            keypoints  = tip_pts
-            if not self.augment:
-                nock_pts = nock_pts   # already built
 
         # ── colour augmentation (image only) ──────────────────────────────
         if self.augment:
@@ -302,8 +298,7 @@ class ArrowDataset(Dataset):
         # ── build heatmaps ────────────────────────────────────────────────
         hs = HEATMAP_SIZE / INPUT_SIZE   # 0.25
 
-        tip_hm   = np.zeros((HEATMAP_SIZE, HEATMAP_SIZE), dtype=np.float32)
-        nock_hm  = np.zeros((HEATMAP_SIZE, HEATMAP_SIZE), dtype=np.float32)
+        tip_hm    = np.zeros((HEATMAP_SIZE, HEATMAP_SIZE), dtype=np.float32)
         score_map = np.full((HEATMAP_SIZE, HEATMAP_SIZE), -1, dtype=np.int64)
 
         for (tx, ty), sc in zip(keypoints, scores_raw):
@@ -314,11 +309,6 @@ class ArrowDataset(Dataset):
             if 0 <= ihx < HEATMAP_SIZE and 0 <= ihy < HEATMAP_SIZE:
                 score_map[ihy, ihx] = sc
 
-        for nk in nock_pts:
-            if nk is not None:
-                hx, hy = nk[0] * hs, nk[1] * hs
-                draw_gaussian(nock_hm, hx, hy, SIGMA)
-
         # ── assemble tensors ──────────────────────────────────────────────
         # RGB: normalise with ImageNet stats
         img_f = img_np.astype(np.float32) / 255.0
@@ -327,20 +317,22 @@ class ArrowDataset(Dataset):
         img_f = (img_f - mean) / std          # (512, 512, 3)
         img_t = torch.from_numpy(img_f).permute(2, 0, 1)   # (3, 512, 512)
 
-        rad_t = torch.from_numpy(radial).unsqueeze(0)       # (1, 512, 512)
-        x     = torch.cat([img_t, rad_t], dim=0)            # (4, 512, 512)
+        if self.use_radial:
+            rad_t = torch.from_numpy(radial).unsqueeze(0)
+            x = torch.cat([img_t, rad_t], dim=0)            # (4, H, W)
+        else:
+            x = img_t                                        # (3, H, W)
 
         return {
             'image':     x,
             'tip_hm':    torch.from_numpy(tip_hm).unsqueeze(0),    # (1,128,128)
-            'nock_hm':   torch.from_numpy(nock_hm).unsqueeze(0),   # (1,128,128)
             'score_map': torch.from_numpy(score_map),               # (128,128)
             'meta': {
                 'filename': fname,
                 'scale':    scale,
                 'pad_x':    pad_x,
                 'pad_y':    pad_y,
-                'orig_w':   img.width,
-                'orig_h':   img.height,
+                'orig_w':   orig_w,
+                'orig_h':   orig_h,
             },
         }

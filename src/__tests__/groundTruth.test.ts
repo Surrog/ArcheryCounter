@@ -30,7 +30,7 @@ interface SplineRing { points: [number, number][]; }
 
 interface ArrowAnnotation {
   tip:   [number, number];
-  nock:  [number, number];
+  nock:  [number, number] | null;
   score: number | 'X' | null;
 }
 
@@ -123,7 +123,6 @@ function pointToSplineDist(pt: [number, number], ring: SplineRing): number {
 function computeAlgorithmHash(): string {
   const files = [
     path.resolve(__dirname, '../../src/targetDetection.ts'),
-    path.resolve(__dirname, '../../src/arrowDetection.ts'),
   ].filter(f => fs.existsSync(f)).map(f => fs.readFileSync(f));
   return crypto.createHash('sha256').update(Buffer.concat(files)).digest('hex').slice(0, 16);
 }
@@ -400,16 +399,6 @@ test.each(imageFiles)(
         }
         if (bestIdx >= 0) {
           matchedDet2.add(bestIdx);
-          const det = detected[bestIdx];
-          if (det.nock !== null) {
-            const nd = Math.hypot(det.nock[0] - annArrow.nock[0], det.nock[1] - annArrow.nock[1]);
-            if (nd >= 40) {
-              console.error(
-                `[${filename}] nock info: ann tip=${fmtPt(annArrow.tip)} nock=${fmtPt(annArrow.nock)}` +
-                ` det nock=${fmtPt(det.nock)} dist=${nd.toFixed(1)}px`,
-              );
-            }
-          }
         }
       }
     }

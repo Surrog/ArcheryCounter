@@ -1,9 +1,8 @@
 """
-ArrowDetector — MobileNetV2 backbone + FPN neck + three prediction heads.
+ArrowDetector — MobileNetV2 backbone + FPN neck + two prediction heads.
 
 Heads:
   tip_hm    : (B, 1, 128, 128) Gaussian heatmap of arrow tip positions
-  nock_hm   : (B, 1, 128, 128) Gaussian heatmap of nock positions
   score_map : (B, 11, 128, 128) score logits at every spatial position
               (used at detected tip locations; 0 = miss, 1–10 = score)
 
@@ -13,26 +12,33 @@ The first conv of MobileNetV2 is extended from 3→4 input channels; the new
 channel's weights are initialised to zero so pretrained behaviour is preserved.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
+from torchvision.models import (
+    mobilenet_v2, MobileNet_V2_Weights,
+    mobilenet_v3_large, MobileNet_V3_Large_Weights,
+)
 
-# ── Feature-map indices in MobileNetV2.features for a 512×512 input ──────────
-# Index 3  → stride 4  → 128 × 128,  24 ch
-# Index 6  → stride 8  →  64 ×  64,  32 ch
-# Index 13 → stride 16 →  32 ×  32,  96 ch
-# Index 18 → stride 32 →  16 ×  16, 1280 ch
+# ── Backbone tap configs ───────────────────────────────────────────────────────
+# Indices into model.features; channels at those indices; valid for 640×640 input.
 
-C2_IDX = 3
-C3_IDX = 6
-C4_IDX = 13
-C5_IDX = 18
-
-C2_CH  = 24
-C3_CH  = 32
-C4_CH  = 96
-C5_CH  = 1280
+BACKBONE_CONFIGS = {
+    'mobilenet_v2': {
+        'tap_idxs': (3, 6, 13, 18),   # strides 4, 8, 16, 32
+        'tap_chs':  (24, 32, 96, 1280),
+        'weights':  MobileNet_V2_Weights.IMAGENET1K_V1,
+        'builder':  lambda w: mobilenet_v2(weights=w),
+    },
+    'mobilenet_v3_large': {
+        'tap_idxs': (3, 6, 12, 16),   # strides 4, 8, 16, 32
+        'tap_chs':  (24, 40, 112, 960),
+        'weights':  MobileNet_V3_Large_Weights.IMAGENET1K_V1,
+        'builder':  lambda w: mobilenet_v3_large(weights=w),
+    },
+}
 
 FPN_CH = 128     # channel width used throughout the FPN
 N_SCORES = 11    # classes: 0 = miss, 1-10 = archery score
@@ -50,19 +56,16 @@ class ConvBnRelu(nn.Sequential):
 class FPN(nn.Module):
     """Lightweight top-down Feature Pyramid Network.
 
-    Takes a dict of feature maps {stride: tensor} and returns P2
-    (the highest-resolution level, 128 × 128 for a 512 input).
+    Takes four feature maps (c2..c5) and returns P2 (highest resolution).
     """
 
-    def __init__(self):
+    def __init__(self, c2_ch, c3_ch, c4_ch, c5_ch):
         super().__init__()
-        # Lateral 1×1 convs to project backbone channels → FPN_CH
-        self.lat5 = nn.Conv2d(C5_CH, FPN_CH, 1)
-        self.lat4 = nn.Conv2d(C4_CH, FPN_CH, 1)
-        self.lat3 = nn.Conv2d(C3_CH, FPN_CH, 1)
-        self.lat2 = nn.Conv2d(C2_CH, FPN_CH, 1)
+        self.lat5 = nn.Conv2d(c5_ch, FPN_CH, 1)
+        self.lat4 = nn.Conv2d(c4_ch, FPN_CH, 1)
+        self.lat3 = nn.Conv2d(c3_ch, FPN_CH, 1)
+        self.lat2 = nn.Conv2d(c2_ch, FPN_CH, 1)
 
-        # 3×3 smoothing after each merge
         self.smooth4 = ConvBnRelu(FPN_CH, FPN_CH)
         self.smooth3 = ConvBnRelu(FPN_CH, FPN_CH)
         self.smooth2 = ConvBnRelu(FPN_CH, FPN_CH)
@@ -72,11 +75,18 @@ class FPN(nn.Module):
         p4 = self.smooth4(self.lat4(c4) + F.interpolate(p5, size=c4.shape[-2:], mode='bilinear', align_corners=False))
         p3 = self.smooth3(self.lat3(c3) + F.interpolate(p4, size=c3.shape[-2:], mode='bilinear', align_corners=False))
         p2 = self.smooth2(self.lat2(c2) + F.interpolate(p3, size=c2.shape[-2:], mode='bilinear', align_corners=False))
-        return p2   # (B, FPN_CH, 128, 128)
+        return p2
 
 
 class HeatmapHead(nn.Sequential):
     """Small conv head: (B, FPN_CH, H, W) → (B, 1, H, W) in [0, 1]."""
+
+    # Prior probability of a positive pixel (~5 tips spread over 128×128 heatmap).
+    # Initialising the bias to log(prior/(1-prior)) makes sigmoid outputs start
+    # near `prior` rather than 0.5.  Without this, the 16 000 negative pixels
+    # drive the bias sharply negative in the first epoch, collapsing all outputs
+    # below the 0.35 recall threshold before the positive signal can compete.
+    _PRIOR = 0.01
 
     def __init__(self):
         super().__init__(
@@ -84,6 +94,7 @@ class HeatmapHead(nn.Sequential):
             nn.Conv2d(64, 1, 1),
             nn.Sigmoid(),
         )
+        nn.init.constant_(self[-2].bias, math.log(self._PRIOR / (1 - self._PRIOR)))
 
 
 class ScoreHead(nn.Sequential):
@@ -100,40 +111,46 @@ class ScoreHead(nn.Sequential):
 
 
 class ArrowDetector(nn.Module):
-    """Full model: backbone + FPN + tip/nock/score heads."""
+    """Full model: backbone + FPN + tip/score heads."""
 
-    def __init__(self):
+    def __init__(self, in_channels: int = 4, backbone: str = 'mobilenet_v2'):
+        """
+        Args:
+            in_channels: 4 = RGB + radial (default), 3 = RGB only.
+            backbone: 'mobilenet_v2' (default) or 'mobilenet_v3_large'.
+        """
         super().__init__()
 
+        cfg   = BACKBONE_CONFIGS[backbone]
+        c2i, c3i, c4i, c5i = cfg['tap_idxs']
+        c2ch, c3ch, c4ch, c5ch = cfg['tap_chs']
+
         # ── backbone ──────────────────────────────────────────────────────
-        base = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
+        base  = cfg['builder'](cfg['weights'])
         feats = base.features
 
-        # Extend first conv to accept 4 channels (RGB + radial distance).
-        # Weights for channels 0-2 come from pretrained; channel 3 init to 0.
         old_conv = feats[0][0]
-        new_conv = nn.Conv2d(
-            4, old_conv.out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            bias=False,
-        )
-        with torch.no_grad():
-            new_conv.weight[:, :3] = old_conv.weight
-            new_conv.weight[:, 3:] = 0.0
-        feats[0][0] = new_conv
+        if in_channels != 3:
+            new_conv = nn.Conv2d(
+                in_channels, old_conv.out_channels,
+                kernel_size=old_conv.kernel_size,
+                stride=old_conv.stride,
+                padding=old_conv.padding,
+                bias=False,
+            )
+            with torch.no_grad():
+                new_conv.weight[:, :3] = old_conv.weight
+                new_conv.weight[:, 3:] = 0.0
+            feats[0][0] = new_conv
 
-        # Split backbone into four segments ending at the tap points
-        self.stage2 = nn.Sequential(*feats[:C2_IDX + 1])   # → (B,  24, 128, 128)
-        self.stage3 = nn.Sequential(*feats[C2_IDX + 1: C3_IDX + 1])  # → (B,  32,  64,  64)
-        self.stage4 = nn.Sequential(*feats[C3_IDX + 1: C4_IDX + 1])  # → (B,  96,  32,  32)
-        self.stage5 = nn.Sequential(*feats[C4_IDX + 1: C5_IDX + 1])  # → (B,1280,  16,  16)
+        self.stage2 = nn.Sequential(*feats[:c2i + 1])
+        self.stage3 = nn.Sequential(*feats[c2i + 1: c3i + 1])
+        self.stage4 = nn.Sequential(*feats[c3i + 1: c4i + 1])
+        self.stage5 = nn.Sequential(*feats[c4i + 1: c5i + 1])
 
         # ── neck + heads ──────────────────────────────────────────────────
-        self.fpn        = FPN()
+        self.fpn        = FPN(c2ch, c3ch, c4ch, c5ch)
         self.tip_head   = HeatmapHead()
-        self.nock_head  = HeatmapHead()
         self.score_head = ScoreHead()
 
     def forward(self, x):
@@ -142,7 +159,6 @@ class ArrowDetector(nn.Module):
             x: (B, 4, 512, 512)
         Returns:
             tip_hm    : (B, 1, 128, 128)
-            nock_hm   : (B, 1, 128, 128)
             score_map : (B, 11, 128, 128)
         """
         c2 = self.stage2(x)
@@ -153,10 +169,9 @@ class ArrowDetector(nn.Module):
         p2 = self.fpn(c2, c3, c4, c5)
 
         tip_hm    = self.tip_head(p2)
-        nock_hm   = self.nock_head(p2)
         score_map = self.score_head(p2)
 
-        return tip_hm, nock_hm, score_map
+        return tip_hm, score_map
 
 
 # ── post-processing helpers (used at inference) ───────────────────────────────
@@ -174,7 +189,7 @@ def heatmap_nms(hm: torch.Tensor, kernel: int = 5) -> torch.Tensor:
 
 
 def decode_heatmap(tip_hm: torch.Tensor, score_map: torch.Tensor,
-                   threshold: float = 0.35,
+                   threshold: float = 0.85,
                    scale: float = 1.0, pad_x: int = 0, pad_y: int = 0,
                    input_size: int = 512, heatmap_size: int = 128):
     """Extract arrow tips from heatmap and map back to original image coords.

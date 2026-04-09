@@ -11,11 +11,9 @@ import { pointInClosedSpline, splineCentroid, splineRadius } from './spline';
 import type { SplineRing } from './spline';
 import { classifyPixelZone, rgbToHsv } from './targetDetection';
 import type { ColourCalibration, ZoneName } from './targetDetection';
-import type { ArrowDetection } from './arrowDetection';
 
 export interface ScoredArrow {
   tip:            [number, number];
-  nock:           [number, number] | null;
   score:          number | 'X';   // 0 = miss, 1–10 or 'X'
   lowConfidence?: boolean;        // geometric and colour zone disagree
 }
@@ -90,31 +88,3 @@ export function samplePatchZone(
   return best;
 }
 
-/**
- * Scores an arrow and cross-checks with the colour zone at its tip.
- * Sets lowConfidence = true when the geometric score and the observed
- * colour zone are inconsistent (e.g. score says 8 but pixel is blue).
- */
-export function scoreArrowWithCheck(
-  rgba: Uint8Array, width: number, height: number,
-  arrow: ArrowDetection,
-  rings: SplineRing[],
-  cal: ColourCalibration,
-): ScoredArrow {
-  const score        = scoreArrow(arrow.tip, rings);
-  const zone         = samplePatchZone(rgba, width, height, arrow.tip, cal);
-  const numericScore = score === 'X' ? 10 : score;
-
-  let lowConfidence: boolean | undefined;
-  if (zone !== null && numericScore > 0) {
-    const [lo, hi] = ZONE_SCORE_RANGE[zone];
-    if (numericScore < lo || numericScore > hi) lowConfidence = true;
-  }
-
-  return {
-    tip:  arrow.tip,
-    nock: arrow.nock,
-    score,
-    ...(lowConfidence ? { lowConfidence: true } : {}),
-  };
-}

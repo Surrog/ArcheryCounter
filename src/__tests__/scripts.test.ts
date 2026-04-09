@@ -101,7 +101,7 @@ const DB_CONFIG = {
 
 /** Compute the same algorithm hash the server uses. */
 function computeAlgorithmHash(): string {
-  const files = ['src/targetDetection.ts', 'src/arrowDetection.ts']
+  const files = ['src/targetDetection.ts']
     .map(f => path.join(ROOT, f))
     .filter(f => fs.existsSync(f))
     .map(f => fs.readFileSync(f));
@@ -407,7 +407,7 @@ test('annotate: startup wipes corrupt annotation rows; invalid annotations delet
     }),
   );
   const VALID_BOUNDARY = JSON.stringify([[50, 50], [950, 50], [950, 750], [50, 750]]);
-  const VALID_ARROWS   = JSON.stringify([{ tip: [500, 400], nock: [600, 500], score: 9 }]);
+  const VALID_ARROWS   = JSON.stringify([{ tip: [500, 400], nock: null, score: 9 }]);
 
   // 1. Inject known state so the test is deterministic.
   const db = new Pool(DB_CONFIG);
@@ -501,7 +501,7 @@ test('annotate: GET /api/annotations deletes incomplete annotations; POST /api/s
     }),
   );
   const BOUNDARY = JSON.stringify([[50, 50], [950, 50], [950, 750], [50, 750]]);
-  const ARROWS   = JSON.stringify([{ tip: [500, 400], nock: [600, 500], score: 9 }]);
+  const ARROWS   = JSON.stringify([{ tip: [500, 400], nock: null, score: 9 }]);
 
   // Seed: INCOMPLETE_FILE has only 9 rings → invalid (isValidAnnotation requires 10)
   //        VALID_FILE has all three components → valid
@@ -550,7 +550,7 @@ test('annotate: GET /api/annotations deletes incomplete annotations; POST /api/s
         [INCOMPLETE_FILE]: {
           paperBoundary: [[50, 50], [950, 50], [950, 750], [50, 750]],
           rings: JSON.parse(INCOMPLETE_RINGS), // invalid: only 9 rings
-          arrows: [{ tip: [500, 400], nock: [600, 500], score: 9 }],
+          arrows: [{ tip: [500, 400], nock: null, score: 9 }],
         },
       }),
     });

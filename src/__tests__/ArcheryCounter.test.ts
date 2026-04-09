@@ -1,45 +1,60 @@
 import ArcheryCounter from '../ArcheryCounter';
 
 jest.mock('../targetDetection', () => ({ findTarget: jest.fn() }));
-jest.mock('../arrowDetection',  () => ({ findArrows:  jest.fn() }));
+jest.mock('../arrowDetector',   () => ({ detectArrowsNN: jest.fn() }));
 jest.mock('../imageLoader',     () => ({ decodeBase64Jpeg: jest.fn() }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { findTarget }      = require('../targetDetection') as { findTarget: jest.Mock };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { findArrows }      = require('../arrowDetection')  as { findArrows:  jest.Mock };
+const { detectArrowsNN }  = require('../arrowDetector')   as { detectArrowsNN: jest.Mock };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { decodeBase64Jpeg } = require('../imageLoader')     as { decodeBase64Jpeg: jest.Mock };
 
-const MOCK_RGBA   = new Uint8Array(4);
-const MOCK_W      = 100;
-const MOCK_H      = 100;
-const MOCK_RINGS  = [{ points: [[50, 50], [60, 50], [60, 60], [50, 60]] as [number, number][] }];
+const MOCK_RGBA    = new Uint8Array(4);
+const MOCK_W       = 100;
+const MOCK_H       = 100;
+const MOCK_RINGS   = [{ points: [[50, 50], [60, 50], [60, 60], [50, 60]] as [number, number][] }];
 const MOCK_BOUNDARY = { points: [[0, 0], [100, 0], [100, 100], [0, 100]] as [number, number][] };
-const MOCK_ARROWS = [{ tip: [50, 50] as [number, number], nock: [100, 100] as [number, number] }];
+const MOCK_ARROWS  = [{ tip: [50, 50] as [number, number], score: 9 }];
+const MODEL_PATH   = '/models/arrow_detector.onnx';
 
 describe('ArcheryCounter.processImage', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     decodeBase64Jpeg.mockReturnValue({ rgba: MOCK_RGBA, width: MOCK_W, height: MOCK_H });
-  });
-
-  it('decodes the base64, runs detection, returns rings and arrows', async () => {
     findTarget.mockReturnValue({
       success: true, rings: MOCK_RINGS, paperBoundary: MOCK_BOUNDARY,
       calibration: null, ringPoints: null,
     });
-    findArrows.mockReturnValue(MOCK_ARROWS);
+  });
 
+  it('returns empty arrows when no modelPath is provided', async () => {
     const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data');
 
     expect(decodeBase64Jpeg).toHaveBeenCalledWith('base64data');
     expect(findTarget).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H);
-    expect(findArrows).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H, expect.objectContaining({ success: true }));
+    expect(detectArrowsNN).not.toHaveBeenCalled();
     expect(result.rings).toBe(MOCK_RINGS);
-    // calibration is null → scoring falls back to score: 0 for each arrow
-    expect(result.arrows).toEqual(MOCK_ARROWS.map(a => ({ ...a, score: 0 })));
+    expect(result.arrows).toEqual([]);
     expect(result.paperBoundary).toBe(MOCK_BOUNDARY);
+  });
+
+  it('calls detectArrowsNN and returns its arrows when modelPath is provided', async () => {
+    detectArrowsNN.mockResolvedValue(MOCK_ARROWS);
+
+    const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
+
+    expect(detectArrowsNN).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H, MODEL_PATH);
+    expect(result.arrows).toBe(MOCK_ARROWS);
+  });
+
+  it('returns empty arrows when detectArrowsNN throws', async () => {
+    detectArrowsNN.mockRejectedValue(new Error('ONNX load failed'));
+
+    const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
+
+    expect(result.arrows).toEqual([]);
   });
 
   it('throws the detection error when findTarget fails', async () => {
@@ -47,7 +62,7 @@ describe('ArcheryCounter.processImage', () => {
 
     await expect(ArcheryCounter.processImage('file:///bad.jpg', 'base64'))
       .rejects.toThrow('No colour blobs found');
-    expect(findArrows).not.toHaveBeenCalled();
+    expect(detectArrowsNN).not.toHaveBeenCalled();
   });
 
   it('throws "Detection failed" when findTarget fails without an error field', async () => {

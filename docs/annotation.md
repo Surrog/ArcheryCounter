@@ -59,7 +59,7 @@ columns alongside the human annotation columns.
 
 ### Algorithm hash and cache invalidation
 
-At startup the server hashes `src/targetDetection.ts` and `src/arrowDetection.ts`.
+At startup the server hashes `src/targetDetection.ts`.
 Any row in `generated` whose stored `algorithm_hash` differs from the current hash is
 treated as **stale** and will be recomputed the next time the image is selected.
 
@@ -86,7 +86,7 @@ treated as **stale** and will be recomputed the next time the image is selected.
   detected: {
     rings:         SplineRing[];
     paperBoundary: [number, number][] | null;
-    arrows:        { tip: [number, number]; nock: [number, number] | null }[];
+    arrows:        { tip: [number, number]; score: number | 'X' | null }[];
   };
 }
 ```
@@ -103,11 +103,9 @@ When a user selects an image:
    (see AW-6 in `annotation_works.md`).
 
 2. **Slow path** (stale, new, or invalid cache): the server runs the full detection pipeline
-   synchronously (`findTarget` → `findArrows`), stores results in the DB, and responds.
+   synchronously (`findTarget`), stores results in the DB, and responds.
    Typical response time: ~30–60 s (blocks the event loop — single-user tool).
    The browser shows a `Computing rings… Xs` animated counter while waiting.
-
-See AW-5 in `annotation_works.md` for the planned non-blocking background generation.
 
 ---
 
@@ -169,8 +167,7 @@ Colour mapping: 0–1 gold, 2–3 red, 4–5 blue, 6–7 grey, 8–9 white.
 **Shift + click** a control point to remove it (minimum 3 points enforced).
 Control-point handles are small filled circles; index 0 is labelled with the ring number.
 
-Enable/disable the ring overlay with the **Rings** checkbox.
-Enable/disable handles with the **Handles** checkbox.
+Enable/disable the ring overlay and its handles with the **Rings** checkbox.
 
 ---
 
@@ -182,7 +179,7 @@ The paper boundary is a polygon with 4–N vertices stored as `[number, number][
 - **Ctrl + click** anywhere on the canvas to insert a new vertex on the nearest edge.
 - **Shift + click** a vertex to remove it (minimum 3 vertices enforced).
 
-Enable/disable the boundary overlay with the **Boundary** checkbox.
+Enable/disable the boundary overlay and its handles with the **Boundary** checkbox.
 
 ---
 
@@ -192,44 +189,38 @@ Each arrow is:
 
 ```typescript
 interface ArrowAnnotation {
-  tip:   [number, number];       // impact point (scoring location)
-  nock:  [number, number];       // rear of shaft
-  score: number | 'X' | null;   // 1–10, 'X' (inner gold), 0 (miss), null (unscored)
+  tip:   [number, number];     // impact point (scoring location)
+  score: number | 'X' | null; // 1–10, 'X' (inner gold), 0 (miss), null (unscored)
 }
 ```
 
 ### Adding an arrow
 
 1. Press **A** or click **Add arrow** — mode enters `place-tip` (cursor becomes crosshair).
-2. Click the canvas at the tip (impact point). Mode advances to `place-nock`.
-   The tip appears as a dim orange dot.
-3. Click at the nock (rear of shaft). Mode advances to `score-input`.
-4. The score picker appears. Choose a score:
+2. Click the canvas at the tip (impact point). Mode advances to `score-input`.
+3. The score picker appears near the tip. Choose a score:
    - Click a button: **X**, **10–1**, **M** (miss = 0), **?** (null/unscored).
    - Or type: `x`/`X` → X, `m`/`M` → miss, `1`–`9` → that score.
    - **Escape** commits the arrow with `score: null`.
-5. The arrow is added to `ann.arrows`, mode returns to `idle`.
+4. The arrow is added to `ann.arrows`, mode returns to `idle`.
 
-When detected rings are available, the score picker pre-selects the ring the tip falls in
-(see AW-4 for implementation plan).
+When detected rings are available, the score picker pre-selects the ring the tip falls in.
 
-Press **Escape** during `place-tip` or `place-nock` to cancel the whole arrow.
+Press **Escape** during `place-tip` to cancel the whole arrow.
 Press **A** again during `place-tip` to cancel and return to idle.
 
 ### Editing an arrow
 
-- **Drag** the tip handle (red, r=4) or nock handle (gold, r=6) to reposition.
-- **Shift + click** either handle to remove the arrow.
+- **Drag** the tip handle to reposition.
+- **Shift + click** the tip handle to remove the arrow.
 - Click the **score cell** in the data panel to reopen the score picker for that arrow.
 
 ### Arrow rendering
 
 | Property | Visual |
 |---|---|
-| Shaft | Dashed line, orange (#FF8C00); grey if miss |
 | Tip handle | Red (#FF4500) circle, dashed stroke if score is null |
-| Nock handle | Gold (#FFD700) circle |
-| Label | Score value near midpoint (white text); `M` for miss, `?` for null |
+| Label | Score value above tip (white text); `M` for miss, `?` for null |
 | Generated mode | Cyan (#00CFCF) line + circles, labelled by index |
 
 ---
@@ -274,7 +265,7 @@ The bottom of the sidebar shows a summary of the current annotation:
 
 - Boundary vertex count.
 - Per-ring: index, control-point count, centroid (cx, cy).
-- Per-arrow: index, tip coords, nock coords, score (clickable to re-score).
+- Per-arrow: index, tip coords, score (clickable to re-score).
 
 The panel is collapsible via a toggle button at its header (see AW-3).
 
@@ -286,6 +277,7 @@ The panel is collapsible via a toggle button at its header (see AW-3).
 |---|---|
 | Tab | Toggle Annotated / Generated view |
 | A | Toggle add-arrow mode (idle ↔ place-tip) |
+| N | Save current annotations and advance to the next image |
 | Escape | Cancel arrow placement / close score picker |
 | 1–9 | Set score (during score-input mode) |
 | x / X | Set score to X (during score-input mode) |

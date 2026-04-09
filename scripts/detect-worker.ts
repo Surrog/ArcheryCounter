@@ -9,7 +9,6 @@
 import * as path from 'path';
 import { loadImageNode } from '../src/imageLoader';
 import { findTarget } from '../src/targetDetection';
-import { findArrows } from '../src/arrowDetection';
 
 const imgPath = process.argv[2];
 if (!imgPath) {
@@ -20,11 +19,10 @@ if (!imgPath) {
 (async () => {
   const { rgba, width, height } = await loadImageNode(imgPath);
   const result = findTarget(rgba, width, height);
-  const arrows = findArrows(rgba, width, height, result);
   const output = {
     rings:         result.success ? result.rings : [],
     paperBoundary: result.success && result.paperBoundary ? result.paperBoundary.points : null,
-    arrows,
+    arrows:        [],
     width,
     height,
     success:       result.success,
