@@ -2,9 +2,11 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { Jimp } from 'jimp';
+import * as jpegJs from 'jpeg-js';
 import { Pool } from 'pg';
 import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel, RayDebugEntry } from '../src/targetDetection';
 import { detectArrowsNN } from '../src/arrowDetector';
+import { detectBoundaries } from '../src/boundaryDetector';
 import type { ScoredArrow } from '../src/scoring';
 import { SplineRing, sampleClosedSpline } from '../src/spline';
 
@@ -16,6 +18,11 @@ const modelIdx   = args.indexOf('--model');
 const MODEL_PATH = modelIdx >= 0
   ? path.resolve(args[modelIdx + 1])
   : path.resolve(__dirname, 'nn/arrow_detector_fp32.onnx');
+
+const boundaryModelIdx   = args.indexOf('--boundary-model');
+const BOUNDARY_MODEL_PATH = boundaryModelIdx >= 0
+  ? path.resolve(args[boundaryModelIdx + 1])
+  : path.resolve(__dirname, 'nn/boundary_detector_v2.onnx');
 
 // ── algorithm cache (mirrors regen-generated.ts) ──────────────────────────────
 
@@ -81,6 +88,7 @@ interface ImageEntry {
   height: number;
   result: ArcheryResult;
   arrows: ScoredArrow[];
+  nnBoundaries?: [number, number][][];
 }
 
 async function processImage(imgPath: string, currentHash: string): Promise<ImageEntry> {
@@ -108,8 +116,11 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
     const rings    = scaleRings(row.rings ?? [], sx, sy);
     const boundary = scaleBoundary(row.paper_boundary, sx, sy);
     const arrows   = scaleArrows(row.arrows ?? [], sx, sy);
-    const result: ArcheryResult = { success: rings.length > 0, rings, paperBoundary: boundary };
-    return { filename, base64, width, height, result, arrows };
+    const result: ArcheryResult = { success: rings.length > 0, targets: [], rings, paperBoundary: boundary };
+    // Load raw JPEG (no EXIF rotation) so orientation matches what the model was trained on.
+    const rawJpeg = jpegJs.decode(fs.readFileSync(imgPath), { useTArray: true });
+    const nnBoundaries = await detectBoundaries(rawJpeg.data, rawJpeg.width, rawJpeg.height, BOUNDARY_MODEL_PATH).catch(() => undefined) ?? undefined;
+    return { filename, base64, width, height, result, arrows, nnBoundaries };
   }
 
   // ── cache miss: run detection on the same ≤1200px image ──────────────────
@@ -139,11 +150,15 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
     ],
   );
 
+  // Load raw JPEG (no EXIF rotation) so orientation matches what the model was trained on.
+  const rawJpeg = jpegJs.decode(fs.readFileSync(imgPath), { useTArray: true });
+  const nnBoundaries = await detectBoundaries(rawJpeg.data, rawJpeg.width, rawJpeg.height, BOUNDARY_MODEL_PATH).catch(() => undefined) ?? undefined;
+
   const displayResult: ArcheryResult = {
-    success: result.success, rings: result.rings ?? [],
+    success: result.success, targets: result.targets ?? [], rings: result.rings ?? [],
     paperBoundary: result.paperBoundary, error: result.error,
   };
-  return { filename, base64, width, height, result: displayResult, arrows: arrowsFull };
+  return { filename, base64, width, height, result: displayResult, arrows: arrowsFull, nnBoundaries };
 }
 
 function splineCentroid(ring: SplineRing): [number, number] {
@@ -177,6 +192,7 @@ function renderSvg(
   paperBoundary?: TargetBoundary,
   ringPoints?: Pixel[][],
   rayDebug?: RayDebugEntry[],
+  nnBoundaries?: [number, number][][],
 ): string {
   // Draw outermost rings first so inner rings render on top
   const pathsSvg = [...rings]
@@ -208,6 +224,15 @@ function renderSvg(
         const pts = paperBoundary.points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
         return `<polygon points="${pts}" fill="none" stroke="#00FF88" stroke-width="3" stroke-dasharray="12 6" opacity="0.85"/>`;
       })()
+    : '';
+
+  // NN boundary polygons — solid magenta
+  const nnBoundarySvg = nnBoundaries && nnBoundaries.length > 0
+    ? nnBoundaries.map(poly => {
+        if (poly.length < 3) return '';
+        const pts = poly.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+        return `<polygon points="${pts}" fill="none" stroke="#FF00FF" stroke-width="2" opacity="0.9"/>`;
+      }).join('')
     : '';
 
   // Raw transition points — small dots in each ring's colour
@@ -271,6 +296,7 @@ function renderSvg(
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="display:block;max-width:100%;height:auto">
     <image href="${base64}" width="${width}" height="${height}"/>
     ${boundarySvg}
+    ${nnBoundarySvg}
     ${rayDebugSvg}
     ${pointsSvg}
     ${ctrlSvg}
@@ -393,14 +419,14 @@ const HTML_HEAD = `<!DOCTYPE html>
   <h1>ArcheryCounter &#8212; Detection Report</h1>`;
 
 function renderSection(entry: ImageEntry): string {
-  const { filename, base64, width, height, result, arrows } = entry;
+  const { filename, base64, width, height, result, arrows, nnBoundaries } = entry;
   const statusClass = result.success ? 'success' : 'error';
   const statusText = result.success
     ? `&#10003; ${result.rings.length} rings &nbsp;&middot;&nbsp; ${arrows.length} arrow${arrows.length !== 1 ? 's' : ''} detected &nbsp;(${width}&times;${height} px)`
     : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
 
   const content = result.success
-    ? renderSvg(base64, width, height, result.rings, arrows, result.paperBoundary, result.ringPoints, result.rayDebug)
+    ? renderSvg(base64, width, height, result.rings, arrows, result.paperBoundary, result.ringPoints, result.rayDebug, nnBoundaries)
     : base64
       ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
       : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
@@ -458,7 +484,7 @@ async function main(): Promise<void> {
         base64: '',
         width: 0,
         height: 0,
-        result: { success: false, rings: [], error: String(err) },
+        result: { success: false, targets: [], rings: [], error: String(err) },
         arrows: [],
       } as ImageEntry);
     }

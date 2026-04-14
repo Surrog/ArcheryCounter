@@ -10,6 +10,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { RingOverlay, DEFAULT_VISIBILITY, OverlayVisibility } from '../components/RingOverlay';
 import { useArcheryScorer } from '../useArcheryScorer';
+import { pointInPolygon } from '../targetDetection';
 
 type VisKey = keyof OverlayVisibility;
 const TOGGLE_LABELS: { key: VisKey; label: string }[] = [
@@ -20,14 +21,25 @@ const TOGGLE_LABELS: { key: VisKey; label: string }[] = [
 ];
 
 export function HomeScreen() {
-  const { imageUri, rings, paperBoundary, arrows, ringPoints, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
+  const { imageUri, targets, arrows, ringPoints, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
     useArcheryScorer();
   const [visibility, setVisibility] = useState<OverlayVisibility>(DEFAULT_VISIBILITY);
+  const [selectedTargetIdx, setSelectedTargetIdx] = useState<number | null>(null);
 
   const toggleLayer = (key: VisKey) =>
     setVisibility(v => ({ ...v, [key]: !v[key] }));
 
-  const hasResult = imageUri && rings && imageWidth && imageHeight;
+  const hasResult = imageUri && targets && imageWidth && imageHeight;
+  const multiTarget = (targets?.length ?? 0) > 1;
+
+  // Filter arrows to selected target when one is selected.
+  const visibleArrows = selectedTargetIdx !== null && targets
+    ? (arrows ?? []).filter(a =>
+        pointInPolygon({ x: a.tip[0], y: a.tip[1] }, { points: targets[selectedTargetIdx].paperBoundary }),
+      )
+    : arrows;
+
+  const totalRings = targets ? targets.reduce((s, t) => s + t.rings.length, 0) : 0;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -39,9 +51,9 @@ export function HomeScreen() {
           <>
             <Image source={{ uri: imageUri }} style={styles.image} resizeMode="contain" />
             <RingOverlay
-              rings={rings}
-              paperBoundary={paperBoundary}
-              arrows={arrows}
+              targets={targets}
+              selectedTargetIdx={selectedTargetIdx}
+              arrows={visibleArrows}
               ringPoints={ringPoints}
               imageNaturalWidth={imageWidth}
               imageNaturalHeight={imageHeight}
@@ -63,6 +75,29 @@ export function HomeScreen() {
         )}
       </View>
 
+      {/* ── Target selector (multi-target only) ───────────────────── */}
+      {hasResult && multiTarget && (
+        <View style={styles.toggleRow}>
+          <Pressable
+            style={[styles.toggleButton, selectedTargetIdx === null && styles.toggleButtonOn]}
+            onPress={() => setSelectedTargetIdx(null)}>
+            <Text style={[styles.toggleText, selectedTargetIdx === null && styles.toggleTextOn]}>
+              All
+            </Text>
+          </Pressable>
+          {targets.map((_, i) => (
+            <Pressable
+              key={i}
+              style={[styles.toggleButton, selectedTargetIdx === i && styles.toggleButtonOn]}
+              onPress={() => setSelectedTargetIdx(selectedTargetIdx === i ? null : i)}>
+              <Text style={[styles.toggleText, selectedTargetIdx === i && styles.toggleTextOn]}>
+                {`T${i + 1}`}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+
       {/* ── Layer toggles ─────────────────────────────────────────── */}
       {hasResult && (
         <View style={styles.toggleRow}>
@@ -82,7 +117,7 @@ export function HomeScreen() {
       {/* ── Stats badge ───────────────────────────────────────────── */}
       {hasResult && (
         <Text style={styles.statsText}>
-          {rings.length} rings · {arrows?.length ?? 0} arrow{(arrows?.length ?? 0) !== 1 ? 's' : ''} detected
+          {targets.length} target{targets.length !== 1 ? 's' : ''} · {totalRings} rings · {(visibleArrows?.length ?? 0)} arrow{(visibleArrows?.length ?? 0) !== 1 ? 's' : ''} detected
         </Text>
       )}
 
@@ -101,7 +136,7 @@ export function HomeScreen() {
         </Pressable>
 
         {hasResult && (
-          <Pressable style={[styles.button, styles.buttonSecondary]} onPress={reset}>
+          <Pressable style={[styles.button, styles.buttonSecondary]} onPress={() => { setSelectedTargetIdx(null); reset(); }}>
             <Text style={styles.buttonText}>Clear</Text>
           </Pressable>
         )}

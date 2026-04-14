@@ -51,10 +51,24 @@ describe('evalCatmullRom', () => {
 // ---------------------------------------------------------------------------
 
 describe('sampleClosedSpline', () => {
-  it('returns the single point for a 1-point ring', () => {
+  it('returns nSamples copies of the single point for a 1-point ring', () => {
     const pts: [number, number][] = [[5, 7]];
     const result = sampleClosedSpline(pts, 8);
-    expect(result).toEqual([[5, 7]]);
+    expect(result).toHaveLength(8);
+    for (const p of result) expect(p).toEqual([5, 7]);
+  });
+
+  it('returns empty array for an empty ring', () => {
+    const result = sampleClosedSpline([], 16);
+    expect(result).toHaveLength(0);
+  });
+
+  it('1-point ring: pointInClosedSpline correctly tests the single-point degenerate', () => {
+    // With nSamples copies of the same point, the "polygon" has zero area.
+    // pointInClosedSpline samples 60 copies of the same point → no crossings → false.
+    const pts: [number, number][] = [[50, 50]];
+    expect(pointInClosedSpline([50, 50], pts)).toBe(false);
+    expect(pointInClosedSpline([0, 0],   pts)).toBe(false);
   });
 
   it('returns exactly nSamples points for a square ring', () => {

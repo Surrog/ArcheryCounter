@@ -245,9 +245,13 @@ test.each(imageFiles)(
 
     if (annResult.rows.length === 0) return; // no annotation — skip
 
+    // Annotations table uses multi-target format: rings[target][ringSet][ring],
+    // paper_boundary[target][point]. Unwrap the first target's data.
+    const rawPb   = annResult.rows[0].paper_boundary;
+    const rawRings = annResult.rows[0].rings ?? [];
     const ann: ImageAnnotation = {
-      paperBoundary: annResult.rows[0].paper_boundary,
-      rings:         annResult.rows[0].rings ?? [],
+      paperBoundary: Array.isArray(rawPb?.[0]?.[0]) ? rawPb[0] : rawPb,
+      rings:         Array.isArray(rawRings[0]?.[0]) ? rawRings[0][0] : rawRings,
       arrows:        annResult.rows[0].arrows ?? [],
     };
 

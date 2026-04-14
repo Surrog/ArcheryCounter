@@ -77,21 +77,23 @@ def _load_letterboxed(path: str) -> tuple:
     return np.array(img_lb, dtype=np.uint8), scale, pad_x, pad_y, orig_w, orig_h
 
 
-def make_radial_channel(rings, scale: float, pad_x: int, pad_y: int,
+def make_radial_channel(rings_tss, scale: float, pad_x: int, pad_y: int,
                         size: int = INPUT_SIZE) -> np.ndarray:
     """Return a (size, size) float32 array: normalised distance from target centre.
 
     0 = centre, 1 = outermost ring boundary, >1 = outside target (clamped at 2).
-    Computed from rule-based ring output (rings[0] centroid = centre,
-    rings[9] mean radius = outer boundary).
+    Uses the first ring set of the first target.
+    rings_tss: SplineRing[][][]  (targets × ring sets × rings)
     """
+    rings = rings_tss[0][0]  # first target, first ring set
     pts0  = np.asarray(rings[0]['points'], dtype=np.float64)
     cx    = pts0[:, 0].mean() * scale + pad_x
     cy    = pts0[:, 1].mean() * scale + pad_y
 
-    pts9  = np.asarray(rings[9]['points'], dtype=np.float64)
-    pts9_lb = pts9 * scale + np.array([pad_x, pad_y])
-    outer_r = np.hypot(pts9_lb[:, 0] - cx, pts9_lb[:, 1] - cy).mean()
+    outer_idx = min(9, len(rings) - 1)
+    pts_out   = np.asarray(rings[outer_idx]['points'], dtype=np.float64)
+    pts_lb    = pts_out * scale + np.array([pad_x, pad_y])
+    outer_r   = np.hypot(pts_lb[:, 0] - cx, pts_lb[:, 1] - cy).mean()
     if outer_r < 1:
         outer_r = size / 2.0
 
@@ -124,24 +126,45 @@ def draw_gaussian(heatmap: np.ndarray, cx: float, cy: float,
     )
 
 
-def score_tip(tip, rings) -> int:
-    """Geometric score (0 = miss, 1–10) from annotated rings and tip position.
+def _ring_set_centroid(rs) -> tuple:
+    """(cx, cy) centroid of a ring set, computed from its innermost ring."""
+    pts = np.asarray(rs[0]['points'], dtype=np.float64)
+    return pts[:, 0].mean(), pts[:, 1].mean()
 
-    rings[0] = innermost (bullseye boundary), rings[9] = outermost.
+
+def _score_against_ring_set(tip, rings) -> int:
+    """Geometric score (0 = miss, 1–10) for a single ring set.
+
+    rings[0] = innermost, rings[-1] = outermost.
     Score = 10 - i where i is the first ring index that contains the tip.
     """
-    pts0 = np.asarray(rings[0]['points'], dtype=np.float64)
-    cx, cy = pts0[:, 0].mean(), pts0[:, 1].mean()
-    radii = []
-    for ring in rings:
-        pts = np.asarray(ring['points'], dtype=np.float64)
-        radii.append(np.hypot(pts[:, 0] - cx, pts[:, 1] - cy).mean())
-
+    cx, cy = _ring_set_centroid(rings)
+    radii = [
+        np.hypot(np.asarray(r['points'], dtype=np.float64)[:, 0] - cx,
+                 np.asarray(r['points'], dtype=np.float64)[:, 1] - cy).mean()
+        for r in rings
+    ]
     d = math.hypot(tip[0] - cx, tip[1] - cy)
     for i, r in enumerate(radii):
         if d <= r:
             return 10 - i
     return 0  # miss
+
+
+def score_tip(tip, rings_tss) -> int:
+    """Geometric score (0 = miss, 1–10) from multi-target ring annotations.
+
+    Finds the nearest ring set across all targets and scores the tip against it.
+    rings_tss: SplineRing[][][]  (targets × ring sets × rings)
+    """
+    all_sets = [rs for target in rings_tss for rs in target]
+    if not all_sets:
+        return 0
+    best = min(all_sets, key=lambda rs: math.hypot(
+        tip[0] - _ring_set_centroid(rs)[0],
+        tip[1] - _ring_set_centroid(rs)[1],
+    ))
+    return _score_against_ring_set(tip, best)
 
 
 # ── dataset ───────────────────────────────────────────────────────────────────
@@ -179,7 +202,7 @@ class ArrowDataset(Dataset):
             WHERE  arrows IS NOT NULL
               AND  jsonb_array_length(arrows) > 0
               AND  rings  IS NOT NULL
-              AND  jsonb_array_length(rings)  >= 10
+              AND  jsonb_array_length(rings)  > 0
         """)
         rows = cur.fetchall()
         conn.close()
@@ -192,15 +215,19 @@ class ArrowDataset(Dataset):
         for fname, arrows_j, rings_j in rows:
             if is_val != is_val_sample(fname):
                 continue
-            arrows = arrows_j if isinstance(arrows_j, list) else json.loads(arrows_j)
-            rings  = rings_j  if isinstance(rings_j,  list) else json.loads(rings_j)
-            if not arrows or len(rings) < 10:
+            arrows   = arrows_j if isinstance(arrows_j, list) else json.loads(arrows_j)
+            rings_tss = rings_j  if isinstance(rings_j,  list) else json.loads(rings_j)
+            # rings_tss is SplineRing[][][] — must have at least one ring set with ≥7 rings
+            if not arrows or not any(
+                len(rs) >= 7
+                for target in rings_tss for rs in target
+            ):
                 continue
             # Filter arrows that have at least a tip
             valid = [a for a in arrows if a.get('tip') is not None]
             if not valid:
                 continue
-            self.samples.append((fname, valid, rings))
+            self.samples.append((fname, valid, rings_tss))
 
         # Images are loaded on demand via _load_letterboxed() (module-level LRU
         # cache, maxsize=80).  Each worker process builds its own LRU lazily,
@@ -240,12 +267,12 @@ class ArrowDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
-        fname, arrows, rings = self.samples[idx]
+        fname, arrows, rings_tss = self.samples[idx]
 
         path = os.path.join(self.images_dir, fname)
         img_np_cached, scale, pad_x, pad_y, orig_w, orig_h = _load_letterboxed(path)
         img_np = img_np_cached.copy()   # copy so augmentation doesn't mutate the cache
-        radial = make_radial_channel(rings, scale, pad_x, pad_y)
+        radial = make_radial_channel(rings_tss, scale, pad_x, pad_y)
 
         # Collect tip keypoints in letterboxed 512-space.
         keypoints     = []
@@ -261,7 +288,7 @@ class ArrowDataset(Dataset):
                 continue
             keypoints.append((tx, ty))
             kp_arrow_idxs.append(i)
-            scores_raw.append(score_tip(tip, rings))
+            scores_raw.append(score_tip(tip, rings_tss))
 
         # ── spatial augmentation ──────────────────────────────────────────
         if self.augment and keypoints:

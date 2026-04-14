@@ -38,13 +38,39 @@ export interface RayDebugEntry {
   distances: (number | null)[]; // detected distances per ring [0..9]
 }
 
-export interface ArcheryResult {
+/**
+ * Result for a single detected target (one ring set on one sheet of paper).
+ * `rings` has 7 entries when only yellow/red/blue zones were detected,
+ * or 10 entries when black and white zones were also found.
+ * Index 0 = innermost (bullseye), index 6 or 9 = outermost.
+ */
+export interface SingleTargetResult {
   rings: SplineRing[];
-  paperBoundary?: TargetBoundary;
+  paperBoundary: TargetBoundary;
   calibration?: ColourCalibration;
   /** Raw per-ray transition points, indexed by ring (0=innermost). */
   ringPoints?: Pixel[][];
   /** Per-ray debug data, populated only when DEBUG_RAYS is set. */
+  rayDebug?: RayDebugEntry[];
+}
+
+/**
+ * Full detection result for an image, which may contain multiple targets.
+ * Each entry in `targets` is one detected sheet of paper with its ring set.
+ * `success` is true if at least one target was detected.
+ *
+ * @deprecated Single-target fields (`rings`, `paperBoundary`, `calibration`,
+ * `ringPoints`, `rayDebug`) are kept for backwards compatibility; prefer
+ * `targets[0]` for new code.
+ */
+export interface ArcheryResult {
+  /** Multi-target results. Length 0 if no targets found. */
+  targets: SingleTargetResult[];
+  // --- backwards-compat single-target accessors (targets[0] fields) ---
+  rings: SplineRing[];
+  paperBoundary?: TargetBoundary;
+  calibration?: ColourCalibration;
+  ringPoints?: Pixel[][];
   rayDebug?: RayDebugEntry[];
   success: boolean;
   error?: string;
@@ -277,6 +303,7 @@ interface BlobResult {
 function aggregateBlobs(
   mask: Uint8Array, width: number, height: number,
   mergeThresholdFactor = 2.5,
+  anchor?: { x: number; y: number },
 ): BlobResult {
   const labels = new Int32Array(mask.length).fill(-1);
   const componentPixels: number[][] = [];
@@ -305,12 +332,12 @@ function aggregateBlobs(
     return { mask: new Uint8Array(mask.length), pixels: [], largestPixels: [], pixelCount: 0 };
   }
 
-  // Prefer the component whose centroid is closest to the image centre over
-  // the globally largest one.  Background regions (hay bale, floor) tend to be
-  // large and near the image edge; target colour zones are near the centre.
+  // Prefer the component whose centroid is closest to the anchor point (image
+  // centre by default; seed point for findRingSetFromCenter).  Background
+  // regions (hay bale, floor) tend to be large and near the image edge.
   // Fall back to globally largest if no component meets the minimum size.
   const minAnchorPx = Math.max(6, Math.floor(mask.length * 0.001));
-  const imgCx = width / 2, imgCy = height / 2;
+  const imgCx = anchor?.x ?? width / 2, imgCy = anchor?.y ?? height / 2;
   let anchorIdx = -1;
   let anchorDist = Infinity;
   let largestIdx = 0;
@@ -432,12 +459,13 @@ function detectColorBlob(
   width: number, height: number,
   color: 'yellow' | 'red' | 'blue',
   hsvCache: Float64Array,
+  anchor?: { x: number; y: number },
 ): ColorBlob | null {
   const minPx = width * height * 0.001;
 
   // Pass 1 — wide initial range on pretreated image
   const mask1 = applyHsvFilter(pretreated, width, height, COLOUR_RANGES[color], hsvCache);
-  const blob1 = aggregateBlobs(mask1, width, height);
+  const blob1 = aggregateBlobs(mask1, width, height, 2.5, anchor);
   if (blob1.pixelCount < minPx) return null;
 
   // Pass 2 — adaptive re-centering based on actual hue in original image
@@ -469,7 +497,7 @@ function detectColorBlob(
   // Yellow is a solid disk — use tighter aggregation to exclude nearby hay-bale
   // or clothing pixels that sit just outside the target's yellow zone.
   const mergeThresholdFactor = 2.5;
-  const blob2 = aggregateBlobs(mask2, width, height, mergeThresholdFactor);
+  const blob2 = aggregateBlobs(mask2, width, height, mergeThresholdFactor, anchor);
   if (blob2.pixelCount < minPx) return null;
 
   const centroid   = computeCentroid(blob2.pixels, width);
@@ -504,6 +532,82 @@ function arrayMedian(values: number[]): number {
 }
 
 /**
+ * Sample a SplineRing into N evenly-spaced angle buckets, returning one radius
+ * per bucket (the average radius of all dense samples that fall in that bucket).
+ * Empty buckets are filled by linear interpolation from neighbours.
+ */
+function sampleRingByAngle(ring: SplineRing, cx: number, cy: number, N: number): number[] {
+  const OVERSAMPLE = 32;
+  const dense = sampleClosedSpline(ring.points, N * OVERSAMPLE);
+
+  const sum    = new Array<number>(N).fill(0);
+  const counts = new Array<number>(N).fill(0);
+  for (const [px, py] of dense) {
+    const angle = Math.atan2(py - cy, px - cx);
+    const norm  = ((angle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    const bucket = Math.floor(norm / (2 * Math.PI) * N) % N;
+    sum[bucket]    += Math.hypot(px - cx, py - cy);
+    counts[bucket] += 1;
+  }
+
+  const result = sum.map((s, i) => counts[i] > 0 ? s / counts[i] : 0);
+
+  // Two passes to fill empty buckets by interpolation from neighbours.
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < N; i++) {
+      if (result[i] !== 0) continue;
+      const prev = result[(i - 1 + N) % N];
+      const next = result[(i + 1) % N];
+      if (prev > 0 && next > 0) result[i] = (prev + next) / 2;
+      else if (prev > 0) result[i] = prev;
+      else if (next > 0) result[i] = next;
+    }
+  }
+  return result;
+}
+
+/**
+ * Enforce strict radial ordering across all rings in a ring set.
+ *
+ * Works entirely in the dense-sample domain (N=10 angle buckets) so the
+ * guarantee holds for the *rendered curve*, not just the sparse control points.
+ *
+ * Steps:
+ *   1. Sample every ring at N evenly-spaced angles → radius[ring][angle].
+ *   2. Forward pass inner→outer: at each angle, push each ring's radius outside
+ *      its inner neighbour's (already-corrected) radius by MARGIN px.
+ *   3. Reconstruct SplineRings: N control points evenly spaced by angle.
+ *      With N=10 (12° spacing) the maximum arc sag between adjacent control
+ *      points on a typical archery ring is small enough that no crossing survives.
+ *
+ * Returns a new array of SplineRings replacing the originals.
+ */
+function enforceRadialOrdering(rings: SplineRing[], cx: number, cy: number): SplineRing[] {
+  const N      = 10;
+  const MARGIN = 1; // px
+
+  // Step 1 — sample every ring by angle.
+  const radiiByAngle = rings.map(ring => sampleRingByAngle(ring, cx, cy, N));
+
+  // Step 2 — forward pass: ensure each ring is strictly outside its inner neighbour.
+  for (let ri = 1; ri < rings.length; ri++) {
+    for (let ai = 0; ai < N; ai++) {
+      const minR = radiiByAngle[ri - 1][ai] + MARGIN;
+      if (radiiByAngle[ri][ai] < minR) radiiByAngle[ri][ai] = minR;
+    }
+  }
+
+  // Step 3 — rebuild SplineRings from corrected (angle, radius) profiles.
+  return rings.map((_, ri) => ({
+    points: Array.from({ length: N }, (_, ai) => {
+      const theta = (2 * Math.PI * ai) / N;
+      const r = radiiByAngle[ri][ai];
+      return [cx + r * Math.cos(theta), cy + r * Math.sin(theta)] as [number, number];
+    }),
+  }));
+}
+
+/**
  * Convert radial-profile transition points for one ring into a closed SplineRing.
  * Sorts pts by angle around (cx, cy) and uses them directly as Catmull-Rom control
  * points, so the rendered spline passes through every detected transition position.
@@ -531,13 +635,15 @@ function radialProfileToSpline(pts: Pixel[], cx: number, cy: number, K = 12): Sp
 function medianFilter1D(data: number[], windowRadius: number): number[] {
   const n = data.length;
   const result = new Array(n);
+  const windowSize = windowRadius * 2 + 1;
+  const window = new Array<number>(windowSize);
+  const mid = Math.floor(windowSize / 2);
   for (let i = 0; i < n; i++) {
-    const window: number[] = [];
-    for (let k = -windowRadius; k <= windowRadius; k++) {
-      window.push(data[(i + k + n) % n]);
+    for (let k = 0; k < windowSize; k++) {
+      window[k] = data[(i - windowRadius + k + n) % n];
     }
     window.sort((a, b) => a - b);
-    result[i] = window[Math.floor(window.length / 2)];
+    result[i] = window[mid];
   }
   return result;
 }
@@ -1017,8 +1123,9 @@ function sampleRay(
   const cosT = Math.cos(theta), sinT = Math.sin(theta);
   for (let d = step; d <= limit; d += step) {
     const x = cx + d * cosT, y = cy + d * sinT;
-    if (x < 0 || x >= width || y < 0 || y >= height) break;
-    const i = (Math.round(y) * width + Math.round(x)) * 4;
+    const xi = Math.round(x), yi = Math.round(y);
+    if (xi < 0 || xi >= width || yi < 0 || yi >= height) break;
+    const i = (yi * width + xi) * 4;
     const [, , v] = rgbToHsv(rgba[i], rgba[i + 1], rgba[i + 2]);
     samples.push({ dist: d, v });
   }
@@ -1247,6 +1354,213 @@ function scanTargetBoundary(
 }
 
 // ---------------------------------------------------------------------------
+// Shared detection pipeline (boundary → calibration → rings → splines)
+// Used by both findTarget and findRingSetFromCenter.
+// ---------------------------------------------------------------------------
+
+/**
+ * For each of N evenly-spaced ray angles, compute the distance from (cx, cy)
+ * to the boundary of a polygon via ray–segment intersection.
+ * Used to convert an NN-predicted boundary polygon into the per-ray distance
+ * arrays that the ring detection pipeline expects.
+ */
+export function polyToRayDists(
+  poly: [number, number][], cx: number, cy: number, N: number,
+): number[] {
+  const dists: number[] = [];
+  const n = poly.length;
+  for (let i = 0; i < N; i++) {
+    const theta = (i / N) * 2 * Math.PI;
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    let maxDist = 0;
+    for (let j = 0; j < n; j++) {
+      const [ax, ay] = poly[j];
+      const [bx, by] = poly[(j + 1) % n];
+      const dx = bx - ax, dy = by - ay;
+      const denom = cosT * dy - sinT * dx;
+      if (Math.abs(denom) < 1e-10) continue;
+      const t = ((ax - cx) * dy - (ay - cy) * dx) / denom;
+      const s = ((ax - cx) * sinT - (ay - cy) * cosT) / denom;
+      if (t > 0 && s >= 0 && s <= 1) maxDist = Math.max(maxDist, t);
+    }
+    // Fallback when no segment faces this ray: use the nearest vertex distance.
+    if (maxDist === 0) {
+      for (const [vx, vy] of poly) maxDist = Math.max(maxDist, Math.hypot(vx - cx, vy - cy));
+    }
+    dists.push(maxDist);
+  }
+  return dists;
+}
+
+/**
+ * Run the full detection pipeline given a known centre (cx, cy) and ring-width
+ * estimate w.  Returns a SingleTargetResult; throws on unrecoverable failure.
+ *
+ * @param nnBoundary  Optional pre-computed boundary polygon from the NN
+ *                    (Ph-14).  When provided, the ray-scan is skipped and
+ *                    fitBoundaryPolygon is bypassed — the NN polygon is used
+ *                    directly as paperBoundary.
+ */
+function runDetectionPipeline(
+  rgba: Uint8Array, width: number, height: number,
+  cx: number, cy: number, w: number,
+  nnBoundary?: [number, number][],
+): SingleTargetResult {
+  const N_BOUNDARY = 180;
+  const N_RINGS    = 32;
+
+  let smoothedDists: number[];
+  let smoothedPoints: Pixel[];
+  let nnPaperBoundary: TargetBoundary | undefined;
+
+  if (nnBoundary && nnBoundary.length >= 3) {
+    // Ph-14: use NN-predicted boundary — skip ray-scan entirely.
+    smoothedDists  = polyToRayDists(nnBoundary, cx, cy, N_BOUNDARY);
+    smoothedPoints = smoothedDists.map((d, i) => {
+      const theta = (i / N_BOUNDARY) * 2 * Math.PI;
+      return { x: Math.round(cx + d * Math.cos(theta)), y: Math.round(cy + d * Math.sin(theta)) };
+    });
+    nnPaperBoundary = {
+      points: nnBoundary.map(([x, y]) => [
+        Math.max(0, Math.min(width  - 1, Math.round(x))),
+        Math.max(0, Math.min(height - 1, Math.round(y))),
+      ]),
+    };
+  } else {
+    // Ray-scan boundary (fallback / no NN model available).
+    // Start scanning from 4×w (past yellow+red zones) so hay-bale hue range
+    // is not confused with the yellow scoring zone.
+    const boundary = scanTargetBoundary(
+      rgba, width, height, cx, cy, Math.max(w * 4, 20), N_BOUNDARY,
+    );
+    // Smooth per-ray distances with a circular median filter (±5 rays = ±10°).
+    smoothedDists  = medianFilter1D(boundary.dists, 5);
+    smoothedPoints = smoothedDists.map((d, i) => {
+      const theta = (i / N_BOUNDARY) * 2 * Math.PI;
+      return { x: Math.round(cx + d * Math.cos(theta)), y: Math.round(cy + d * Math.sin(theta)) };
+    });
+  }
+  if (process.env.DEBUG_RINGS) {
+    const medD = arrayMedian(smoothedDists);
+    console.error(`[debug] boundary median dist=${medD.toFixed(1)} min=${Math.min(...smoothedDists).toFixed(1)} max=${Math.max(...smoothedDists).toFixed(1)}`);
+  }
+
+  // Phase 2 — per-image colour calibration.
+  // sampleZoneColours uses N_BOUNDARY rays for the same smoothedDists array.
+  const zoneSamples = sampleZoneColours(rgba, width, height, cx, cy, w, smoothedDists);
+  const calibration = computeCalibration(zoneSamples) ?? undefined;
+
+  // Phase 3 — colour-guided ring detection (falls back to luminance if no calibration).
+  // Subsample smoothedDists to N_RINGS angles by picking every other ray.
+  const smoothedDistsRings = Array.from({ length: N_RINGS }, (_, i) =>
+    smoothedDists[Math.round(i * N_BOUNDARY / N_RINGS) % N_BOUNDARY],
+  );
+  const { ringPoints: rawTransitionPoints, rayDebug } = calibration
+    ? collectRingPointsColourGuided(rgba, width, height, cx, cy, w, N_RINGS, smoothedDistsRings, calibration)
+    : { ringPoints: collectRingPoints(rgba, width, height, cx, cy, w, N_RINGS, 0.4, smoothedDistsRings), rayDebug: [] };
+
+  // Filter outlier points: any point whose radius deviates by more than 0.15w from
+  // its angular-local median is snapped to that median radius.  This corrects
+  // stray detections (arrow holes, single-ray noise) without discarding points.
+  const transitionPoints = rawTransitionPoints.map(
+    pts => filterRingOutliers(pts, cx, cy, w * 0.15),
+  );
+
+  // Fix R2: ratio-based sanity clamp for ring[7].
+  // Expected r7/r5 ≈ 8/6 ≈ 1.333 (WA zone boundaries at 8w and 6w respectively).
+  // Under uneven evening/indoor lighting the luminance-gradient scan can latch onto
+  // the wrong grey→white transition, placing ring[7] at the wrong radius.  When
+  // the measured r7/r5 ratio is outside [1.05, 1.55], or when ring[7] has too few
+  // detected points (< 3), we rebuild ring[7] from ring[5] points scaled outward by
+  // the expected 8/6 factor.
+  {
+    const R7_R5_EXPECTED = 8 / 6;
+    const r5pts = transitionPoints[5];
+    const r7pts = transitionPoints[7];
+    if (r5pts.length >= 3) {
+      const medianR = (pts: Pixel[]) => {
+        const sorted = pts.map(p => Math.hypot(p.x - cx, p.y - cy)).sort((a, b) => a - b);
+        return sorted[Math.floor(sorted.length / 2)];
+      };
+      const r5med = medianR(r5pts);
+      const r7med = r7pts.length >= 3 ? medianR(r7pts) : 0;
+      const ratio = r5med > 0 && r7pts.length >= 3 ? r7med / r5med : 0;
+      if (process.env.DEBUG_RINGS) {
+        console.error(`[debug] R2 check: r5med=${r5med.toFixed(1)} r7med=${r7med.toFixed(1)} ratio=${ratio.toFixed(3)} n7=${r7pts.length}`);
+      }
+      if (r5med > 0 && (r7pts.length < 3 || ratio < 1.05 || ratio > 1.55)) {
+        const predictedR7 = r5med * R7_R5_EXPECTED;
+        transitionPoints[7] = r5pts.map(p => {
+          const d = Math.hypot(p.x - cx, p.y - cy);
+          if (d === 0) return p;
+          const s = predictedR7 / d;
+          return { x: cx + (p.x - cx) * s, y: cy + (p.y - cy) * s };
+        });
+        if (process.env.DEBUG_RINGS) {
+          console.error(`[debug] R2 clamp: r7/r5=${ratio.toFixed(3)} n7=${r7pts.length} → rebuilt ring[7] from ring[5] at ${predictedR7.toFixed(1)}px`);
+        }
+      }
+    }
+  }
+
+  // Build splines for the 5 directly-detected rings [1,3,5,7,9] plus regression-
+  // derived white boundaries [8,9].  Intra-zone rings [0,2,4,6] are filled below
+  // by spline-level interpolation — this avoids accumulating per-ray detection
+  // noise into regions that have no colour-zone boundary to anchor them.
+  const rings: SplineRing[] = transitionPoints.map(pts => radialProfileToSpline(pts, cx, cy));
+
+  // Interpolate intra-zone ring splines from adjacent detected zone boundaries.
+  // Each WA zone is divided exactly in half, so t=0.5 is geometrically correct.
+  const LERP_K = 12;
+  const resample = (ring: SplineRing): [number, number][] => {
+    const all = sampleClosedSpline(ring.points, LERP_K * ring.points.length);
+    const step = all.length / LERP_K;
+    return Array.from({ length: LERP_K }, (_, i) => all[Math.floor(i * step)] as [number, number]);
+  };
+  const centerRing: SplineRing = { points: Array.from({ length: LERP_K }, () => [cx, cy] as [number, number]) };
+  const lerpSpline = (a: SplineRing, b: SplineRing): SplineRing => {
+    const aPts = resample(a);
+    const bPts = resample(b);
+    return { points: aPts.map((pa, i) => [(pa[0] + bPts[i][0]) / 2, (pa[1] + bPts[i][1]) / 2] as [number, number]) };
+  };
+  rings[0] = lerpSpline(centerRing, rings[1]);  // gold inner  (X-ring)
+  rings[2] = lerpSpline(rings[1],   rings[3]);  // red inner
+  rings[4] = lerpSpline(rings[3],   rings[5]);  // blue inner
+  rings[6] = lerpSpline(rings[5],   rings[7]);  // black inner
+  rings[8] = lerpSpline(rings[7],   rings[9]);  // white inner
+
+  // Post-processing: ensure all ring splines are strictly radially ordered.
+  // Works in the dense-sample domain (10 angles) so the guarantee holds for
+  // the rendered curve, not just the sparse control points.
+  const orderedRings = enforceRadialOrdering(rings, cx, cy);
+
+  // Use NN boundary directly when available; otherwise fit from ray-scan points.
+  const paperBoundary: TargetBoundary = nnPaperBoundary ?? (() => {
+    const rawBoundary = fitBoundaryPolygon(smoothedPoints);
+    return {
+      points: rawBoundary.points.map(([x, y]) => [
+        Math.max(0, Math.min(width  - 1, x)),
+        Math.max(0, Math.min(height - 1, y)),
+      ]),
+    };
+  })();
+
+  // ringPoints only exposes the 4 directly-detected colour-transition rings
+  // (indices 1,3,5,7) plus the regression-derived white rings (8,9).
+  const detectedRingPoints = transitionPoints.map((pts, i) =>
+    [0, 2, 4, 6].includes(i) ? [] : pts,
+  );
+
+  return {
+    rings: orderedRings,
+    paperBoundary,
+    calibration,
+    ringPoints: detectedRingPoints,
+    rayDebug: rayDebug.length > 0 ? rayDebug : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main findTarget function
 // ---------------------------------------------------------------------------
 
@@ -1255,14 +1569,10 @@ export function findTarget(
 ): ArcheryResult {
   try {
     // Phase 1 — adaptive colour detection.
-    // Downsample the image 4× before pretreating so the Gaussian blur + morph
-    // runs on a 300×300 image instead of 1200×1200, giving a ~16× speedup for
-    // the bootstrap step.  Centroid and radius are scaled back up afterward.
+    // Downsample 2× before pretreating for a ~4× speedup on the bootstrap step.
     const BOOTSTRAP_SCALE = 2;
     const ds = downsampleRgba(rgba, width, height, BOOTSTRAP_SCALE);
     const pretreated = pretreat(ds.data, ds.width, ds.height);
-    // Build HSV cache for the pretreated image once so the 6 applyHsvFilter calls
-    // (3 colours × 2 passes) share the same precomputed values.
     const pretreatedHsv = buildHsvCache(pretreated, ds.width * ds.height);
 
     const blobs = {
@@ -1270,7 +1580,6 @@ export function findTarget(
       red:    detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'red',    pretreatedHsv),
       blue:   detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'blue',   pretreatedHsv),
     };
-    // Scale centroid + radius back to full-resolution coordinates.
     for (const blob of Object.values(blobs)) {
       if (!blob) continue;
       blob.centroid.x *= BOOTSTRAP_SCALE;
@@ -1279,157 +1588,85 @@ export function findTarget(
     }
 
     if (Object.values(blobs).every(b => b === null)) {
-      return { rings: [], success: false, error: 'No colour blobs found' };
+      return { targets: [], rings: [], success: false, error: 'No colour blobs found' };
     }
 
-    // Phase 2 — coarse centre + ring-width estimate
     const { cx, cy, w } = estimateCenterAndScale(blobs);
-
     if (w <= 0 || !isFinite(cx) || !isFinite(cy)) {
-      return { rings: [], success: false, error: 'Invalid bootstrap estimate' };
+      return { targets: [], rings: [], success: false, error: 'Invalid bootstrap estimate' };
     }
 
-    // Phase 2b — Detect target paper boundary.
-    // Start scanning from 4×w (past yellow+red zones) so hay-bale hue range
-    // is not confused with the yellow scoring zone.  Per-ray distances cap all
-    // subsequent ring searches, preventing ellipses from extending beyond the
-    // rectangular white target border.
-    // Boundary scan uses 180 rays (2° per ray) — enough for precise polygon-corner
-    // fitting.  Ring detection uses 32 rays (each ring still gets ample coverage).
-    const N_BOUNDARY = 180;
-    const N_RINGS    = 32;
-    const boundary = scanTargetBoundary(
-      rgba, width, height, cx, cy, Math.max(w * 4, 20), N_BOUNDARY,
-    );
-    // Smooth the per-ray distances with a circular median filter (±5 rays = ±10°)
-    // to eliminate single-angle outliers caused by hay-straw spikes or
-    // borderline-threshold pixels at isolated angles.
-    const smoothedDists = medianFilter1D(boundary.dists, 5);
-    const smoothedPoints = smoothedDists.map((d, i) => {
-      const theta = (i / N_BOUNDARY) * 2 * Math.PI;
-      return { x: Math.round(cx + d * Math.cos(theta)), y: Math.round(cy + d * Math.sin(theta)) };
-    });
-    if (process.env.DEBUG_RINGS) {
-      const medD = arrayMedian(smoothedDists);
-      console.error(`[debug] boundary median dist=${medD.toFixed(1)} min=${Math.min(...smoothedDists).toFixed(1)} max=${Math.max(...smoothedDists).toFixed(1)}`);
-    }
-
-    // Phase 2 — per-image colour calibration.
-    // sampleZoneColours uses N_BOUNDARY rays for the same smoothedDists array.
-    const zoneSamples = sampleZoneColours(rgba, width, height, cx, cy, w, smoothedDists);
-    const calibration = computeCalibration(zoneSamples) ?? undefined;
-
-    // Phase 3 — colour-guided ring detection (falls back to luminance if no calibration).
-    // Subsample smoothedDists to N_RINGS angles by picking every other ray.
-    const smoothedDistsRings = Array.from({ length: N_RINGS }, (_, i) =>
-      smoothedDists[Math.round(i * N_BOUNDARY / N_RINGS) % N_BOUNDARY],
-    );
-    const { ringPoints: rawTransitionPoints, rayDebug } = calibration
-      ? collectRingPointsColourGuided(rgba, width, height, cx, cy, w, N_RINGS, smoothedDistsRings, calibration)
-      : { ringPoints: collectRingPoints(rgba, width, height, cx, cy, w, N_RINGS, 0.4, smoothedDistsRings), rayDebug: [] };
-
-    // Filter outlier points: any point whose radius deviates by more than 0.15w from
-    // its angular-local median is snapped to that median radius.  This corrects
-    // stray detections (arrow holes, single-ray noise) without discarding points.
-    const transitionPoints = rawTransitionPoints.map(
-      pts => filterRingOutliers(pts, cx, cy, w * 0.15),
-    );
-
-    // Fix R2: ratio-based sanity clamp for ring[7].
-    // Expected r7/r5 ≈ 8/6 ≈ 1.333 (WA zone boundaries at 8w and 6w respectively).
-    // Under uneven evening/indoor lighting the luminance-gradient scan can latch onto
-    // the wrong grey→white transition, placing ring[7] at the wrong radius.  When
-    // the measured r7/r5 ratio is outside [1.05, 1.65], or when ring[7] has too few
-    // detected points (< 3), we rebuild ring[7] from ring[5] points scaled outward by
-    // the expected 8/6 factor.  Using ring[5] (not ring[7]) as the source ensures the
-    // rebuilt ring inherits the full 32-ray angular coverage and correct centre.
-    {
-      const R7_R5_EXPECTED = 8 / 6;
-      const r5pts = transitionPoints[5];
-      const r7pts = transitionPoints[7];
-      if (r5pts.length >= 3) {
-        const medianR = (pts: Pixel[]) => {
-          const sorted = pts.map(p => Math.hypot(p.x - cx, p.y - cy)).sort((a, b) => a - b);
-          return sorted[Math.floor(sorted.length / 2)];
-        };
-        const r5med = medianR(r5pts);
-        const r7med = r7pts.length >= 3 ? medianR(r7pts) : 0;
-        const ratio = r5med > 0 && r7pts.length >= 3 ? r7med / r5med : 0;
-        if (process.env.DEBUG_RINGS) {
-          console.error(`[debug] R2 check: r5med=${r5med.toFixed(1)} r7med=${r7med.toFixed(1)} ratio=${ratio.toFixed(3)} n7=${r7pts.length}`);
-        }
-        if (r5med > 0 && (r7pts.length < 3 || ratio < 1.05 || ratio > 1.55)) {
-          const predictedR7 = r5med * R7_R5_EXPECTED;
-          transitionPoints[7] = r5pts.map(p => {
-            const d = Math.hypot(p.x - cx, p.y - cy);
-            if (d === 0) return p;
-            const s = predictedR7 / d;
-            return { x: cx + (p.x - cx) * s, y: cy + (p.y - cy) * s };
-          });
-          if (process.env.DEBUG_RINGS) {
-            console.error(`[debug] R2 clamp: r7/r5=${ratio.toFixed(3)} n7=${r7pts.length} → rebuilt ring[7] from ring[5] at ${predictedR7.toFixed(1)}px`);
-          }
-        }
-      }
-    }
-
-    const maxBoundaryR = Math.max(...smoothedDists);
-
-    // Build splines for the 5 directly-detected rings [1,3,5,7,9] plus regression-
-    // derived white boundaries [8,9].  Intra-zone rings [0,2,4,6] are filled below
-    // by spline-level interpolation — this avoids accumulating per-ray detection
-    // noise into regions that have no colour-zone boundary to anchor them.
-    const rings: SplineRing[] = transitionPoints.map(pts => radialProfileToSpline(pts, cx, cy));
-
-    // Interpolate intra-zone ring splines from adjacent detected zone boundaries.
-    // Each WA zone is divided exactly in half, so t=0.5 is geometrically correct.
-    // Ring[0]: between the target centre and ring[1] (the gold/red boundary spline).
-    // Resample a spline to exactly K uniformly-distributed points for arithmetic operations.
-    const LERP_K = 12;
-    const resample = (ring: SplineRing): [number, number][] => {
-      const all = sampleClosedSpline(ring.points, LERP_K * ring.points.length);
-      const step = all.length / LERP_K;
-      return Array.from({ length: LERP_K }, (_, i) => all[Math.floor(i * step)] as [number, number]);
-    };
-    const centerRing: SplineRing = { points: Array.from({ length: LERP_K }, () => [cx, cy] as [number, number]) };
-    const lerpSpline = (a: SplineRing, b: SplineRing): SplineRing => {
-      const aPts = resample(a);
-      const bPts = resample(b);
-      return { points: aPts.map((pa, i) => [(pa[0] + bPts[i][0]) / 2, (pa[1] + bPts[i][1]) / 2] as [number, number]) };
-    };
-    rings[0] = lerpSpline(centerRing, rings[1]);  // gold inner  (X-ring)
-    rings[2] = lerpSpline(rings[1],   rings[3]);  // red inner
-    rings[4] = lerpSpline(rings[3],   rings[5]);  // blue inner
-    rings[6] = lerpSpline(rings[5],   rings[7]);  // black inner
-    rings[8] = lerpSpline(rings[7],   rings[9]);  // white inner
-
-    // Fit a boundary polygon (4–8 vertices) to the full set of boundary points.
-    // The extra vertices capture bowed or folded paper edges that a fixed
-    // 4-corner quad cannot represent.
-    const rawBoundary = fitBoundaryPolygon(smoothedPoints);
-    const paperBoundary: TargetBoundary = {
-      points: rawBoundary.points.map(([x, y]) => [
-        Math.max(0, Math.min(width  - 1, x)),
-        Math.max(0, Math.min(height - 1, y)),
-      ]),
-    };
-
-    // ringPoints only exposes the 4 directly-detected colour-transition rings
-    // (indices 1,3,5,7) plus the regression-derived white rings (8,9).
-    // Intra-zone rings (0,2,4,6) have no raw detection points.
-    const detectedRingPoints = transitionPoints.map((pts, i) =>
-      [0, 2, 4, 6].includes(i) ? [] : pts,
-    );
-
+    const target = runDetectionPipeline(rgba, width, height, cx, cy, w);
     return {
-      rings,
-      paperBoundary,
-      calibration,
-      ringPoints: detectedRingPoints,
-      rayDebug: rayDebug.length > 0 ? rayDebug : undefined,
+      targets: [target],
+      rings: target.rings,
+      paperBoundary: target.paperBoundary,
+      calibration: target.calibration,
+      ringPoints: target.ringPoints,
+      rayDebug: target.rayDebug,
       success: true,
     };
   } catch (e) {
-    return { rings: [], success: false, error: String(e) };
+    return { targets: [], rings: [], success: false, error: String(e) };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Seeded detection — findRingSetFromCenter
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect one ring set anchored at a user-supplied seed point (cx, cy).
+ *
+ * Skips global colour-blob clustering; instead runs blob detection biased
+ * toward the seed so the ring-width estimate comes from the colour zones
+ * near the clicked location.  Then runs the full boundary-scan + ring-
+ * detection pipeline with (cx, cy) as the fixed centre.
+ *
+ * Throws (rather than returning a failure union) so the caller can catch
+ * and surface the error to the annotation UI.
+ */
+export function findRingSetFromCenter(
+  rgba: Uint8Array,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+): SingleTargetResult {
+  // Downsample + pretreat (same as findTarget).
+  const BOOTSTRAP_SCALE = 2;
+  const ds = downsampleRgba(rgba, width, height, BOOTSTRAP_SCALE);
+  const pretreated = pretreat(ds.data, ds.width, ds.height);
+  const pretreatedHsv = buildHsvCache(pretreated, ds.width * ds.height);
+
+  // Blob detection biased toward the seed point (in downsampled coords).
+  const anchorDs = { x: cx / BOOTSTRAP_SCALE, y: cy / BOOTSTRAP_SCALE };
+  const blobs = {
+    yellow: detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'yellow', pretreatedHsv, anchorDs),
+    red:    detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'red',    pretreatedHsv, anchorDs),
+    blue:   detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'blue',   pretreatedHsv, anchorDs),
+  };
+  for (const blob of Object.values(blobs)) {
+    if (!blob) continue;
+    blob.centroid.x *= BOOTSTRAP_SCALE;
+    blob.centroid.y *= BOOTSTRAP_SCALE;
+    blob.meanRadius *= BOOTSTRAP_SCALE;
+  }
+
+  // Estimate ring width from nearby blobs; use provided seed as centre (not blob centroid).
+  const foundBlobs = Object.values(blobs).filter(b => b !== null) as ColorBlob[];
+  let w: number;
+  if (foundBlobs.length > 0) {
+    ({ w } = estimateCenterAndScale(blobs));
+  } else {
+    // No colour blobs found near seed — fall back to image-size heuristic.
+    // A standard target fills roughly 1/5 of the shorter image dimension.
+    w = Math.min(width, height) / 50;
+  }
+
+  if (w <= 0 || !isFinite(w) || !isFinite(cx) || !isFinite(cy)) {
+    throw new Error('Invalid scale estimate from seed');
+  }
+
+  return runDetectionPipeline(rgba, width, height, cx, cy, w);
 }

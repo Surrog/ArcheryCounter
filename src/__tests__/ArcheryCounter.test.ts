@@ -1,6 +1,9 @@
 import ArcheryCounter from '../ArcheryCounter';
 
-jest.mock('../targetDetection', () => ({ findTarget: jest.fn() }));
+jest.mock('../targetDetection', () => ({
+  findTarget: jest.fn(),
+  pointInPolygon: jest.fn().mockReturnValue(true),
+}));
 jest.mock('../arrowDetector',   () => ({ detectArrowsNN: jest.fn() }));
 jest.mock('../imageLoader',     () => ({ decodeBase64Jpeg: jest.fn() }));
 
@@ -24,7 +27,10 @@ describe('ArcheryCounter.processImage', () => {
     jest.clearAllMocks();
     decodeBase64Jpeg.mockReturnValue({ rgba: MOCK_RGBA, width: MOCK_W, height: MOCK_H });
     findTarget.mockReturnValue({
-      success: true, rings: MOCK_RINGS, paperBoundary: MOCK_BOUNDARY,
+      success: true,
+      targets: [{ rings: MOCK_RINGS, paperBoundary: MOCK_BOUNDARY }],
+      rings: MOCK_RINGS,
+      paperBoundary: MOCK_BOUNDARY,
       calibration: null, ringPoints: null,
     });
   });
@@ -46,7 +52,7 @@ describe('ArcheryCounter.processImage', () => {
     const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
 
     expect(detectArrowsNN).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H, MODEL_PATH);
-    expect(result.arrows).toBe(MOCK_ARROWS);
+    expect(result.arrows).toStrictEqual(MOCK_ARROWS);
   });
 
   it('returns empty arrows when detectArrowsNN throws', async () => {
@@ -55,6 +61,17 @@ describe('ArcheryCounter.processImage', () => {
     const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
 
     expect(result.arrows).toEqual([]);
+  });
+
+  it('logs a warning via console.warn when detectArrowsNN throws', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    detectArrowsNN.mockRejectedValue(new Error('model missing output key'));
+
+    await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toMatch(/Arrow detection failed/i);
+    warnSpy.mockRestore();
   });
 
   it('throws the detection error when findTarget fails', async () => {

@@ -3,7 +3,8 @@ import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
 import Svg, { Circle, Line, Path, Polygon } from 'react-native-svg';
 import type { SplineRing } from '../spline';
 import { sampleClosedSpline } from '../spline';
-import type { TargetBoundary, Pixel } from '../targetDetection';
+import type { Pixel } from '../targetDetection';
+import type { TargetResult } from '../ArcheryCounter';
 import type { ScoredArrow } from '../scoring';
 import { computeLetterboxTransform } from '../letterboxTransform';
 
@@ -22,12 +23,16 @@ export const DEFAULT_VISIBILITY: OverlayVisibility = {
 };
 
 interface Props {
-  rings: SplineRing[];
-  /** Detected target paper boundary polygon in image pixels */
-  paperBoundary?: TargetBoundary | null;
-  /** Detected arrows */
+  /** All detected targets (rings + boundary per target). */
+  targets: TargetResult[];
+  /**
+   * Index of the selected target (0-based). When set, only that target's rings
+   * and boundary are rendered; otherwise all targets are shown.
+   */
+  selectedTargetIdx?: number | null;
+  /** Detected arrows (pre-filtered to the selected target by the caller, if needed). */
   arrows?: ScoredArrow[] | null;
-  /** Raw per-ray ring transition points (index 0 = innermost ring) */
+  /** Raw per-ray ring transition points for the first target (index 0 = innermost ring) */
   ringPoints?: Pixel[][] | null;
   /** Original pixel dimensions of the source image */
   imageNaturalWidth: number;
@@ -62,8 +67,8 @@ interface ViewSize {
  * the ring paths are aligned with the actual pixels of the displayed photo.
  */
 export function RingOverlay({
-  rings,
-  paperBoundary,
+  targets,
+  selectedTargetIdx = null,
   arrows,
   ringPoints,
   imageNaturalWidth,
@@ -85,65 +90,74 @@ export function RingOverlay({
   const tx = (px: number) => px * (transform?.scale ?? 1) + (transform?.offsetX ?? 0);
   const ty = (py: number) => py * (transform?.scale ?? 1) + (transform?.offsetY ?? 0);
 
+  const visibleTargets: TargetResult[] = selectedTargetIdx !== null
+    ? (targets[selectedTargetIdx] ? [targets[selectedTargetIdx]] : [])
+    : targets;
+
   return (
     <View style={StyleSheet.absoluteFill} onLayout={handleLayout} pointerEvents="none">
       {transform && viewSize.width > 0 && (
         <Svg width={viewSize.width} height={viewSize.height}>
 
-          {/* Paper boundary — dashed lime quadrilateral */}
-          {visibility.boundary && paperBoundary && paperBoundary.points.length >= 3 && (() => {
-            const points = paperBoundary.points
-              .map(([px, py]) => `${tx(px)},${ty(py)}`)
-              .join(' ');
-            return (
-              <Polygon
-                points={points}
-                fill="none"
-                stroke="#00FF88"
-                strokeWidth={2}
-                strokeDasharray="8 4"
-              />
-            );
-          })()}
+          {visibleTargets.map((target, ti) => {
+            const rings: SplineRing[] = target.rings;
+            const boundary = target.paperBoundary;
 
-          {/* Rays — lines from target centre to each detected ring transition point */}
-          {visibility.rays && ringPoints && ringPoints.length > 0 && (() => {
-            // Compute centre from innermost ring
-            const inner = rings[0];
-            if (!inner) return null;
-            const icx = inner.points.reduce((s, p) => s + p[0], 0) / inner.points.length;
-            const icy = inner.points.reduce((s, p) => s + p[1], 0) / inner.points.length;
-            // Collect all unique ray endpoints from the outermost detected ring
-            const outerPts = ringPoints[ringPoints.length - 1] ?? [];
-            return outerPts.map((pt, i) => (
-              <Line
-                key={i}
-                x1={tx(icx)} y1={ty(icy)}
-                x2={tx(pt.x)} y2={ty(pt.y)}
-                stroke="rgba(255,255,255,0.25)"
-                strokeWidth={0.8}
-              />
-            ));
-          })()}
-
-          {/* Scoring rings */}
-          {visibility.rings && rings.map((ring, i) => {
-            const sampled = sampleClosedSpline(ring.points, 120);
-            if (sampled.length < 2) return null;
-            const [first, ...rest] = sampled;
-            let d = `M ${tx(first[0])} ${ty(first[1])}`;
-            for (const [px, py] of rest) {
-              d += ` L ${tx(px)} ${ty(py)}`;
-            }
-            d += ' Z';
             return (
-              <Path
-                key={i}
-                d={d}
-                fill="none"
-                stroke={RING_STROKE[i] ?? '#00FF00'}
-                strokeWidth={1.5}
-              />
+              <React.Fragment key={ti}>
+                {/* Paper boundary — dashed lime polygon */}
+                {visibility.boundary && boundary.length >= 3 && (() => {
+                  const pts = boundary.map(([px, py]) => `${tx(px)},${ty(py)}`).join(' ');
+                  return (
+                    <Polygon
+                      points={pts}
+                      fill="none"
+                      stroke="#00FF88"
+                      strokeWidth={2}
+                      strokeDasharray="8 4"
+                    />
+                  );
+                })()}
+
+                {/* Rays — lines from first target centre to each ring transition point */}
+                {ti === 0 && visibility.rays && ringPoints && ringPoints.length > 0 && (() => {
+                  const inner = rings[0];
+                  if (!inner) return null;
+                  const icx = inner.points.reduce((s, p) => s + p[0], 0) / inner.points.length;
+                  const icy = inner.points.reduce((s, p) => s + p[1], 0) / inner.points.length;
+                  const outerPts = ringPoints[ringPoints.length - 1] ?? [];
+                  return outerPts.map((pt, i) => (
+                    <Line
+                      key={i}
+                      x1={tx(icx)} y1={ty(icy)}
+                      x2={tx(pt.x)} y2={ty(pt.y)}
+                      stroke="rgba(255,255,255,0.25)"
+                      strokeWidth={0.8}
+                    />
+                  ));
+                })()}
+
+                {/* Scoring rings (skip target if no rings detected) */}
+                {visibility.rings && rings.length > 0 && rings.map((ring, i) => {
+                  const sampled = sampleClosedSpline(ring.points, 120);
+                  if (sampled.length < 2) return null;
+                  const [first, ...rest] = sampled;
+                  let d = `M ${tx(first[0])} ${ty(first[1])}`;
+                  for (const [px, py] of rest) {
+                    d += ` L ${tx(px)} ${ty(py)}`;
+                  }
+                  d += ' Z';
+                  return (
+                    <Path
+                      key={i}
+                      d={d}
+                      fill="none"
+                      stroke={RING_STROKE[i] ?? '#00FF00'}
+                      strokeWidth={1.5}
+                    />
+                  );
+                })}
+              </React.Fragment>
             );
           })}
 

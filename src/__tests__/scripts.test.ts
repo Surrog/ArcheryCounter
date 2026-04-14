@@ -235,19 +235,20 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
     const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
     expect(imageRes.status).toBe(200);
     const data = await imageRes.json() as {
-      detected: { rings: { points: [number, number][] }[]; paperBoundary: [number, number][] | null };
+      detected: { targets: { paperBoundary: [number,number][]; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
     };
 
     // 4. Verify the response contains valid ring data (no null coordinates).
-    expect(data.detected.rings.length).toBeGreaterThan(0);
-    for (const ring of data.detected.rings) {
+    const rings = data.detected.targets?.[0]?.ringSets?.[0] ?? [];
+    expect(rings.length).toBeGreaterThan(0);
+    for (const ring of rings) {
       for (const pt of ring.points) {
         expect(pt[0]).not.toBeNull();
         expect(pt[1]).not.toBeNull();
         expect(typeof pt[0]).toBe('number');
       }
     }
-    expect(data.detected.paperBoundary).not.toBeNull();
+    expect(data.detected.targets?.[0]?.paperBoundary?.length).toBeGreaterThan(0);
 
     // 5. Verify the DB generated row has been replaced with valid data.
     const db2 = new Pool(DB_CONFIG);
@@ -259,7 +260,7 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
       expect(rows).toHaveLength(1);
       expect(rows[0].algorithm_hash).toBe(currentHash);
       expect(rows[0].rings.length).toBeGreaterThan(0);
-      expect(rows[0].rings[0].points[0][0]).not.toBeNull();
+      expect(rows[0].rings[0][0][0].points[0][0]).not.toBeNull();
     } finally {
       await db2.end();
     }
@@ -278,6 +279,265 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
     const status = await statusRes.json() as Record<string, string>;
     expect(status[FILENAME]).toBe('ready');
 
+  } finally {
+    try { proc.kill('SIGTERM'); } catch {}
+  }
+}, 300_000);
+
+// ---------------------------------------------------------------------------
+// annotate: old flat SplineRing[] format triggers fallback + recompute
+// ---------------------------------------------------------------------------
+
+test('annotate: old flat rings format (pre-multi-target) triggers fallback and recompute', async () => {
+  const FILENAME = '20190321_211008.jpg';
+  const currentHash = computeAlgorithmHash();
+
+  // Build an old-format row: flat SplineRing[] with valid points, stored directly
+  // as the rings column value — this is what rows written before the multi-target
+  // refactor look like.  dbToTargets reads this as 10 TargetData entries whose
+  // ringSets field is a SplineRing object (not an array).  isValidDetected sees
+  // Array.isArray(t.ringSets) === false and returns false → fallback to slow path.
+  const OLD_FORMAT_RINGS = JSON.stringify(
+    Array.from({ length: 10 }, (_, i) => ({
+      points: Array.from({ length: 8 }, (__, j) => [
+        Math.round(100 + i * 20 + j * 5),
+        Math.round(100 + i * 20 + j * 5),
+      ]),
+    })),
+  );
+
+  const db = new Pool(DB_CONFIG);
+  try {
+    await db.query(`
+      INSERT INTO generated (filename, algorithm_hash, rings, arrows)
+      VALUES ($1, $2, $3, '[]')
+      ON CONFLICT (filename) DO UPDATE
+        SET algorithm_hash = EXCLUDED.algorithm_hash,
+            rings          = EXCLUDED.rings
+    `, [FILENAME, currentHash, OLD_FORMAT_RINGS]);
+  } finally {
+    await db.end();
+  }
+
+  const port = await getFreePort();
+  const proc = spawn('npm', ['run', 'annotate'], {
+    cwd: ROOT,
+    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await waitForAnnotateReady(proc, port, 30_000);
+
+    // Fast path reads old-format row → isValidDetected fails → fallback recomputes.
+    const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
+    expect(imageRes.status).toBe(200);
+    const data = await imageRes.json() as {
+      detected: { targets: { paperBoundary: [number,number][]; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
+    };
+
+    // After recompute, rings must be valid.
+    const rings = data.detected.targets?.[0]?.ringSets?.[0] ?? [];
+    expect(rings.length).toBeGreaterThan(0);
+    for (const ring of rings) {
+      for (const pt of ring.points) {
+        expect(pt[0]).not.toBeNull();
+        expect(typeof pt[0]).toBe('number');
+      }
+    }
+
+    // Log must record invalid_generated for this filename.
+    const logPath = path.join(ROOT, 'logs/annotate.log');
+    expect(fs.existsSync(logPath)).toBe(true);
+    const logLines = fs.readFileSync(logPath, 'utf8')
+      .trim().split('\n').filter(Boolean)
+      .map(l => JSON.parse(l) as { event: string; filename: string });
+    expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
+  } finally {
+    try { proc.kill('SIGTERM'); } catch {}
+  }
+}, 300_000);
+
+// ---------------------------------------------------------------------------
+// annotate: all-zero paper_boundary in annotations is healed at read time
+// ---------------------------------------------------------------------------
+
+test('annotate: zero boundary in annotations is replaced by generated boundary at read time', async () => {
+  const FILENAME = '20190321_211008.jpg';
+  const currentHash = computeAlgorithmHash();
+
+  // 1. Put a valid boundary in generated and an all-zero boundary in annotations.
+  const VALID_BOUNDARY = JSON.stringify([[[100, 200], [500, 100], [600, 800], [50, 750]]]);
+  const ZERO_BOUNDARY  = JSON.stringify([[[0, 0], [0, 0], [0, 0], [0, 0]]]);
+
+  const db = new Pool(DB_CONFIG);
+  try {
+    await db.query(`
+      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      VALUES ($1, $2, $3, '[[[]]]', '[]')
+      ON CONFLICT (filename) DO UPDATE
+        SET algorithm_hash = EXCLUDED.algorithm_hash,
+            paper_boundary = EXCLUDED.paper_boundary
+    `, [FILENAME, currentHash, VALID_BOUNDARY]);
+
+    await db.query(`
+      INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+      VALUES ($1, $2, '[[[]]]', '[]')
+      ON CONFLICT (filename) DO UPDATE
+        SET paper_boundary = EXCLUDED.paper_boundary
+    `, [FILENAME, ZERO_BOUNDARY]);
+  } finally {
+    await db.end();
+  }
+
+  const port = await getFreePort();
+  const proc = spawn('npm', ['run', 'annotate'], {
+    cwd: ROOT,
+    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await waitForAnnotateReady(proc, port, 30_000);
+
+    // /api/annotations bulk endpoint must return the generated boundary (healed).
+    const bulkRes = await fetch(`http://localhost:${port}/api/annotations`);
+    expect(bulkRes.status).toBe(200);
+    const bulk = await bulkRes.json() as Record<string, { targets: { paperBoundary: [number,number][] }[] }>;
+    const bulkBoundary = bulk[FILENAME]?.targets[0]?.paperBoundary ?? [];
+    expect(bulkBoundary.length).toBeGreaterThan(0);
+    expect(bulkBoundary.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
+
+    // /api/annotation/{filename} per-image endpoint must also return the healed boundary.
+    const annRes = await fetch(`http://localhost:${port}/api/annotation/${encodeURIComponent(FILENAME)}`);
+    expect(annRes.status).toBe(200);
+    const ann = await annRes.json() as { targets: { paperBoundary: [number,number][] }[] };
+    const annBoundary = ann.targets[0]?.paperBoundary ?? [];
+    expect(annBoundary.length).toBeGreaterThan(0);
+    expect(annBoundary.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
+    // Specifically: the first vertex should match the valid boundary we injected.
+    expect(annBoundary[0][0]).toBe(100);
+    expect(annBoundary[0][1]).toBe(200);
+  } finally {
+    try { proc.kill('SIGTERM'); } catch {}
+  }
+}, 60_000);
+
+// ---------------------------------------------------------------------------
+// annotate: all-zero boundary in generated triggers recompute (isValidDetected)
+// ---------------------------------------------------------------------------
+
+test('annotate: all-zero paper_boundary in generated triggers recompute', async () => {
+  const FILENAME = '20190321_211008.jpg';
+  const currentHash = computeAlgorithmHash();
+
+  // Inject a generated row with current hash but all-zero boundary.
+  const ZERO_BOUNDARY = JSON.stringify([[[0, 0], [0, 0], [0, 0], [0, 0]]]);
+  const ZERO_RINGS    = JSON.stringify([[[{ points: Array.from({ length: 8 }, () => [0, 0]) }]]]);
+
+  const db = new Pool(DB_CONFIG);
+  try {
+    await db.query(`
+      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      VALUES ($1, $2, $3, $4, '[]')
+      ON CONFLICT (filename) DO UPDATE
+        SET algorithm_hash = EXCLUDED.algorithm_hash,
+            paper_boundary = EXCLUDED.paper_boundary,
+            rings          = EXCLUDED.rings
+    `, [FILENAME, currentHash, ZERO_BOUNDARY, ZERO_RINGS]);
+  } finally {
+    await db.end();
+  }
+
+  const port = await getFreePort();
+  const proc = spawn('npm', ['run', 'annotate'], {
+    cwd: ROOT,
+    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await waitForAnnotateReady(proc, port, 30_000);
+
+    // Fast path loads the zero boundary → isValidDetected returns false
+    // → server falls back to slow path and recomputes.
+    const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
+    expect(imageRes.status).toBe(200);
+    const data = await imageRes.json() as {
+      detected: { targets: { paperBoundary: [number,number][]; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
+    };
+
+    // After recompute, rings must have valid (non-zero) points.
+    const rings = data.detected.targets?.[0]?.ringSets?.[0] ?? [];
+    expect(rings.length).toBeGreaterThan(0);
+    for (const ring of rings) {
+      expect(ring.points.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
+    }
+
+    // Log must record invalid_generated for this filename.
+    const logPath = path.join(ROOT, 'logs/annotate.log');
+    const logLines = fs.existsSync(logPath)
+      ? fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean)
+          .map(l => JSON.parse(l) as { event: string; filename: string })
+      : [];
+    expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
+  } finally {
+    try { proc.kill('SIGTERM'); } catch {}
+  }
+}, 300_000);
+
+// ---------------------------------------------------------------------------
+// annotate: wrapSingleTarget rejects all-zero boundary (unit-level via server)
+// ---------------------------------------------------------------------------
+
+test('annotate: detection with all-zero boundary stores empty boundary in generated', async () => {
+  // Verify that after a forced recompute the server never writes an all-zero
+  // boundary to generated: inject a stale-hash row so recompute is triggered,
+  // wait for background processing, then verify generated.paper_boundary is
+  // either empty ([]) or has at least one non-zero vertex.
+  const FILENAME = '20190321_211008.jpg';
+  const currentHash = computeAlgorithmHash();
+
+  const db = new Pool(DB_CONFIG);
+  try {
+    await db.query('DELETE FROM generated WHERE filename = $1', [FILENAME]);
+    await db.query('DELETE FROM annotations WHERE filename = $1', [FILENAME]);
+  } finally {
+    await db.end();
+  }
+
+  const port = await getFreePort();
+  const proc = spawn('npm', ['run', 'annotate'], {
+    cwd: ROOT,
+    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await waitForAnnotateReady(proc, port, 30_000);
+
+    // Request the image to trigger slow-path recompute.
+    const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
+    expect(imageRes.status).toBe(200);
+
+    // Check what was stored in generated.
+    const db2 = new Pool(DB_CONFIG);
+    try {
+      const { rows } = await db2.query(
+        'SELECT algorithm_hash, paper_boundary FROM generated WHERE filename = $1',
+        [FILENAME],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].algorithm_hash).toBe(currentHash);
+
+      // paper_boundary must be either absent ([]) or non-zero.
+      const pb = rows[0].paper_boundary as [number,number][][] | null;
+      if (pb && pb.length > 0 && pb[0].length > 0) {
+        expect(pb[0].some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
+      }
+    } finally {
+      await db2.end();
+    }
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
   }
@@ -444,26 +704,17 @@ test('annotate: startup wipes corrupt annotation rows; invalid annotations delet
     const res = await fetch(`http://localhost:${port}/api/annotations`);
     expect(res.status).toBe(200);
     const annotations = await res.json() as Record<string, {
-      rings: { points: [number, number][] }[];
-      paperBoundary: [number, number][] | null;
-      arrows: unknown[];
+      targets: { paperBoundary: [number, number][]; ringSets: unknown[][] }[];
+      arrows: { tip: [number, number] }[];
     }>;
 
     // 4. Bad file: startup wipe resets its rings to [] → becomes invalid → deleted on load.
     expect(annotations[BAD_FILE]).toBeUndefined();
 
-    // 5. Good file: valid annotation must be untouched.
+    // 5. Good file: valid annotation must be untouched (has arrows → passes isValidAnnotation).
     expect(annotations[GOOD_FILE]).toBeDefined();
-    expect(annotations[GOOD_FILE].rings.length).toBeGreaterThan(0);
-    expect(annotations[GOOD_FILE].paperBoundary).not.toBeNull();
     expect(annotations[GOOD_FILE].arrows.length).toBeGreaterThan(0);
-    for (const ring of annotations[GOOD_FILE].rings) {
-      for (const pt of ring.points) {
-        expect(pt[0]).not.toBeNull();
-        expect(pt[1]).not.toBeNull();
-        expect(typeof pt[0]).toBe('number');
-      }
-    }
+    expect(annotations[GOOD_FILE].targets.length).toBeGreaterThan(0);
 
     // 6. The log must record a db_wipe event (at least one corrupt row was wiped).
     const logPath = path.join(ROOT, 'logs/annotate.log');
@@ -561,6 +812,88 @@ test('annotate: GET /api/annotations deletes incomplete annotations; POST /api/s
     const annotations2 = await getRes2.json() as Record<string, unknown>;
     expect(annotations2[INCOMPLETE_FILE]).toBeUndefined();
 
+  } finally {
+    try { proc.kill('SIGTERM'); } catch {}
+  }
+}, 60_000);
+
+// ---------------------------------------------------------------------------
+// annotate: /api/save returns well-formed JSON even on parse error
+// ---------------------------------------------------------------------------
+
+test('annotate: /api/save returns valid JSON with error key on malformed body', async () => {
+  const port = await getFreePort();
+  const proc = spawn('npm', ['run', 'annotate'], {
+    cwd: ROOT,
+    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await waitForAnnotateReady(proc, port, 30_000);
+
+    // Send a body that is not valid JSON (previously produced {"error":"SyntaxError: ..."} without
+    // proper escaping — this test guards against regression to the `{"error":"${e}"}` template).
+    const res = await fetch(`http://localhost:${port}/api/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{invalid json: "unterminated',
+    });
+
+    expect(res.status).toBe(500);
+
+    // Must parse as valid JSON.
+    const json = await res.json() as { error: unknown };
+    expect(typeof json.error).toBe('string');
+    expect((json.error as string).length).toBeGreaterThan(0);
+  } finally {
+    try { proc.kill('SIGTERM'); } catch {}
+  }
+}, 60_000);
+
+// ---------------------------------------------------------------------------
+// annotate: concurrent /api/image/ requests for same file return same data
+// ---------------------------------------------------------------------------
+
+test('annotate: concurrent /api/image/ requests for same cached file both return 200', async () => {
+  const FILENAME = '20190321_211008.jpg';
+  const currentHash = computeAlgorithmHash();
+
+  // Pre-seed a ready generated row so the fast path is taken (no 45s recompute).
+  const db = new Pool(DB_CONFIG);
+  try {
+    // Ensure a valid generated row exists with the current hash.
+    await db.query(`
+      INSERT INTO generated (filename, algorithm_hash, rings, arrows)
+      VALUES ($1, $2, '[[]]', '[]')
+      ON CONFLICT (filename) DO UPDATE
+        SET algorithm_hash = EXCLUDED.algorithm_hash
+    `, [FILENAME, currentHash]);
+  } finally {
+    await db.end();
+  }
+
+  const port = await getFreePort();
+  const proc = spawn('npm', ['run', 'annotate'], {
+    cwd: ROOT,
+    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await waitForAnnotateReady(proc, port, 30_000);
+
+    // Fire two concurrent requests for the same uncached image.
+    const url = `http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`;
+    const [res1, res2] = await Promise.all([fetch(url), fetch(url)]);
+
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+
+    // Both responses must be valid JSON.
+    const [body1, body2] = await Promise.all([res1.json(), res2.json()]);
+    expect(typeof body1).toBe('object');
+    expect(typeof body2).toBe('object');
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
   }

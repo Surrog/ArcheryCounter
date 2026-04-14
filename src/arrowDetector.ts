@@ -44,6 +44,7 @@ export function letterboxRgba(
   srcW: number,
   srcH: number,
 ): LetterboxResult {
+  if (srcW <= 0 || srcH <= 0) throw new Error(`Invalid image dimensions: ${srcW}×${srcH}`);
   const scale  = INPUT_SIZE / Math.max(srcW, srcH);
   const newW   = Math.round(srcW * scale);
   const newH   = Math.round(srcH * scale);
@@ -121,26 +122,35 @@ function heatmapNMS(hm: Float32Array, H: number, W: number, k: number = NMS_KERN
 // ── ONNX session (lazy, cached) ───────────────────────────────────────────────
 
 let _session: any = null;
+let _ort: any = null;
 
-async function getSession(modelPath: string): Promise<any> {
-  if (_session) return _session;
+async function getSession(modelPath: string): Promise<{ session: any; ort: any }> {
+  if (_session) return { session: _session, ort: _ort };
 
   // Prefer onnxruntime-react-native in RN; fall back to onnxruntime-node in Node.js
   let ort: any;
   try {
     ort = require('onnxruntime-react-native');
   } catch {
-    ort = require('onnxruntime-node');
+    try {
+      ort = require('onnxruntime-node');
+    } catch {
+      throw new Error(
+        'ONNX runtime not available. Install onnxruntime-node (Node.js) or onnxruntime-react-native (React Native).',
+      );
+    }
   }
 
   _session = await ort.InferenceSession.create(modelPath);
-  return _session;
+  _ort = ort;
+  return { session: _session, ort: _ort };
 }
 
 export function releaseSession(): void {
   if (_session) {
     try { _session.release?.(); } catch {}
     _session = null;
+    _ort = null;
   }
 }
 
@@ -166,20 +176,26 @@ export async function detectArrowsNN(
 ): Promise<ScoredArrow[]> {
   const { data, scale, padX, padY } = letterboxRgba(rgba, width, height);
 
-  const session = await getSession(modelPath);
-
-  let ort: any;
-  try {
-    ort = require('onnxruntime-react-native');
-  } catch {
-    ort = require('onnxruntime-node');
-  }
+  const { session, ort } = await getSession(modelPath);
 
   const inputTensor = new ort.Tensor('float32', data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
   const results = await session.run({ image: inputTensor });
 
-  const tipHmRaw  = results['tip_hm'].data   as Float32Array;   // (1,1,128,128)
-  const scoreRaw  = results['score_map'].data as Float32Array;   // (1,11,128,128)
+  if (!results['tip_hm']) {
+    throw new Error(
+      'Model output "tip_hm" not found. Check the model was exported with output name "tip_hm". ' +
+      `Available outputs: ${Object.keys(results).join(', ')}`,
+    );
+  }
+  if (!results['score_map']) {
+    throw new Error(
+      'Model output "score_map" not found. Check the model was exported with output name "score_map". ' +
+      `Available outputs: ${Object.keys(results).join(', ')}`,
+    );
+  }
+
+  const tipHmRaw  = results['tip_hm'].data   as Float32Array;   // (1,1,HEATMAP_SIZE,HEATMAP_SIZE)
+  const scoreRaw  = results['score_map'].data as Float32Array;   // (1,11,HEATMAP_SIZE,HEATMAP_SIZE)
 
   const tipHm = heatmapNMS(tipHmRaw, HEATMAP_SIZE, HEATMAP_SIZE);
 

@@ -26,7 +26,8 @@ export function sampleClosedSpline(
   points: [number, number][], nSamples: number,
 ): [number, number][] {
   const K = points.length;
-  if (K < 2) return [...points] as [number, number][];
+  if (K === 0) return [];
+  if (K === 1) return Array.from({ length: nSamples }, () => points[0] as [number, number]);
   const result: [number, number][] = [];
   const sps = Math.ceil(nSamples / K);
   for (let k = 0; k < K; k++) {
