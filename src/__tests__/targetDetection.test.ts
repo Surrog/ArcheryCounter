@@ -69,6 +69,7 @@ function splineAxes(ring: SplineRing): { rx: number; ry: number } {
 function computeAlgorithmHash(): string {
   const files = [
     path.resolve(__dirname, '../../src/targetDetection.ts'),
+    path.resolve(__dirname, '../../src/arrowDetector.ts'),
   ].filter(f => fs.existsSync(f)).map(f => fs.readFileSync(f));
   return crypto.createHash('sha256').update(Buffer.concat(files)).digest('hex').slice(0, 16);
 }
