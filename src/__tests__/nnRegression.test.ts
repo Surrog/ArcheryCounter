@@ -24,7 +24,7 @@
 
 import * as fs   from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 // jpeg-js is a devDependency used only in Node.js contexts
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const jpegJs = require('jpeg-js') as typeof import('jpeg-js');
@@ -206,8 +206,9 @@ type ParityResult = {
 function runParityScript(imagePath: string, coords: [number, number][]): ParityResult {
   let rawOutput: string;
   try {
-    rawOutput = execSync(
-      `uv run python3 ${PARITY_SCRIPT} ${imagePath} '${JSON.stringify(coords)}'`,
+    rawOutput = execFileSync(
+      'uv',
+      ['run', 'python3', PARITY_SCRIPT, imagePath, JSON.stringify(coords)],
       { cwd: NN_SCRIPTS_DIR, timeout: 60_000, encoding: 'utf8' },
     );
   } catch (e) {
