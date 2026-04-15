@@ -535,10 +535,6 @@ function getAnnotation(idx) {
   return ann;
 }
 
-function isAnnotationValid(_ann) {
-  return true;
-}
-
 function markModified(idx) {
   const filename = IMAGES[idx];
   if (!store.modified.includes(filename)) store.modified.push(filename);
@@ -1162,7 +1158,7 @@ function attachSvgListeners() {
 // ---- Image list ----
 function isAnnotated(filename) {
   const ann = store.annotations[filename];
-  return ann != null && ann.arrows && ann.arrows.length > 0;
+  return ann != null;
 }
 
 function updateImageList() {
@@ -1449,7 +1445,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   if (e.key === 'b' || e.key === 'B') {
-    if (currentIdx > 0) selectImage(currentIdx - 1);
+    if (currentIdx > 0) { save(); selectImage(currentIdx - 1); }
     return;
   }
   if (e.key === 'n' || e.key === 'N') {
