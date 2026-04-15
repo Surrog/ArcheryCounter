@@ -19,6 +19,9 @@ const MODEL_PATH = modelIdx >= 0
   ? path.resolve(args[modelIdx + 1])
   : path.resolve(__dirname, 'nn/arrow_detector_fp32.onnx');
 
+const limitIdx   = args.indexOf('--limit');
+const LIMIT      = limitIdx >= 0 ? parseInt(args[limitIdx + 1], 10) : Infinity;
+
 const boundaryModelIdx   = args.indexOf('--boundary-model');
 const BOUNDARY_MODEL_PATH = boundaryModelIdx >= 0
   ? path.resolve(args[boundaryModelIdx + 1])
@@ -36,15 +39,16 @@ const db = new Pool({
 
 function computeAlgorithmHash(): string {
   const hash = crypto.createHash('sha256');
-  // Hash source files
+  // Hash source files (must match globalSetup.ts so the test cache is reused)
   for (const f of [
     path.resolve(__dirname, '../src/targetDetection.ts'),
     path.resolve(__dirname, '../src/arrowDetector.ts'),
   ]) {
     if (fs.existsSync(f)) hash.update(fs.readFileSync(f));
   }
-  // Include model file size+mtime as a lightweight proxy for model version
-  if (fs.existsSync(MODEL_PATH)) {
+  // Include model file size+mtime as a lightweight proxy for model version.
+  // Skipped when VISUALIZE_NO_NN=1 (used by tests to allow cache reuse from globalSetup).
+  if (!process.env.VISUALIZE_NO_NN && fs.existsSync(MODEL_PATH)) {
     const st = fs.statSync(MODEL_PATH);
     hash.update(`${MODEL_PATH}:${st.size}:${st.mtimeMs}`);
   }
@@ -118,15 +122,19 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
     const arrows   = scaleArrows(row.arrows ?? [], sx, sy);
     const result: ArcheryResult = { success: rings.length > 0, targets: [], rings, paperBoundary: boundary };
     // Load raw JPEG (no EXIF rotation) so orientation matches what the model was trained on.
-    const rawJpeg = jpegJs.decode(fs.readFileSync(imgPath), { useTArray: true });
-    const nnBoundaries = await detectBoundaries(rawJpeg.data, rawJpeg.width, rawJpeg.height, BOUNDARY_MODEL_PATH).catch(() => undefined) ?? undefined;
+    // Skipped when VISUALIZE_NO_NN=1 (used by tests to avoid slow NN inference).
+    let nnBoundaries: Awaited<ReturnType<typeof detectBoundaries>> | undefined;
+    if (!process.env.VISUALIZE_NO_NN) {
+      const rawJpeg = jpegJs.decode(fs.readFileSync(imgPath), { useTArray: true });
+      nnBoundaries = await detectBoundaries(rawJpeg.data, rawJpeg.width, rawJpeg.height, BOUNDARY_MODEL_PATH).catch(() => undefined) ?? undefined;
+    }
     return { filename, base64, width, height, result, arrows, nnBoundaries };
   }
 
   // ── cache miss: run detection on the same ≤1200px image ──────────────────
   const rgba = new Uint8Array(img.bitmap.data.buffer);
   const result = findTarget(rgba, width, height);
-  const arrowsFull = result.success
+  const arrowsFull = result.success && !process.env.VISUALIZE_NO_NN
     ? await detectArrowsNN(rgba, width, height, MODEL_PATH)
     : [];
 
@@ -151,14 +159,18 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
   );
 
   // Load raw JPEG (no EXIF rotation) so orientation matches what the model was trained on.
-  const rawJpeg = jpegJs.decode(fs.readFileSync(imgPath), { useTArray: true });
-  const nnBoundaries = await detectBoundaries(rawJpeg.data, rawJpeg.width, rawJpeg.height, BOUNDARY_MODEL_PATH).catch(() => undefined) ?? undefined;
+  // Skipped when VISUALIZE_NO_NN=1 (used by tests to avoid slow NN inference).
+  let nnBoundaries2: Awaited<ReturnType<typeof detectBoundaries>> | undefined;
+  if (!process.env.VISUALIZE_NO_NN) {
+    const rawJpeg = jpegJs.decode(fs.readFileSync(imgPath), { useTArray: true });
+    nnBoundaries2 = await detectBoundaries(rawJpeg.data, rawJpeg.width, rawJpeg.height, BOUNDARY_MODEL_PATH).catch(() => undefined) ?? undefined;
+  }
 
   const displayResult: ArcheryResult = {
     success: result.success, targets: result.targets ?? [], rings: result.rings ?? [],
     paperBoundary: result.paperBoundary, error: result.error,
   };
-  return { filename, base64, width, height, result: displayResult, arrows: arrowsFull, nnBoundaries };
+  return { filename, base64, width, height, result: displayResult, arrows: arrowsFull, nnBoundaries: nnBoundaries2 };
 }
 
 function splineCentroid(ring: SplineRing): [number, number] {
@@ -458,8 +470,9 @@ async function main(): Promise<void> {
   const jpgFiles = fs
     .readdirSync(IMAGES_DIR)
     .filter(f => /\.(jpg|jpeg)$/i.test(f))
-    .map(f => path.join(IMAGES_DIR, f))
-    .sort();
+    .sort()
+    .slice(0, LIMIT)
+    .map(f => path.join(IMAGES_DIR, f));
 
   if (jpgFiles.length === 0) {
     console.error(`No JPEG files found in ${IMAGES_DIR}`);

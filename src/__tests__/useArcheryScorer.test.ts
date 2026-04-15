@@ -11,8 +11,11 @@ jest.mock('../ArcheryCounter', () => ({
   __esModule: true,
   default: {
     processImage: jest.fn().mockResolvedValue({
-      rings: Array(10).fill({ points: Array.from({ length: 8 }, () => [500, 400] as [number, number]) }),
-      paperBoundary: null,
+      targets: [{
+        rings: Array(10).fill({ points: Array.from({ length: 8 }, () => [500, 400]) }),
+        paperBoundary: [],
+      }],
+      arrows: [],
     }),
   },
 }));
@@ -27,7 +30,7 @@ describe('useArcheryScorer', () => {
   it('starts with empty state', () => {
     const { result } = renderHook(() => useArcheryScorer());
     expect(result.current.imageUri).toBeNull();
-    expect(result.current.rings).toBeNull();
+    expect(result.current.targets).toBeNull();
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
   });
@@ -56,7 +59,8 @@ describe('useArcheryScorer', () => {
     });
 
     expect(result.current.imageUri).toBe('file:///test.jpg');
-    expect(result.current.rings).toHaveLength(10);
+    expect(result.current.targets).toHaveLength(1);
+    expect(result.current.targets![0].rings).toHaveLength(10);
     expect(result.current.imageWidth).toBe(1000);
     expect(result.current.imageHeight).toBe(800);
     expect(result.current.loading).toBe(false);
@@ -79,7 +83,7 @@ describe('useArcheryScorer', () => {
     });
 
     expect(result.current.error).toBe('CV error');
-    expect(result.current.rings).toBeNull();
+    expect(result.current.targets).toBeNull();
   });
 
   it('sets error state when processImage rejects with a non-Error value', async () => {
@@ -112,6 +116,6 @@ describe('useArcheryScorer', () => {
     });
 
     expect(result.current.imageUri).toBeNull();
-    expect(result.current.rings).toBeNull();
+    expect(result.current.targets).toBeNull();
   });
 });

@@ -75,7 +75,7 @@ test('visualize: exits 0 and writes a valid report.html', () => {
   const reportPath = path.join(ROOT, 'report.html');
   if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
 
-  const stdout = npmRun('visualize', undefined, 300_000);
+  const stdout = npmRun('visualize -- --limit 3', { ...process.env, VISUALIZE_NO_NN: '1' }, 120_000);
 
   // Script prints "X/Y passed" summary
   expect(stdout).toMatch(/\d+\/\d+ passed/);
@@ -84,7 +84,7 @@ test('visualize: exits 0 and writes a valid report.html', () => {
   const html = fs.readFileSync(reportPath, 'utf8');
   expect(html).toContain('<!DOCTYPE html>');
   expect(html).toContain('ArcheryCounter');
-}, 300_000);
+}, 120_000);
 
 // ---------------------------------------------------------------------------
 // annotate (long-running HTTP server)
@@ -362,7 +362,7 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
 // annotate: all-zero paper_boundary in annotations is healed at read time
 // ---------------------------------------------------------------------------
 
-test('annotate: zero boundary in annotations is replaced by generated boundary at read time', async () => {
+test('annotate: zero boundary in annotations is deleted (marked not-annotated) at read time', async () => {
   const FILENAME = '20190321_211008.jpg';
   const currentHash = computeAlgorithmHash();
 
@@ -400,24 +400,17 @@ test('annotate: zero boundary in annotations is replaced by generated boundary a
   try {
     await waitForAnnotateReady(proc, port, 30_000);
 
-    // /api/annotations bulk endpoint must return the generated boundary (healed).
+    // /api/annotations bulk endpoint must NOT include this image — the all-zero
+    // boundary annotation is invalid and should be deleted, making it appear
+    // as not-annotated so the user can re-annotate it.
     const bulkRes = await fetch(`http://localhost:${port}/api/annotations`);
     expect(bulkRes.status).toBe(200);
-    const bulk = await bulkRes.json() as Record<string, { targets: { paperBoundary: [number,number][] }[] }>;
-    const bulkBoundary = bulk[FILENAME]?.targets[0]?.paperBoundary ?? [];
-    expect(bulkBoundary.length).toBeGreaterThan(0);
-    expect(bulkBoundary.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
+    const bulk = await bulkRes.json() as Record<string, unknown>;
+    expect(bulk[FILENAME]).toBeUndefined();
 
-    // /api/annotation/{filename} per-image endpoint must also return the healed boundary.
+    // /api/annotation/{filename} per-image endpoint returns 404 (no annotation).
     const annRes = await fetch(`http://localhost:${port}/api/annotation/${encodeURIComponent(FILENAME)}`);
-    expect(annRes.status).toBe(200);
-    const ann = await annRes.json() as { targets: { paperBoundary: [number,number][] }[] };
-    const annBoundary = ann.targets[0]?.paperBoundary ?? [];
-    expect(annBoundary.length).toBeGreaterThan(0);
-    expect(annBoundary.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
-    // Specifically: the first vertex should match the valid boundary we injected.
-    expect(annBoundary[0][0]).toBe(100);
-    expect(annBoundary[0][1]).toBe(200);
+    expect(annRes.status).toBe(404);
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
   }

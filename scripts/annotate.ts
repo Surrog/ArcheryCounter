@@ -97,6 +97,9 @@ function isValidDetected(targets: TargetData[]): boolean {
  */
 function isValidAnnotation(targets: TargetData[], arrows: unknown[]): boolean {
   if (targets.length === 0) return false;
+  // Reject annotations where every target has a degenerate boundary (e.g. all-zero
+  // coordinates written by an older code path before boundary validation was added).
+  if (!targets.some(t => isBoundaryValid(t.paperBoundary))) return false;
   if (arrows.length > 0) return true;
   // Without arrows, at least one target must have a properly-structured ringSets array.
   return targets.some(t => Array.isArray(t.ringSets));
@@ -1856,9 +1859,7 @@ async function main(): Promise<void> {
                SET paper_boundary = EXCLUDED.paper_boundary,
                    updated_at     = NOW()
                WHERE annotations.paper_boundary IS NULL
-                  OR annotations.paper_boundary = '[]'::jsonb
-                  OR ((annotations.paper_boundary->0->0->0)::float = 0
-                 AND (annotations.paper_boundary->0->0->1)::float = 0)`,
+                  OR annotations.paper_boundary = '[]'::jsonb`,
             [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings)],
           );
           inAnnotations.add(filename);
@@ -1883,14 +1884,14 @@ async function main(): Promise<void> {
       }
 
     } else if (req.method === 'GET' && req.url === '/api/annotations') {
-      // LEFT JOIN with generated so that degenerate (all-zero) annotation
-      // boundaries are transparently replaced with the detected boundary.
+      // NULL / empty boundaries are replaced with the generated boundary so the UI
+      // can show a useful outline. All-zero (corrupt) boundaries are left as-is and
+      // will be caught by isValidAnnotation below, which deletes them so the image
+      // appears as not-annotated for re-annotation.
       const { rows } = await db.query(`
         SELECT a.filename,
           CASE WHEN a.paper_boundary IS NULL
                  OR a.paper_boundary = '[]'::jsonb
-                 OR ((a.paper_boundary->0->0->0)::float = 0
-                AND (a.paper_boundary->0->0->1)::float = 0)
                THEN COALESCE(g.paper_boundary, '[]'::jsonb)
                ELSE a.paper_boundary
           END AS paper_boundary,
@@ -1928,8 +1929,6 @@ async function main(): Promise<void> {
         `SELECT
           CASE WHEN a.paper_boundary IS NULL
                  OR a.paper_boundary = '[]'::jsonb
-                 OR ((a.paper_boundary->0->0->0)::float = 0
-                AND (a.paper_boundary->0->0->1)::float = 0)
                THEN COALESCE(g.paper_boundary, '[]'::jsonb)
                ELSE a.paper_boundary
           END AS paper_boundary,
@@ -2134,9 +2133,7 @@ async function main(): Promise<void> {
            SET paper_boundary = EXCLUDED.paper_boundary,
                updated_at     = NOW()
            WHERE annotations.paper_boundary IS NULL
-              OR annotations.paper_boundary = '[]'::jsonb
-              OR (annotations.paper_boundary->0->0->>'0')::float = 0
-             AND (annotations.paper_boundary->0->0->>'1')::float = 0`,
+              OR annotations.paper_boundary = '[]'::jsonb`,
         [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings)],
       );
       inAnnotations.add(filename);

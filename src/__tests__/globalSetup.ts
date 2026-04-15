@@ -21,6 +21,7 @@ const CONCURRENCY  = Math.min(os.cpus().length, 4);
 function computeAlgorithmHash(): string {
   const files = [
     path.join(ROOT, 'src/targetDetection.ts'),
+    path.join(ROOT, 'src/arrowDetector.ts'),
   ].filter(f => fs.existsSync(f)).map(f => fs.readFileSync(f));
   return crypto.createHash('sha256').update(Buffer.concat(files)).digest('hex').slice(0, 16);
 }
