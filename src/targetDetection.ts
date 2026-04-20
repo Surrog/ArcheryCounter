@@ -1,18 +1,12 @@
 // New archery target detection pipeline.
 // See docs/research.md and docs/plan.md for design notes.
 
+import { isArray } from 'util';
 import type { SplineRing } from './spline';
 import { sampleClosedSpline } from './spline';
 
 export interface Pixel { x: number; y: number }
 
-
-/** @deprecated Use SplineRing from './spline' instead. Kept for backward compatibility. */
-export interface EllipseData {
-  centerX: number; centerY: number;
-  width: number; height: number;
-  angle: number;
-}
 
 /**
  * Target paper boundary as an ordered polygon (4–8 vertices, clockwise in image
@@ -21,6 +15,20 @@ export interface EllipseData {
  */
 export interface TargetBoundary {
   points: [number, number][];
+}
+
+export function isTargetBoundary(x: unknown): x is TargetBoundary {
+  return typeof x === "object" && x != null && 
+  Array.isArray((x as TargetBoundary).points) && 
+  (x as TargetBoundary).points.every(([px, py]) => typeof px === "number" && typeof py === "number")
+}
+
+export function targetCentroid(boundary: TargetBoundary): [number, number] {
+  const n = boundary.points.length;
+  return [
+    boundary.points.reduce((s, p) => s + p[0], 0) / n,
+    boundary.points.reduce((s, p) => s + p[1], 0) / n,
+  ];
 }
 
 /** Per-image HSV colour references (illuminant-corrected), one median per zone. */
@@ -49,7 +57,7 @@ export interface SingleTargetResult {
   paperBoundary: TargetBoundary;
   calibration?: ColourCalibration;
   /** Raw per-ray transition points, indexed by ring (0=innermost). */
-  ringPoints?: Pixel[][];
+  ringPoints: Pixel[][];
   /** Per-ray debug data, populated only when DEBUG_RAYS is set. */
   rayDebug?: RayDebugEntry[];
 }
@@ -66,12 +74,6 @@ export interface SingleTargetResult {
 export interface ArcheryResult {
   /** Multi-target results. Length 0 if no targets found. */
   targets: SingleTargetResult[];
-  // --- backwards-compat single-target accessors (targets[0] fields) ---
-  rings: SplineRing[];
-  paperBoundary?: TargetBoundary;
-  calibration?: ColourCalibration;
-  ringPoints?: Pixel[][];
-  rayDebug?: RayDebugEntry[];
   success: boolean;
   error?: string;
 }
@@ -1588,26 +1590,21 @@ export function findTarget(
     }
 
     if (Object.values(blobs).every(b => b === null)) {
-      return { targets: [], rings: [], success: false, error: 'No colour blobs found' };
+      return { targets: [], success: false, error: 'No colour blobs found' };
     }
 
     const { cx, cy, w } = estimateCenterAndScale(blobs);
     if (w <= 0 || !isFinite(cx) || !isFinite(cy)) {
-      return { targets: [], rings: [], success: false, error: 'Invalid bootstrap estimate' };
+      return { targets: [], success: false, error: 'Invalid bootstrap estimate' };
     }
 
     const target = runDetectionPipeline(rgba, width, height, cx, cy, w);
     return {
       targets: [target],
-      rings: target.rings,
-      paperBoundary: target.paperBoundary,
-      calibration: target.calibration,
-      ringPoints: target.ringPoints,
-      rayDebug: target.rayDebug,
       success: true,
     };
   } catch (e) {
-    return { targets: [], rings: [], success: false, error: String(e) };
+    return { targets: [], success: false, error: String(e) };
   }
 }
 

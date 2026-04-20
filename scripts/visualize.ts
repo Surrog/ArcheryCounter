@@ -120,7 +120,7 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
     const rings    = scaleRings(row.rings ?? [], sx, sy);
     const boundary = scaleBoundary(row.paper_boundary, sx, sy);
     const arrows   = scaleArrows(row.arrows ?? [], sx, sy);
-    const result: ArcheryResult = { success: rings.length > 0, targets: [], rings, paperBoundary: boundary };
+    const result: ArcheryResult = { success: rings.length > 0, targets: [] };
     // Load raw JPEG (no EXIF rotation) so orientation matches what the model was trained on.
     // Skipped when VISUALIZE_NO_NN=1 (used by tests to avoid slow NN inference).
     let nnBoundaries: Awaited<ReturnType<typeof detectBoundaries>> | undefined;

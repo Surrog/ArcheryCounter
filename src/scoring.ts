@@ -18,6 +18,24 @@ export interface ScoredArrow {
   lowConfidence?: boolean;        // geometric and colour zone disagree
 }
 
+function isScore(x: unknown): x is number | 'X' {
+  return (typeof x === "number" &&
+    Number.isInteger(x) &&
+    x >= 0 && x <= 10) ||
+    x === 'X';
+}
+
+export function isScoredArrow(x: unknown): x is ScoredArrow {
+  return typeof x === "object" && x != null &&
+    Array.isArray((x as ScoredArrow).tip) &&
+    (x as ScoredArrow).tip.length === 2 &&
+    typeof (x as ScoredArrow).tip[0] === "number" &&
+    typeof (x as ScoredArrow).tip[1] === "number" &&
+    isScore((x as ScoredArrow).score) &&
+    ((x as ScoredArrow).lowConfidence === undefined ||
+      typeof (x as ScoredArrow).lowConfidence === "boolean");
+}
+
 // Zone → [minScore, maxScore] for consistency check
 const ZONE_SCORE_RANGE: Record<ZoneName, [number, number]> = {
   gold:  [9, 10],

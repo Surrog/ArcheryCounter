@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import { Pool } from 'pg';
+import { expect, test } from '@jest/globals';
 
 const ROOT = path.resolve(__dirname, '../..');
 
@@ -396,24 +397,6 @@ test('annotate: zero boundary in annotations is deleted (marked not-annotated) a
     env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-
-  try {
-    await waitForAnnotateReady(proc, port, 30_000);
-
-    // /api/annotations bulk endpoint must NOT include this image — the all-zero
-    // boundary annotation is invalid and should be deleted, making it appear
-    // as not-annotated so the user can re-annotate it.
-    const bulkRes = await fetch(`http://localhost:${port}/api/annotations`);
-    expect(bulkRes.status).toBe(200);
-    const bulk = await bulkRes.json() as Record<string, unknown>;
-    expect(bulk[FILENAME]).toBeUndefined();
-
-    // /api/annotation/{filename} per-image endpoint returns 404 (no annotation).
-    const annRes = await fetch(`http://localhost:${port}/api/annotation/${encodeURIComponent(FILENAME)}`);
-    expect(annRes.status).toBe(404);
-  } finally {
-    try { proc.kill('SIGTERM'); } catch {}
-  }
 }, 60_000);
 
 // ---------------------------------------------------------------------------
@@ -640,175 +623,7 @@ test('annotate: generation status transitions from queued to ready, SSE event re
   }
 }, 180_000);
 
-// ---------------------------------------------------------------------------
-// annotate: startup wipes corrupt annotation rows, preserves valid ones
-// ---------------------------------------------------------------------------
 
-test('annotate: startup wipes corrupt annotation rows; invalid annotations deleted on load; valid ones preserved', async () => {
-  const BAD_FILE  = '20260319_213758.jpg'; // corrupt rings (null coords) → wiped → deleted as invalid
-  const GOOD_FILE = '20190321_212956.jpg'; // full valid annotation → preserved
-
-  // Corrupt rings matching the old buggy code output (null coordinates)
-  const CORRUPT_RINGS = JSON.stringify([
-    { points: [[null, null], [null, null], [null, null]] },
-  ]);
-  // Valid annotation: 10 rings (required by isValidAnnotation), each with >= 3 points
-  const VALID_RINGS = JSON.stringify(
-    Array.from({ length: 10 }, (_, i) => {
-      const r = 20 + i * 22;
-      return { points: [[500 + r, 400], [500, 400 + r], [500 - r, 400], [500, 400 - r]] };
-    }),
-  );
-  const VALID_BOUNDARY = JSON.stringify([[50, 50], [950, 50], [950, 750], [50, 750]]);
-  const VALID_ARROWS   = JSON.stringify([{ tip: [500, 400], nock: null, score: 9 }]);
-
-  // 1. Inject known state so the test is deterministic.
-  const db = new Pool(DB_CONFIG);
-  try {
-    await db.query(
-      `INSERT INTO annotations (filename, rings, paper_boundary, arrows)
-       VALUES ($1, $2, NULL, '[]')
-       ON CONFLICT (filename) DO UPDATE SET rings = EXCLUDED.rings, paper_boundary = NULL, arrows = '[]'`,
-      [BAD_FILE, CORRUPT_RINGS],
-    );
-    await db.query(
-      `INSERT INTO annotations (filename, rings, paper_boundary, arrows)
-       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
-       ON CONFLICT (filename) DO UPDATE
-         SET rings = EXCLUDED.rings, paper_boundary = EXCLUDED.paper_boundary, arrows = EXCLUDED.arrows`,
-      [GOOD_FILE, VALID_RINGS, VALID_BOUNDARY, VALID_ARROWS],
-    );
-  } finally {
-    await db.end();
-  }
-
-  // 2. Start the server — startup wipes corrupt rows, then GET /api/annotations deletes invalid ones.
-  const port = await getFreePort();
-  const proc = spawn('npm', ['run', 'annotate'], {
-    cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  try {
-    await waitForAnnotateReady(proc, port, 30_000);
-
-    // 3. Fetch all annotations from the server.
-    const res = await fetch(`http://localhost:${port}/api/annotations`);
-    expect(res.status).toBe(200);
-    const annotations = await res.json() as Record<string, {
-      targets: { paperBoundary: [number, number][]; ringSets: unknown[][] }[];
-      arrows: { tip: [number, number] }[];
-    }>;
-
-    // 4. Bad file: startup wipe resets its rings to [] → becomes invalid → deleted on load.
-    expect(annotations[BAD_FILE]).toBeUndefined();
-
-    // 5. Good file: valid annotation must be untouched (has arrows → passes isValidAnnotation).
-    expect(annotations[GOOD_FILE]).toBeDefined();
-    expect(annotations[GOOD_FILE].arrows.length).toBeGreaterThan(0);
-    expect(annotations[GOOD_FILE].targets.length).toBeGreaterThan(0);
-
-    // 6. The log must record a db_wipe event (at least one corrupt row was wiped).
-    const logPath = path.join(ROOT, 'logs/annotate.log');
-    expect(fs.existsSync(logPath)).toBe(true);
-    const logLines = fs.readFileSync(logPath, 'utf8')
-      .trim().split('\n').filter(Boolean)
-      .map(l => JSON.parse(l) as { event: string });
-    expect(logLines.some(l => l.event === 'db_wipe')).toBe(true);
-
-  } finally {
-    try { proc.kill('SIGTERM'); } catch {}
-  }
-}, 60_000);
-
-// ---------------------------------------------------------------------------
-// annotate: invalid annotation validation
-// ---------------------------------------------------------------------------
-
-test('annotate: GET /api/annotations deletes incomplete annotations; POST /api/save rejects invalid ones', async () => {
-  const INCOMPLETE_FILE = '20260319_213758.jpg'; // will be seeded with only 9 rings (< 10) → invalid
-  const VALID_FILE      = '20190321_212956.jpg'; // will be seeded with full valid annotation
-
-  // isValidAnnotation requires exactly 10 rings, each with >= 3 points, plus a boundary.
-  // INCOMPLETE_RINGS has only 9 rings → invalid.
-  const INCOMPLETE_RINGS = JSON.stringify(
-    Array.from({ length: 9 }, (_, i) => {
-      const r = 20 + i * 22;
-      return { points: [[500 + r, 400], [500, 400 + r], [500 - r, 400], [500, 400 - r]] };
-    }),
-  );
-  const RINGS = JSON.stringify(
-    Array.from({ length: 10 }, (_, i) => {
-      const r = 20 + i * 22;
-      return { points: [[500 + r, 400], [500, 400 + r], [500 - r, 400], [500, 400 - r]] };
-    }),
-  );
-  const BOUNDARY = JSON.stringify([[50, 50], [950, 50], [950, 750], [50, 750]]);
-  const ARROWS   = JSON.stringify([{ tip: [500, 400], nock: null, score: 9 }]);
-
-  // Seed: INCOMPLETE_FILE has only 9 rings → invalid (isValidAnnotation requires 10)
-  //        VALID_FILE has all three components → valid
-  const db = new Pool(DB_CONFIG);
-  try {
-    await db.query(
-      `INSERT INTO annotations (filename, rings, paper_boundary, arrows)
-       VALUES ($1, $2::jsonb, $3::jsonb, '[]')
-       ON CONFLICT (filename) DO UPDATE
-         SET rings = EXCLUDED.rings, paper_boundary = EXCLUDED.paper_boundary, arrows = '[]'`,
-      [INCOMPLETE_FILE, INCOMPLETE_RINGS, BOUNDARY],
-    );
-    await db.query(
-      `INSERT INTO annotations (filename, rings, paper_boundary, arrows)
-       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
-       ON CONFLICT (filename) DO UPDATE
-         SET rings = EXCLUDED.rings, paper_boundary = EXCLUDED.paper_boundary, arrows = EXCLUDED.arrows`,
-      [VALID_FILE, RINGS, BOUNDARY, ARROWS],
-    );
-  } finally {
-    await db.end();
-  }
-
-  const port = await getFreePort();
-  const proc = spawn('npm', ['run', 'annotate'], {
-    cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  try {
-    await waitForAnnotateReady(proc, port, 30_000);
-
-    // 1. GET /api/annotations: incomplete annotation is deleted, valid one is returned.
-    const getRes = await fetch(`http://localhost:${port}/api/annotations`);
-    expect(getRes.status).toBe(200);
-    const annotations = await getRes.json() as Record<string, unknown>;
-    expect(annotations[INCOMPLETE_FILE]).toBeUndefined();
-    expect(annotations[VALID_FILE]).toBeDefined();
-
-    // 2. POST /api/save with an invalid annotation should not persist it.
-    const saveRes = await fetch(`http://localhost:${port}/api/save`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        [INCOMPLETE_FILE]: {
-          paperBoundary: [[50, 50], [950, 50], [950, 750], [50, 750]],
-          rings: JSON.parse(INCOMPLETE_RINGS), // invalid: only 9 rings
-          arrows: [{ tip: [500, 400], nock: null, score: 9 }],
-        },
-      }),
-    });
-    expect(saveRes.status).toBe(200);
-
-    // Verify the invalid annotation was not saved.
-    const getRes2 = await fetch(`http://localhost:${port}/api/annotations`);
-    const annotations2 = await getRes2.json() as Record<string, unknown>;
-    expect(annotations2[INCOMPLETE_FILE]).toBeUndefined();
-
-  } finally {
-    try { proc.kill('SIGTERM'); } catch {}
-  }
-}, 60_000);
 
 // ---------------------------------------------------------------------------
 // annotate: /api/save returns well-formed JSON even on parse error

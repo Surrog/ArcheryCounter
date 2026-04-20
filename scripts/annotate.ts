@@ -2,11 +2,11 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as crypto from 'crypto';
-import { spawn } from 'child_process';
 import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
-import { findTarget, findRingSetFromCenter, ArcheryResult } from '../src/targetDetection';
-import { SplineRing } from '../src/spline';
+import { findTarget, findRingSetFromCenter, ArcheryResult, TargetBoundary, isTargetBoundary } from '../src/targetDetection';
+import { isSplineRing, splineCentroid, SplineRing, RingSet } from '../src/spline';
+import { detectArrowsNN } from '../src/arrowDetector';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
@@ -29,27 +29,37 @@ const RING_COLORS = [
 ];
 
 interface TargetData {
-  paperBoundary: [number, number][];
-  ringSets: SplineRing[][];
+  paperBoundary: TargetBoundary;
+  ringSets: RingSet[];
 }
 
-interface CachedImageData {
-  base64: string;
-  width: number;
-  height: number;
-  detected: {
-    targets: TargetData[];
-    arrows: { tip: [number, number]; nock: [number, number] | null }[];
-  };
+export function isTargetData(x: any): x is TargetData {
+  return typeof x === "object" && x != null && 
+    isTargetBoundary((x as TargetData).paperBoundary) &&
+    Array.isArray((x as TargetData).ringSets) &&
+    (x as TargetData).ringSets.every(rs => rs.every(r => isSplineRing(r)));
 }
 
-interface ImageEntry {
+interface ArrowData {
+  tip: [number, number]
+  score: number | 'X'
+}
+
+interface ImageData {
   filename: string;
   base64: string;
   width: number;
   height: number;
-  result: ArcheryResult;
+  generated: {
+    targets: TargetData[];
+    arrows: ArrowData[];
+  };
+  annotated: {
+    targets: TargetData[];
+    arrows: ArrowData[];
+  };
 }
+
 
 // ---------------------------------------------------------------------------
 // Logging (AW-6)
@@ -70,58 +80,15 @@ function logEvent(level: 'info' | 'warn' | 'error', event: string, filename: str
 // ---------------------------------------------------------------------------
 
 /** True if a boundary polygon is non-degenerate (non-empty, non-null, not all-zero). */
-export function isBoundaryValid(pts: [number, number][]): boolean {
-  if (pts.length === 0) return true;                             // absent = not yet set, OK
-  return pts.length >= 3 &&
-    pts.every(p => p[0] != null && p[1] != null) &&
-    pts.some(p => p[0] !== 0 || p[1] !== 0);                   // at least one non-zero vertex
-}
-
-function isValidDetected(targets: TargetData[]): boolean {
-  return targets.every(t =>
-    isBoundaryValid(t.paperBoundary) &&
-    Array.isArray(t.ringSets) &&
-    t.ringSets.every(rs => rs.every(r => r.points?.every(p => p[0] != null && p[1] != null))),
-  );
-}
-
-/**
- * True if a saved annotation has enough content to be worth keeping.
- *
- * Invalid cases (returns false):
- *   - no targets at all (empty annotation)
- *   - no arrows AND every target has a ringSets that is NOT a proper array
- *     (this catches old-format rows where `dbToTargets` produces `ringSets = SplineRing`
- *     instead of `SplineRing[][]`, which means the data was stored in the pre-multi-target
- *     flat format and was never properly annotated)
- */
-function isValidAnnotation(targets: TargetData[], arrows: unknown[]): boolean {
-  if (targets.length === 0) return false;
-  // Reject annotations where every target has a degenerate boundary (e.g. all-zero
-  // coordinates written by an older code path before boundary validation was added).
-  if (!targets.some(t => isBoundaryValid(t.paperBoundary))) return false;
-  if (arrows.length > 0) return true;
-  // Without arrows, at least one target must have a properly-structured ringSets array.
-  return targets.some(t => Array.isArray(t.ringSets));
+export function isBoundaryValid(pts: TargetBoundary): boolean {
+  return pts.points.length >= 3 &&
+    pts.points.every(p => p[0] != null && p[1] != null) &&
+    pts.points.some(p => p[0] !== 0 || p[1] !== 0);                   // at least one non-zero vertex
 }
 
 // ---------------------------------------------------------------------------
 // Worker process for background detection (AW-5)
 // ---------------------------------------------------------------------------
-
-const TSX_BIN = path.resolve(__dirname, '../node_modules/.bin/tsx');
-const DETECT_WORKER = path.resolve(__dirname, 'detect-worker.ts');
-const WORKER_TIMEOUT_MS = 5 * 60 * 1000;
-
-interface DetectionOutput {
-  rings: SplineRing[];
-  paperBoundary: [number, number][] | null;
-  arrows: { tip: [number, number]; nock: [number, number] | null }[];
-  width?: number;
-  height?: number;
-  success: boolean;
-  error?: string;
-}
 
 function clampBoundary(
   pts: [number, number][] | null,
@@ -135,65 +102,182 @@ function clampBoundary(
   ]);
 }
 
-/** Convert DB format (paper_boundary: [x,y][][], rings: SplineRing[][][]) → TargetData[] */
-function dbToTargets(rawBoundary: any, rawRings: any): TargetData[] {
-  let raw = Array.isArray(rawBoundary) ? rawBoundary : [];
-  // Migrate old single-polygon format [[x,y],...] → [[[x,y],...]] (one target).
-  if (raw.length > 0 && !Array.isArray(raw[0]?.[0])) raw = [raw];
-  const boundaries: [number, number][][] = raw;
-  const ringsPerTarget: SplineRing[][][] = Array.isArray(rawRings) ? rawRings : [];
-  const len = Math.max(boundaries.length, ringsPerTarget.length);
-  if (len === 0) return [];
-  return Array.from({ length: len }, (_, t) => ({
-    paperBoundary: boundaries[t] ?? [],
-    ringSets: ringsPerTarget[t] ?? [],
-  }));
+function isOldFormatBoundary(pts: any): boolean {
+  return Array.isArray(pts) && pts.length > 0 &&
+  Array.isArray(pts[0]) && pts[0].length === 2 &&
+  typeof pts[0]?.[0] === 'number' && typeof pts[0]?.[1] === 'number';
 }
 
-/** Convert TargetData[] → DB format { boundary: [x,y][][], rings: SplineRing[][][] } */
-function targetsToDB(targets: any[]): { boundary: [number, number][][]; rings: SplineRing[][][] } {
-  return {
-    boundary: targets.map((t: any) => t.paperBoundary ?? []),
-    rings:    targets.map((t: any) => t.ringSets ?? []),
-  };
+function isOldFormatRings(rings: any): boolean {
+  return Array.isArray(rings) && rings.length > 0 &&
+    rings.every(r => isSplineRing(r));
 }
 
-/** Wrap a single-target flat result → multi-target DB format */
-function wrapSingleTarget(
-  rings: SplineRing[],
-  boundary: [number, number][] | null,
-): { boundary: [number, number][][]; rings: SplineRing[][][] } {
-  // Reject degenerate boundaries (null, too-short, or all-zero points).
-  if (boundary && isBoundaryValid(boundary) && boundary.length >= 3) {
-    return { boundary: [boundary], rings: [[rings]] };
+/** Convert DB format ex: 
+ * old format: [[[529, 230], [574, 276], [549, 638], [496, 739], [97, 745], [51, 701], [8, 320], [49, 242]]]	[[[{"points": [[317.78895751251116, 512.155116841257], [313.2275451647999, 527.5573404446418], [300.123790444337, 537.0707728514956], [284.01566896411026, 536.8151611255315], [271.30574465375895, 527.2108641597003], [267.57416425538173, 512.155116841257], [273.7007596941402, 498.83944980486314], [285.16495409210086, 491.0322084749196], [299.2085657495854, 490.0562328068718], [312.0251603030828, 497.6264769749396]]}, {"points": [[343.4622351675308, 512.155116841257], [334.80010697590683, 543.2307240384354], [308.3636469637962, 562.4304436101214], [275.6097547201046, 562.6859050092147], [250.8626462098797, 542.0636445833788], [243.80809239643702, 512.155116841257], [255.50650877719806, 485.62055274850417], [278.2758157128545, 469.82962069979106], [306.41735850346464, 467.8698500253494], [332.0573129154203, 483.07226617458264]]}, {"points": [[368.01655103515196, 512.155116841257], [353.7507852142809, 556.9991977131598], [315.37753452667476, 584.0169698939909], [268.7110826706087, 583.9178344043194], [230.92164030010406, 556.5516334280371], [217.9508427639218, 512.155116841257], [234.1786922080015, 470.1249869814855], [270.3555157136608, 445.4534437827833], [314.5179703891795, 442.93873018363854], [352.64781358522436, 468.11239176504716]]}, {"points": [[392.7550231611233, 512.155116841257], [372.9984726571922, 570.9834612061896], [322.6102563844269, 606.2769988845623], [261.42184759531756, 606.3517931941432], [211.23626192351963, 570.8538979985028], [192.70627590024347, 512.155116841257], [213.12229165744887, 454.8266164947935], [262.34188857760074, 420.7900354730704], [322.5586548122715, 418.1920481070666], [373.485189778703, 452.9731517884385]]}, {"points": [[417.87494517256766, 512.155116841257], [391.9375730874133, 584.7435231109099], [329.82782622802193, 628.4903947706073], [253.8305804511231, 629.71531111013], [190.63459321890113, 585.8218864602853], [166.03402529923426, 512.155116841257], [190.66609996544088, 438.51123821350905], [253.54285744858882, 393.7094022242179], [331.1231166293886, 391.83334496775933], [395.01477745170615, 437.33099073358164]]}, {"points": [[442.9997196252475, 512.155116841257], [411.4913948231174, 598.9502061869346], [337.2186178660157, 651.2369125215531], [246.14940332770271, 653.3555434890079], [170.04935471894544, 600.7779376796364], [138.9035129853115, 512.155116841257], [168.28690045853293, 422.2517980290238], [244.33444419144578, 365.36882033920244], [339.69526451936235, 365.4509865285555], [417.117844739088, 421.27217234993464]]}, {"points": [[465.9935160440978, 512.155116841257], [428.2533738348362, 611.1284967924815], [341.67909545238683, 664.9648509570669], [239.20240282905635, 674.7362125564401], [150.24253394607712, 615.1684353157052], [113.32127586492405, 512.155116841257], [146.54717650802337, 406.4569640318819], [236.2543379964084, 340.50081052410815], [347.9379333028438, 340.08266051124633], [437.07506113155375, 406.77240590020256]]}, {"points": [[490.55371227533317, 512.155116841257], [447.65000977480463, 625.2209777031059], [350.4190781655502, 691.863751868566], [232.0019260029063, 696.8970015440941], [130.49703524511878, 629.5143798586261], [87.09732455906067, 512.155116841257], [124.39088659615368, 390.3594771480924], [227.77261254841451, 314.3967437459769], [356.42515013022233, 313.9616930051866], [458.5527131196098, 391.167978329181]]}, {"points": [[513.6521046182997, 512.155116841257], [464.27219703082864, 637.297703653076], [355.1989255836233, 706.5746095773792], [224.86016524146865, 718.877081066015], [110.53774253881261, 644.0156548386648], [62.09107710372453, 512.155116841257], [103.11366376404666, 374.90066988271997], [219.60512342818518, 289.2597969405891], [364.54977524490545, 288.9566680440057], [478.6334765440133, 376.5784497065372]]}, {"points": [[540.0777640321483, 512.155116841257], [485.49417163351654, 652.7163707301784], [364.1830420859712, 734.2248770327199], [217.9856999396448, 740.0345097523207], [90.03775517118848, 658.9097674848164], [36.08045504537941, 512.155116841257], [80.83439544720827, 358.71383395769453], [211.10202163642955, 263.08994054117744], [373.03394877003615, 262.8450668591728], [501.1958079703438, 360.18595639435625]]}]]]	[]	2026-04-15 11:40:00.167 +0200	583	1200
+ * new format: rawBoundary: TargetBoundary[], rawRings: RingSet[]
+ * → TargetData[] 
+*/
+function generateddbToTargets(rawBoundary: any, rawRings: any): TargetData[] {
+  let result = [] as TargetData[];
+  let targetsCentroid = [];
+
+  if (isOldFormatBoundary(rawBoundary)) {
+    logEvent('warn', 'old_format_boundary', 'null', 'migrating old boundary format to new multi-target format');
+    let target = {
+      paperBoundary: { points: rawBoundary as [number, number][] },
+      ringSets: [] as RingSet[],
+    } as TargetData;
+    result.push(target);
+    targetsCentroid.push(splineCentroid(target.paperBoundary));
+  } else {
+    for (const boundary of rawBoundary as TargetBoundary[]) {
+      let target = {
+        paperBoundary: rawBoundary as TargetBoundary,
+        ringSets: [] as RingSet[],
+      } as TargetData;
+      result.push(target);
+      targetsCentroid.push(splineCentroid(target.paperBoundary));
+    }
   }
-  return { boundary: [], rings: [] };
+
+  if (isOldFormatRings(rawRings)) {
+    logEvent('warn', 'old_format_rings', 'null', 'migrating old rings format to new multi-target format');
+    result[0].ringSets = [rawRings as RingSet];
+  } else {
+    for (const rings of rawRings as RingSet[]) {
+        const centroid = splineCentroid(rings[0]);
+        let max_dist = Infinity;
+        let closest_target_idx = 0;
+        for (let i = 0; i < targetsCentroid.length; i++) {
+          // find the closest target centroid for this ring set
+          const dist = Math.hypot(centroid[0] - targetsCentroid[i][0], centroid[1] - targetsCentroid[i][1]);
+          if (dist < max_dist) {
+            max_dist = dist;
+            closest_target_idx = i;
+          }  
+        }
+        result[closest_target_idx].ringSets.push(rings);
+    }
+  }
+
+  return result;
 }
 
-function runWorkerProcess(imgPath: string): Promise<DetectionOutput> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(TSX_BIN, [DETECT_WORKER, imgPath], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+function isOldAnnotationBoundary(pts: any): boolean {
+  return Array.isArray(pts) && pts.length > 0 &&
+    Array.isArray(pts[0]) && pts[0].length === 2 &&
+    typeof pts[0]?.[0] === 'number' && typeof pts[0]?.[1] === 'number';
+}
+
+function isOldAnnotationRings(rings: any): boolean {
+  return isSplineRing(rings);
+}
+
+/* Convert DB format ex:
+ * old format rawBoundary: [[[0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]]]	rawRings: [[[{"points": [[457.30871071476906, 571.6529817201078], [453.86854999412947, 593.4868550286966], [435.31679070577894, 607.0463091200133], [412.49682012154534, 606.4923021061218], [394.34928520452786, 593.0623855167768], [388.5098006123553, 571.6529817201078], [398.1278187510277, 552.988843238466], [415.06058755293225, 544.7041261508197], [432.5846108956093, 544.6684391425641], [447.8855782083494, 554.1659918577445]]}, {"points": [[491.0746265153625, 571.6529817201078], [483.99711763454275, 615.3765407273429], [446.89561364582937, 642.6822618624738], [401.0783668957828, 641.6346876190569], [364.9654258251155, 614.411008992849], [353.665203087992, 571.6529817201078], [372.9460075007156, 534.6931864329105], [406.1793100437917, 517.370364571853], [441.40568310771897, 517.5199704151199], [472.1361990210538, 536.5468845067828]]}, {"points": [[528.1876967239184, 571.6529817201078], [512.1015213336848, 635.7955852390007], [456.6105730937149, 672.5818326195562], [391.6791295207504, 670.5625657501962], [338.57692011349127, 633.5833806428565], [318.14301267354597, 571.6529817201078], [341.7045239887297, 511.9949200234744], [394.4371492163758, 481.231709502451], [452.64663982009836, 482.92386299933014], [501.87857773707486, 514.937781485552]]}, {"points": [[565.4988880107312, 571.6529817201078], [540.3053120753408, 656.2868386637778], [466.27541230873766, 702.3271491610776], [382.29069583260724, 699.4571935520561], [312.04573121059906, 652.8594176993515], [282.18995596190814, 571.6529817201078], [311.50876229197144, 490.0564149852642], [382.4480108031212, 444.3329355830616], [464.02630061184334, 447.90086832193793], [531.7697933933273, 493.22054209750496]]}, {"points": [[603.1192344351948, 571.6529817201078], [567.8902162978543, 676.3284447123884], [475.6146685113878, 731.0704242254358], [373.40895647073995, 726.7923765675564], [287.4087619451176, 670.7592236318849], [247.31594008950717, 571.6529817201078], [279.7152435756911, 466.9570715229521], [370.2746488543679, 406.8671799213082], [476.32002592134825, 410.06467232631985], [563.8913231211919, 469.8828846856228]]}, {"points": [[641.3014576450207, 571.6529817201078], [595.920610973559, 696.6937185210629], [484.956323871505, 759.8210831372332], [364.6109571109527, 753.8698343572521], [262.1175913127149, 689.1343346793656], [210.48371649436643, 571.6529817201078], [248.24776107240675, 444.09460723505146], [357.97992847099346, 369.02792140322356], [488.786828365769, 371.6957996819099], [596.2566394414232, 446.3681059466288]]}, {"points": [[677.3820066499252, 571.6529817201078], [620.7628051606512, 714.742629086953], [493.9486253684132, 787.4965414155843], [355.3391946822307, 782.4053849447298], [237.7477701861023, 706.8400461277332], [175.24014133977445, 571.6529817201078], [217.02533311753146, 421.4101854982511], [345.1663183446101, 329.5916844654713], [501.61669898326954, 332.20951809834], [628.8965830897062, 422.65379877445287]]}, {"points": [[714.450074255263, 571.6529817201078], [646.0429550028542, 733.1097330616616], [503.50887490524457, 816.9199640263774], [345.98207988127297, 811.2036231230962], [213.58080585743105, 724.3983734853014], [140.1424713728702, 571.6529817201078], [185.0289001690232, 398.1634162166879], [332.21259607125694, 289.724226679632], [514.7115087051111, 291.9078377949859], [662.0836627169866, 398.5419740449332]]}, {"points": [[751.5317467638911, 571.6529817201078], [673.8357790109557, 753.3024016769157], [512.8158045972668, 845.563748321162], [336.5905467516034, 840.1077900251162], [186.91562729402486, 743.771759728473], [106.53204442679248, 571.6529817201078], [155.4759006045294, 376.6919052029593], [320.27283070904224, 252.97740738660855], [526.3876215263191, 255.97245758695294], [692.9781637407375, 376.0958051696731]]}, {"points": [[789.5736813681051, 571.6529817201078], [701.7904886946785, 773.6126871201835], [522.7671160635089, 876.1907357941182], [326.9831717952573, 869.6762497637326], [159.8655506462996, 763.4247907988499], [72.73764628574139, 571.6529817201078], [123.58796486957948, 353.52396376121624], [308.13390669270143, 215.61764078249513], [538.405578356426, 218.98498970045023], [724.3154581696116, 353.32792805447053]]}]]]	2026-04-15 17:51:20.000 +0200	[{"tip": [418, 594], "nock": null, "score": 10}, {"tip": [430, 596], "nock": null, "score": "X"}, {"tip": [435, 510], "nock": null, "score": 8}]
+ * New format rawBoundary: TargetBoundary[], rawRings: RingSet[]
+ * → TargetData[]
+*/
+function annotationToTargetData(rawBoundary: any, rawRings: any): TargetData[] {
+  const result = [] as TargetData[];
+  let needToUpdate = false;
+  if (isOldAnnotationBoundary(rawBoundary)) {
+    logEvent('warn', 'old_annotation_boundary', 'null', 'migrating old annotation boundary format to new multi-target format');
+    result.push({
+      paperBoundary: { points: rawBoundary as [number, number][] },
+      ringSets: [] as RingSet[],
     });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    const timer = setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch {}
-      reject(new Error('Worker timed out after 5 min'));
-    }, WORKER_TIMEOUT_MS);
-    proc.on('error', err => { clearTimeout(timer); reject(err); });
-    proc.on('close', code => {
-      clearTimeout(timer);
-      if (code !== 0 && code !== null) {
-        reject(new Error(`Worker exited ${code}: ${stderr.slice(0, 500)}`));
-        return;
-      }
-      try { resolve(JSON.parse(stdout)); }
-      catch { reject(new Error(`Failed to parse worker output: ${stdout.slice(0, 200)}`)); }
-    });
-  });
+    needToUpdate = true;
+  } else {
+    for (const boundary of rawBoundary as TargetBoundary[]) {
+      result.push({
+        paperBoundary: boundary as TargetBoundary,
+        ringSets: [] as RingSet[],
+      });
+    }
+  }
+
+  if (isOldAnnotationRings(rawRings)) {
+    logEvent('warn', 'old_annotation_rings', 'null', 'migrating old annotation rings format to new multi-target format');
+    result[0].ringSets = [rawRings as RingSet];
+    needToUpdate = true;
+  } else {
+    result[0].ringSets = rawRings as RingSet[];
+  }
+
+  return result;
+}
+
+async function loadImage(imgPath: string, filename: string): Promise<ImageData> {
+  let base64: string;
+  let width: number;
+  let height: number;
+
+  console.log(`fast path: loading ${filename}…`);
+  ({ base64, width, height } = await loadImageBase64(imgPath));
+  return {
+    filename: filename,
+    base64: base64,
+    height: height,
+    width: width,
+    generated: {
+      arrows: [],
+      targets: [],
+    },
+    annotated: {
+      arrows: [],
+      targets: [],
+    },
+  }
+}
+
+async function fetchGeneratedData(data: ImageData): Promise<[ImageData, boolean]>  {
+  const { rows } = await db.query(
+    'SELECT rings, paper_boundary, arrows FROM generated WHERE filename = $1',
+    [data.filename],
+  );
+  if (rows.length == 0) {
+    return [data, false]
+  }
+  if (rows.length > 1) {
+    console.warn(`multiple rows for image : ${data.filename}`)
+  } 
+
+  data.generated.targets = generateddbToTargets(rows[0].paper_boundary, rows[0].rings);
+  data.generated.arrows = rows[0].arrows ?? [];
+  console.log(`found generated data: ${JSON.stringify(data.generated, null, 2)}`)
+
+  return [data, true];
+}
+
+async function fetchAnnotationData(data: ImageData): Promise<[ImageData, boolean]>  {
+  const { rows } = await db.query(
+    'SELECT rings, paper_boundary, arrows FROM annotation WHERE filename = $1',
+    [data.filename],
+  );
+  if (rows.length == 0) {
+    return [data, false]
+  }
+  if (rows.length > 1) {
+    console.warn(`multiple rows for image : ${data.filename}`)
+  } 
+
+  data.annotated.targets = annotationToTargetData(rows[0].paper_boundary, rows[0].rings);
+  data.annotated.arrows = rows[0].arrows ?? [];
+  console.log(`found annotation data: ${JSON.stringify(data.annotated, null, 2)}`)
+
+  return [data, true];
+}
+
+
+/** Convert TargetData[] → DB format { boundary: TargetBoundary[], rings: RingSet[], arrows: ArrowData[] } */
+function targetsToDB(targets: TargetData[], arrows: ArrowData[]): { boundary: TargetBoundary[]; rings: RingSet[], arrows: ArrowData[] } {
+  return {
+    boundary: targets.map((t: TargetData) => t.paperBoundary ?? []),
+    rings:    targets.map((t: TargetData) => t.ringSets ?? []).flat(),
+    arrows:   arrows,
+  };
 }
 
 /** Hash of algorithm source files — used to detect stale detections in DB. */
@@ -212,20 +296,27 @@ async function loadImageBase64(imgPath: string): Promise<{ base64: string; width
   return { base64, width: img.width, height: img.height };
 }
 
-interface ProcessedImage extends ImageEntry {
-  detectedArrows: { tip: [number, number]; nock: [number, number] | null }[];
-}
-
-async function processImage(imgPath: string): Promise<ProcessedImage> {
+async function processImage(imgPath: string, imgData: ImageData): Promise<ImageData> {
   const filename = path.basename(imgPath);
   console.log(`  [1/3] loadImageNode ${filename}…`);
   const { rgba, width, height } = await loadImageNode(imgPath);
-  console.log(`  [2/3] loadImageBase64 ${filename} (${width}×${height})…`);
-  const { base64 } = await loadImageBase64(imgPath);
   console.log(`  [3/3] findTarget ${filename}…`);
   const result = findTarget(rgba, width, height);
+  if (result.success) {
+    console.log(`  findTarget success: ${filename}`);
+    for (const t of result.targets) { 
+      imgData.generated.targets.push({
+        paperBoundary: t.paperBoundary,
+        ringSets: [t.rings],
+      });
+    }
+  }
   console.log(`  done: ${filename}`);
-  return { filename, base64, width, height, result, detectedArrows: [] };
+  const arrows = await detectArrowsNN(rgba, width, height, path.resolve(__dirname, '../models/arrow-detector.onnx'));
+  for (const a of arrows) {
+    imgData.generated.arrows.push({ tip: a.tip, score: a.score });
+  }
+  return imgData;
 }
 
 
@@ -511,28 +602,8 @@ function showBoundary() { return document.getElementById('chk-boundary').checked
 function showArrows()   { return document.getElementById('chk-arrows').checked; }
 
 // ---- Annotation helpers ----
-function getDetected(idx) {
-  const data = imageDataCache[IMAGES[idx]];
-  if (!data) return { targets: [] };
-  return { targets: data.detected.targets || [] };
-}
-
-function getAnnotation(idx) {
-  const filename = IMAGES[idx];
-  if (!store.annotations[filename]) {
-    const detected = getDetected(idx);
-    store.annotations[filename] = {
-      targets: detected.targets.map(t => ({
-        paperBoundary: t.paperBoundary.map(p => [p[0], p[1]]),
-        ringSets: t.ringSets.map(rs => rs.map(r => ({ points: r.points.map(p => [p[0], p[1]]) }))),
-      })),
-      arrows: [],
-    };
-  }
-  const ann = store.annotations[filename];
-  if (!ann.arrows)  ann.arrows  = [];
-  if (!ann.targets) ann.targets = [];
-  return ann;
+function getImageData(idx) {
+  return imageDataCache[IMAGES[idx]];
 }
 
 function markModified(idx) {
@@ -721,7 +792,7 @@ async function selectImage(idx) {
     }
     console.log('[selectImage] parsing JSON…');
     imageDataCache[filename] = await res.json();
-    const det = imageDataCache[filename]?.detected;
+    const det = imageDataCache[filename]?.generated;
     console.log('[selectImage] done, targets:', det?.targets?.length, 'arrows:', det?.arrows?.length);
     staleImages.delete(filename);
     if (!store.annotations[filename]) {
@@ -755,28 +826,30 @@ function render() {
   const ann = getAnnotation(currentIdx);
 
   const isGenerated = viewMode === 'generated';
-  const targets = isGenerated ? (data.detected.targets || []) : ann.targets;
-  const arrows  = isGenerated ? (data.detected.arrows  || []) : ann.arrows;
+  const targets = isGenerated ? (data.generated.targets || []) : ann.targets;
+  const arrows  = isGenerated ? (data.generated.arrows  || []) : ann.arrows;
 
   const W = data.width, H = data.height;
   const showR = showRings(), showB = showBoundary(), showA = showArrows();
 
   let svgContent = '';
 
+  console.log('[render] image data:', filename, 'cached:', !!imageDataCache[filename], 'data:', imageDataCache[filename]);
+
   targets.forEach((target, ti) => {
     const isActiveTarget = ti === currentTargetIdx;
-    const boundary = target.paperBoundary || [];
+    const boundary = target.paperBoundary;
     const ringSets = target.ringSets || [];
 
     // Boundary polygon
-    if (showB && boundary.length >= 3 && boundary.every(p => p[0] != null && p[1] != null)) {
+    if (showB && boundary.points.length >= 3 && boundary.points.every(p => p[0] != null && p[1] != null)) {
       const opacity = isActiveTarget ? 0.85 : 0.3;
-      const pts = boundary.map(p => \`\${p[0].toFixed(1)},\${p[1].toFixed(1)}\`).join(' ');
+      const pts = boundary.points.map(p => \`\${p[0].toFixed(1)},\${p[1].toFixed(1)}\`).join(' ');
       svgContent += \`<polygon points="\${pts}" fill="none" stroke="#00FF88" stroke-width="3" stroke-dasharray="12 6" opacity="\${opacity}"/>\`;
     }
 
     // Boundary vertex handles (active target, annotated mode only)
-    if (showB && isActiveTarget && !isGenerated && boundary.length > 0) {
+    if (showB && isActiveTarget && !isGenerated && boundary.points.length > 0) {
       boundary.forEach((p, i) => {
         svgContent += \`<circle class="handle" data-handle="boundary" data-ti="\${ti}" data-idx="\${i}" cx="\${p[0].toFixed(1)}" cy="\${p[1].toFixed(1)}" r="10" fill="#00FF88" stroke="#000" stroke-width="2" opacity="0.9"/>\`;
         svgContent += \`<text x="\${p[0].toFixed(1)}" y="\${(p[1]-14).toFixed(1)}" text-anchor="middle" fill="#00FF88" font-size="11" font-family="monospace" pointer-events="none">\${i}</text>\`;
@@ -929,7 +1002,7 @@ async function detectAndAddRingSet(filename, cx, cy) {
     // Check if centroid falls inside any existing target boundary
     let targetIdx = -1;
     for (let t = 0; t < ann.targets.length; t++) {
-      const pb = ann.targets[t].paperBoundary;
+      const pb = ann.targets[t].paperBoundary.points;
       console.log(\`[detect-ringset]   checking target \${t}: boundary \${pb.length} pts → \${pb.length >= 3 ? ptInPoly(ringCx, ringCy, pb) : 'too few pts'}\`);
       if (pb.length >= 3 && ptInPoly(ringCx, ringCy, pb)) { targetIdx = t; break; }
     }
@@ -1001,13 +1074,13 @@ function attachSvgListeners() {
     if (e.ctrlKey || e.metaKey) {
       const ann = getAnnotation(currentIdx);
       const target = ann.targets[currentTargetIdx];
-      if (!target || target.paperBoundary.length < 3) return;
+      if (!target || target.paperBoundary.points.length < 3) return;
       const mpt = svgPt(svg, e);
-      const { edge, pt } = nearestBoundaryEdge(target.paperBoundary, mpt.x, mpt.y);
+      const { edge, pt } = nearestBoundaryEdge(target.paperBoundary.points, mpt.x, mpt.y);
       if (edge >= 0) {
         const imgData = imageDataCache[IMAGES[currentIdx]];
         const w = imgData?.width ?? 0, h = imgData?.height ?? 0;
-        target.paperBoundary.splice(edge + 1, 0, [
+        target.paperBoundary.points.splice(edge + 1, 0, [
           Math.round(Math.max(0, Math.min(w - 1, pt[0]))),
           Math.round(Math.max(0, Math.min(h - 1, pt[1]))),
         ]);
@@ -1062,8 +1135,8 @@ function attachSvgListeners() {
         const ti  = parseInt(el.getAttribute('data-ti'),  10);
         const idx = parseInt(el.getAttribute('data-idx'), 10);
         const target = ann.targets[ti];
-        if (!target || target.paperBoundary.length <= 3) return;
-        target.paperBoundary.splice(idx, 1);
+        if (!target || target.paperBoundary.points.length <= 3) return;
+        target.paperBoundary.points.splice(idx, 1);
         markModified(currentIdx);
         updateImageList();
         render();
@@ -1128,7 +1201,7 @@ function attachSvgListeners() {
           if (target) {
             const imgData = imageDataCache[IMAGES[currentIdx]];
             const w = imgData?.width ?? 0, h = imgData?.height ?? 0;
-            target.paperBoundary[drag.idx] = [
+            target.paperBoundary.points[drag.idx] = [
               Math.round(Math.max(0, Math.min(w - 1, mpt.x))),
               Math.round(Math.max(0, Math.min(h - 1, mpt.y))),
             ];
@@ -1192,7 +1265,7 @@ function updateDataPanel() {
   ann.targets.forEach((target, ti) => {
     const isActiveTarget = ti === currentTargetIdx;
     const headerStyle = isActiveTarget ? 'color:#4a9eff;font-weight:bold' : 'color:#888;cursor:pointer';
-    html += \`<div class="target-header" data-ti="\${ti}" style="\${headerStyle};font-size:0.72rem;padding:2px 0">Target \${ti+1} · \${target.paperBoundary.length} boundary pts</div>\`;
+    html += \`<div class="target-header" data-ti="\${ti}" style="\${headerStyle};font-size:0.72rem;padding:2px 0">Target \${ti+1} · \${target.paperBoundary.points.length} boundary pts</div>\`;
     html += '<table><thead><tr><th>Ring set</th><th>Ring</th><th>pts</th><th>cx</th><th>cy</th></tr></thead><tbody>';
     target.ringSets.forEach((rings, si) => {
       const isActiveRS = isActiveTarget && si === currentRingSetIdx;
@@ -1276,7 +1349,7 @@ function showStatusMsg(text, ms = 0) {
 async function save() {
   console.log(\`[save] clicked — modified: [\${store.modified.join(', ') || 'none'}]\`);
   const out = {};
-  for (const filename of Object.keys(store.annotations)) {
+  for (const filename of store.modified) {
     const ann = store.annotations[filename];
     out[filename] = { targets: ann.targets || [], arrows: ann.arrows || [] };
   }
@@ -1311,7 +1384,7 @@ function resetBoundaries() {
   const ann = getAnnotation(currentIdx);
   detected.targets.forEach((dt, t) => {
     if (ann.targets[t]) {
-      ann.targets[t].paperBoundary = dt.paperBoundary.map(p => [p[0], p[1]]);
+      ann.targets[t].paperBoundary = dt.paperBoundary.points.map(p => [p[0], p[1]]);
     }
   });
   markModified(currentIdx);
@@ -1640,6 +1713,14 @@ fetch('/api/generation-status')
 </html>`;
 }
 
+type GenState = 'ready' | 'queued' | 'computing' | 'error' | 'unknown';
+
+interface SSEMessage {
+  type: 'status' | 'new_image' | 'removed';
+  filename: string;
+  state?: GenState; 
+}
+
 async function main(): Promise<void> {
   const jpgFiles = fs
     .readdirSync(IMAGES_DIR)
@@ -1657,22 +1738,26 @@ async function main(): Promise<void> {
 
   // --- DB setup (AW-1) ---
   await db.query(`
-    CREATE TABLE IF NOT EXISTS annotations (
-      filename       TEXT PRIMARY KEY,
-      paper_boundary JSONB,
-      rings          JSONB NOT NULL DEFAULT '[]',
-      arrows         JSONB NOT NULL DEFAULT '[]',
-      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    CREATE TABLE IF NOT EXISTS public.annotations (
+      filename text NOT NULL,
+      paper_boundary jsonb NULL,
+      rings jsonb DEFAULT '[]'::jsonb NOT NULL,
+      updated_at timestamptz DEFAULT now() NOT NULL,
+      arrows jsonb DEFAULT '[]'::jsonb NOT NULL,
+      CONSTRAINT annotations_pkey PRIMARY KEY (filename)
     )
   `);
   await db.query(`
-    CREATE TABLE IF NOT EXISTS generated (
-      filename       TEXT PRIMARY KEY,
-      algorithm_hash TEXT NOT NULL,
-      paper_boundary JSONB,
-      rings          JSONB NOT NULL DEFAULT '[]',
-      arrows         JSONB NOT NULL DEFAULT '[]',
-      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    CREATE TABLE IF NOT EXISTS public."generated" (
+      filename text NOT NULL,
+      algorithm_hash text NOT NULL,
+      paper_boundary jsonb NULL,
+      rings jsonb DEFAULT '[]'::jsonb NOT NULL,
+      arrows jsonb DEFAULT '[]'::jsonb NOT NULL,
+      updated_at timestamptz DEFAULT now() NOT NULL,
+      width int4 NULL,
+      height int4 NULL,
+      CONSTRAINT generated_pkey PRIMARY KEY (filename)
     )
   `);
 
@@ -1699,24 +1784,63 @@ async function main(): Promise<void> {
   const staleCount = filenames.length - readyCount;
   console.log(`Images: ${filenames.length} total — ${readyCount} ready, ${staleCount} stale/new`);
 
-  type GenState = 'ready' | 'queued' | 'computing' | 'error';
   const generationStatus = new Map<string, GenState>(
     filenames.map(f => [f, inGenerated.get(f) === currentHash ? 'ready' : 'queued']),
   );
   const sseClients = new Set<http.ServerResponse>();
-  function broadcastSSE(data: object) {
+  function broadcastSSE(data: SSEMessage) {
+    generationStatus.set(data.filename, data.state ?? 'unknown');
     const msg = `data: ${JSON.stringify(data)}\n\n`;
     for (const client of sseClients) {
       try { client.write(msg); } catch { sseClients.delete(client); }
     }
   }
 
-  const imageCache = new Map<string, CachedImageData>();
+  const imageCache = new Map<string, ImageData>();
   // Deduplicates concurrent /api/image/ requests for the same file so detection
   // runs at most once.  Second caller awaits the first caller's promise.
-  const pendingImageRequests = new Map<string, Promise<void>>();
 
   const html = generateHtml(filenames);
+
+  async function computeGeneratedData(filename: string, imgPath: string, imageData: ImageData): Promise<ImageData> {
+    // Slow path: run detection synchronously
+    broadcastSSE({ type: 'status', filename, state: 'computing' });
+    imageData = await processImage(imgPath, imageData);
+    const {boundary: dbBoundary, rings: dbRings, arrows: dbArrows} = targetsToDB(imageData.generated.targets, imageData.generated.arrows);
+    await db.query(
+      `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (filename) DO UPDATE
+          SET algorithm_hash = EXCLUDED.algorithm_hash,
+              paper_boundary = EXCLUDED.paper_boundary,
+              rings          = EXCLUDED.rings,
+              arrows         = EXCLUDED.arrows,
+              width          = EXCLUDED.width,
+              height         = EXCLUDED.height,
+              updated_at     = NOW()`,
+      [filename, currentHash,
+        JSON.stringify(dbBoundary), JSON.stringify(dbRings),
+        JSON.stringify(dbArrows), imageData.width, imageData.height],
+    );
+    inGenerated.set(filename, currentHash);
+    if (!inAnnotations.has(filename)) {
+      await db.query(`INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (filename) DO UPDATE
+                 SET paper_boundary = EXCLUDED.paper_boundary,
+                     rings          = EXCLUDED.rings,
+                     arrows         = EXCLUDED.arrows,
+                     updated_at     = NOW()`, 
+        [filename, 
+          JSON.stringify(dbBoundary), 
+          JSON.stringify(dbRings), 
+          JSON.stringify(dbArrows)],);
+      inAnnotations.add(filename);
+    }
+
+    broadcastSSE({ type: 'status', filename, state: 'ready' });
+    return imageData;
+  }
 
   // --- HTTP server ---
   const server = http.createServer(async (req, res) => {
@@ -1758,188 +1882,44 @@ async function main(): Promise<void> {
       const filename = decodeURIComponent(req.url.slice('/api/image/'.length));
       if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
       try {
+      // if the image is not in cache, load it (and run detection if needed) before responding
       if (!imageCache.has(filename)) {
-        const imgPath = path.join(IMAGES_DIR, filename);
-        if (!fs.existsSync(imgPath)) { respond(404, '{"error":"not found"}'); return; }
-
-        if (pendingImageRequests.has(filename)) {
-          await pendingImageRequests.get(filename)!;
-        } else {
-          let resolveDetect!: () => void, rejectDetect!: (e: unknown) => void;
-          const detectPromise = new Promise<void>(
-            (res, rej) => { resolveDetect = res; rejectDetect = rej; },
-          );
-          pendingImageRequests.set(filename, detectPromise);
-          try {
-
-        const hashInGen = inGenerated.get(filename);
-        let isReady = hashInGen === currentHash;
-        console.log(`image request: ${filename}  hashInGen=${hashInGen ?? 'null'}  isReady=${isReady}`);
-
-        let base64: string;
-        let width: number;
-        let height: number;
-        let detectedTargets: TargetData[];
-        let detectedArrows: { tip: [number, number]; nock: [number, number] | null }[];
-
-        if (isReady) {
-          // Fast path (AW-1): read from generated table
-          console.log(`  fast path: loading ${filename}…`);
-          ({ base64, width, height } = await loadImageBase64(imgPath));
-          const { rows } = await db.query(
-            'SELECT rings, paper_boundary, arrows FROM generated WHERE filename = $1',
-            [filename],
-          );
-          detectedTargets = dbToTargets(rows[0]?.paper_boundary ?? null, rows[0]?.rings ?? null);
-          detectedArrows  = rows[0]?.arrows ?? [];
-
-          // AW-2: validity check — fall back to slow path if data is corrupt
-          if (!isValidDetected(detectedTargets)) {
-            logEvent('warn', 'invalid_generated', filename, 'null coordinates in stored data — recomputing');
-            logEvent('info', 'fallback_slow_path', filename, 'invalid cache');
-            await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
-            inGenerated.delete(filename);
-            generationStatus.set(filename, 'queued');
-            isReady = false;
+        try {
+          const imgPath = path.join(IMAGES_DIR, filename);
+          if (!fs.existsSync(imgPath)) { respond(404, '{"error":"not found"}'); return; }
+  
+          const hashInGen = inGenerated.get(filename);
+          let isReady: boolean = false;
+  
+          console.log(`image request: ${filename}  hashInGen=${hashInGen ?? 'null'}  isReady=${isReady}`);
+  
+          let imageData: ImageData = await loadImage(imgPath, filename)
+          
+          if (hashInGen === currentHash) {
+            [imageData, isReady] = await fetchGeneratedData(imageData)
           }
-        }
+  
+          if (!isReady) {
+            imageData = await computeGeneratedData(filename, imgPath, imageData)
+          }
 
-        if (!isReady) {
-          // Slow path: run detection synchronously
-          generationStatus.set(filename, 'computing');
-          broadcastSSE({ type: 'status', filename, state: 'computing' });
-          const entry = await processImage(imgPath);
-          const ok = entry.result.success;
-          console.log(`  ${filename} ... ${ok ? 'ok' : `FAILED: ${(entry.result as any).error}`}`);
-          if (!ok) logEvent('error', 'detection_failed', filename, (entry.result as any).error ?? '');
-          base64 = entry.base64;
-          width = entry.width;
-          height = entry.height;
-
-          const rawRings    = ok ? entry.result.rings : [];
-          const rawBoundary = clampBoundary(
-            ok && entry.result.paperBoundary ? entry.result.paperBoundary.points : null,
-            entry.width ?? 0, entry.height ?? 0,
-          );
-          detectedArrows = entry.detectedArrows;
-
-          const { boundary: dbBoundary, rings: dbRings } = wrapSingleTarget(rawRings, rawBoundary);
-          detectedTargets = dbToTargets(dbBoundary, dbRings);
-
-          await db.query(
-            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (filename) DO UPDATE
-               SET algorithm_hash = EXCLUDED.algorithm_hash,
-                   paper_boundary = EXCLUDED.paper_boundary,
-                   rings          = EXCLUDED.rings,
-                   arrows         = EXCLUDED.arrows,
-                   width          = EXCLUDED.width,
-                   height         = EXCLUDED.height,
-                   updated_at     = NOW()`,
-            [filename, currentHash,
-             JSON.stringify(dbBoundary), JSON.stringify(dbRings),
-             JSON.stringify(detectedArrows), entry.width ?? null, entry.height ?? null],
-          );
-          inGenerated.set(filename, currentHash);
-          generationStatus.set(filename, 'ready');
-          broadcastSSE({ type: 'status', filename, state: 'ready' });
-
-          // Seed / heal annotation boundary. The DO UPDATE fires only when the
-          // stored boundary is absent or degenerate (all-zero), so user edits
-          // to rings and arrows are never overwritten by a re-detection.
-          await db.query(
-            `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
-             VALUES ($1, $2, $3, '[]')
-             ON CONFLICT (filename) DO UPDATE
-               SET paper_boundary = EXCLUDED.paper_boundary,
-                   updated_at     = NOW()
-               WHERE annotations.paper_boundary IS NULL
-                  OR annotations.paper_boundary = '[]'::jsonb`,
-            [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings)],
-          );
-          inAnnotations.add(filename);
-        }
-
-        imageCache.set(filename, {
-          base64,
-          width,
-          height,
-          detected: { targets: detectedTargets, arrows: detectedArrows },
-        });
-          resolveDetect();
-          } catch (detErr) { rejectDetect(detErr); throw detErr; }
-          finally { pendingImageRequests.delete(filename); }
+          [imageData, isReady] = await fetchAnnotationData(imageData);
+          
+          imageCache.set(filename, imageData)
+        } catch (err) {
+          console.error('Compute error:', err);
+          logEvent('error', 'compute_failed', filename, String(err));
+          broadcastSSE({ type: 'status', filename, state: 'error' });
+          respond(500, '{"error":"internal error"}');
+          return;
         }
       }
 
       respond(200, JSON.stringify(imageCache.get(filename)!));
-      } catch (err) {
-        console.error('Error processing image:', err);
-        respond(500, JSON.stringify({ error: String(err) }));
-      }
-
-    } else if (req.method === 'GET' && req.url === '/api/annotations') {
-      // NULL / empty boundaries are replaced with the generated boundary so the UI
-      // can show a useful outline. All-zero (corrupt) boundaries are left as-is and
-      // will be caught by isValidAnnotation below, which deletes them so the image
-      // appears as not-annotated for re-annotation.
-      const { rows } = await db.query(`
-        SELECT a.filename,
-          CASE WHEN a.paper_boundary IS NULL
-                 OR a.paper_boundary = '[]'::jsonb
-               THEN COALESCE(g.paper_boundary, '[]'::jsonb)
-               ELSE a.paper_boundary
-          END AS paper_boundary,
-          a.rings, a.arrows
-        FROM annotations a
-        LEFT JOIN generated g ON a.filename = g.filename
-      `);
-      const out: Record<string, unknown> = {};
-      const toDelete: string[] = [];
-      for (const row of rows) {
-        const targets = dbToTargets(row.paper_boundary, row.rings);
-        const arrows  = row.arrows ?? [];
-        if (!isValidAnnotation(targets, arrows)) {
-          toDelete.push(row.filename);
-          continue;
-        }
-        out[row.filename] = { targets, arrows };
-      }
-      if (toDelete.length > 0) {
-        await db.query(
-          `DELETE FROM annotations WHERE filename = ANY($1)`,
-          [toDelete],
-        );
-        for (const f of toDelete) {
-          inAnnotations.delete(f);
-          logEvent('info', 'invalid_annotation_deleted', f, 'removed by /api/annotations filter');
-        }
-      }
-      respond(200, JSON.stringify(out));
-
-    } else if (req.method === 'GET' && req.url?.startsWith('/api/annotation/')) {
-      const filename = decodeURIComponent(req.url.slice('/api/annotation/'.length));
-      if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
-      const { rows } = await db.query(
-        `SELECT
-          CASE WHEN a.paper_boundary IS NULL
-                 OR a.paper_boundary = '[]'::jsonb
-               THEN COALESCE(g.paper_boundary, '[]'::jsonb)
-               ELSE a.paper_boundary
-          END AS paper_boundary,
-          a.rings, a.arrows
-         FROM annotations a
-         LEFT JOIN generated g ON a.filename = g.filename
-         WHERE a.filename = $1`,
-        [filename],
-      );
-      if (rows.length === 0) { respond(404, '{"error":"not found"}'); return; }
-      respond(200, JSON.stringify({
-        targets: dbToTargets(rows[0].paper_boundary, rows[0].rings),
-        arrows:  rows[0].arrows ?? [],
-      }));
-
+    } catch (e) {
+      console.error('Error processing image:', e);
+      respond(500, '{"error":"internal error"}');
+    } 
     } else if (req.method === 'POST' && req.url?.startsWith('/api/recompute/')) {
       const filename = decodeURIComponent(req.url.slice('/api/recompute/'.length));
       if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
@@ -1948,59 +1928,26 @@ async function main(): Promise<void> {
       inAnnotations.delete(filename);
       await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
       await db.query('DELETE FROM annotations WHERE filename = $1', [filename]);
-      generationStatus.set(filename, 'computing');
       broadcastSSE({ type: 'status', filename, state: 'computing' });
       respond(202, '{"status":"computing"}');
-      (async () => {
-        try {
-          const imgPath = path.join(IMAGES_DIR, filename);
-          const entry = await processImage(imgPath);
-          const ok = entry.result.success;
-          if (!ok) logEvent('error', 'detection_failed', filename, (entry.result as any).error ?? '');
-
-          const rawRings    = ok ? entry.result.rings : [];
-          const rawBoundary = clampBoundary(
-            ok && entry.result.paperBoundary ? entry.result.paperBoundary.points : null,
-            entry.width ?? 0, entry.height ?? 0,
-          );
-          const detectedArrows = entry.detectedArrows;
-          const { boundary: dbBoundary, rings: dbRings } = wrapSingleTarget(rawRings, rawBoundary);
-
-          await db.query(
-            `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (filename) DO UPDATE
-               SET algorithm_hash = EXCLUDED.algorithm_hash,
-                   paper_boundary = EXCLUDED.paper_boundary,
-                   rings          = EXCLUDED.rings,
-                   arrows         = EXCLUDED.arrows,
-                   width          = EXCLUDED.width,
-                   height         = EXCLUDED.height,
-                   updated_at     = NOW()`,
-            [filename, currentHash,
-             JSON.stringify(dbBoundary), JSON.stringify(dbRings),
-             JSON.stringify(detectedArrows), entry.width ?? null, entry.height ?? null],
-          );
-          await db.query(
-            `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
-             VALUES ($1, $2, $3, '[]')`,
-            [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings)],
-          );
-          inGenerated.set(filename, currentHash);
-          inAnnotations.add(filename);
-          generationStatus.set(filename, 'ready');
-          broadcastSSE({ type: 'status', filename, state: 'ready' });
-        } catch (err) {
-          console.error('Recompute error:', err);
-          logEvent('error', 'recompute_failed', filename, String(err));
-          generationStatus.set(filename, 'error');
-          broadcastSSE({ type: 'status', filename, state: 'error' });
-        }
-      })();
+      try {
+        const imgPath = path.join(IMAGES_DIR, filename);
+        const imageData = await computeGeneratedData(filename, imgPath, await loadImage(imgPath, filename));
+        imageCache.set(filename, imageData)
+      } catch (err) {
+        console.error('Recompute error:', err);
+        logEvent('error', 'recompute_failed', filename, String(err));
+        broadcastSSE({ type: 'status', filename, state: 'error' });
+      }
 
     } else if (req.method === 'POST' && req.url === '/api/save') {
       const chunks: Buffer[] = [];
       req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      req.on('error', (err) => {
+        console.error('Request error:', err);
+        logEvent('error', 'save-request-error', '', String(err));
+        respond(500, JSON.stringify({ error: String(err) }));
+      });
       req.on('end', async () => {
         try {
           const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -2014,13 +1961,7 @@ async function main(): Promise<void> {
               paperBoundary: clampBoundary(t.paperBoundary ?? [], w, h) ?? [],
               ringSets:      t.ringSets ?? [],
             }));
-            const { boundary: dbBoundary, rings: dbRings } = targetsToDB(targets);
-            const arrows = ann.arrows ?? [];
-            if (!isValidAnnotation(targets, arrows)) {
-              console.log(`[save]   SKIP ${filename}: annotation invalid (targets=${targets.length}, arrows=${arrows.length})`);
-              logEvent('warn', 'save-skipped-invalid', filename, `targets=${targets.length} arrows=${arrows.length}`);
-              continue;
-            }
+            const { boundary: dbBoundary, rings: dbRings, arrows: dbArrows } = targetsToDB(targets, ann.arrows ?? []);
             await db.query(
               `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
                VALUES ($1, $2, $3, $4)
@@ -2029,10 +1970,10 @@ async function main(): Promise<void> {
                      rings          = EXCLUDED.rings,
                      arrows         = EXCLUDED.arrows,
                      updated_at     = NOW()`,
-              [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings), JSON.stringify(arrows)],
+              [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings), JSON.stringify(dbArrows)],
             );
-            console.log(`[save]   OK ${filename}: targets=${targets.length}, arrows=${arrows.length}`);
-            logEvent('info', 'save-ok', filename, `targets=${targets.length} arrows=${arrows.length}`);
+            console.log(`[save]   OK ${filename}: targets=${targets.length}, arrows=${dbArrows.length}`);
+            logEvent('info', 'save-ok', filename, `targets=${targets.length} arrows=${dbArrows.length}`);
             saved++;
           }
           console.log(`[save] done: saved=${saved}`);
@@ -2047,6 +1988,11 @@ async function main(): Promise<void> {
     } else if (req.method === 'POST' && req.url === '/api/detect-ringset') {
       const chunks: Buffer[] = [];
       req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      req.on('error', (err) => {
+        console.error('Request error:', err);
+        logEvent('error', 'detect-ringset-request-error', '', String(err));
+        respond(500, JSON.stringify({ error: String(err) }));
+      });
       req.on('end', async () => {
         try {
           const { filename, cx, cy } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -2088,74 +2034,10 @@ async function main(): Promise<void> {
     }
   });
 
-  // Shared background processing function
-  async function processFileInBackground(filename: string): Promise<void> {
-    if (inGenerated.get(filename) === currentHash) return;
-    const imgPath = path.join(IMAGES_DIR, filename);
-    generationStatus.set(filename, 'computing');
-    broadcastSSE({ type: 'status', filename, state: 'computing' });
-    try {
-      const result = await runWorkerProcess(imgPath);
-      if (!result.success) {
-        logEvent('error', 'detection_failed', filename, result.error ?? '');
-      }
-      const { rings, arrows, width: imgW, height: imgH } = result;
-      const rawBoundary = clampBoundary(result.paperBoundary ?? null, imgW ?? 0, imgH ?? 0);
-      const { boundary: dbBoundary, rings: dbRings } = wrapSingleTarget(rings, rawBoundary);
-
-      await db.query(
-        `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (filename) DO UPDATE
-           SET algorithm_hash = EXCLUDED.algorithm_hash,
-               paper_boundary = EXCLUDED.paper_boundary,
-               rings          = EXCLUDED.rings,
-               arrows         = EXCLUDED.arrows,
-               width          = EXCLUDED.width,
-               height         = EXCLUDED.height,
-               updated_at     = NOW()`,
-        [filename, currentHash,
-         JSON.stringify(dbBoundary), JSON.stringify(dbRings), JSON.stringify(arrows),
-         imgW ?? null, imgH ?? null],
-      );
-      inGenerated.set(filename, currentHash);
-      generationStatus.set(filename, 'ready');
-      broadcastSSE({ type: 'status', filename, state: 'ready' });
-
-      await db.query(
-        `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
-         VALUES ($1, $2, $3, '[]')
-         ON CONFLICT (filename) DO UPDATE
-           SET paper_boundary = EXCLUDED.paper_boundary,
-               updated_at     = NOW()
-           WHERE annotations.paper_boundary IS NULL
-              OR annotations.paper_boundary = '[]'::jsonb`,
-        [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings)],
-      );
-      inAnnotations.add(filename);
-      console.log(`  [bg] ${filename} … ok`);
-    } catch (err) {
-      const msg = String(err);
-      console.error(`  [bg] ${filename} … FAILED: ${msg}`);
-      logEvent('error', 'detection_failed', filename, msg);
-      generationStatus.set(filename, 'queued');
-      broadcastSSE({ type: 'status', filename, state: 'queued' });
-    }
-  }
-
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Annotation tool: http://localhost:${PORT}`);
     console.log('Press Ctrl+C to stop.');
     if (!process.env.NO_BROWSER) require('child_process').exec(`open http://localhost:${PORT}`);
-
-    const toProcess = filenames.filter(f => inGenerated.get(f) !== currentHash);
-    if (toProcess.length > 0) {
-      console.log(`Background queue: ${toProcess.length} image(s) to process…`);
-      (async () => {
-        for (const filename of toProcess) await processFileInBackground(filename);
-        console.log('Background queue complete.');
-      })().catch(err => console.error('Background queue error:', err));
-    }
 
     fs.watch(IMAGES_DIR, (event, name) => {
       if (!name || !/\.(jpg|jpeg)$/i.test(name)) return;
@@ -2167,7 +2049,6 @@ async function main(): Promise<void> {
         filenames.push(name);
         generationStatus.set(name, 'queued');
         broadcastSSE({ type: 'new_image', filename: name });
-        processFileInBackground(name).catch(err => console.error(`Error processing new image ${name}:`, err));
       }, 500);
     });
   });

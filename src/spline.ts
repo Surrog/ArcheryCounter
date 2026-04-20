@@ -8,6 +8,18 @@ export interface SplineRing {
   points: [number, number][];
 }
 
+export type RingSet = SplineRing[]; // One per target
+
+export function isSplineRing(x: unknown): x is SplineRing {
+  return typeof x === "object" && x != null &&
+    Array.isArray((x as SplineRing).points) &&
+    (x as SplineRing).points.every(([px, py]) => typeof px === "number" && typeof py === "number");
+}
+
+export function isRingSet(x: unknown): x is RingSet {
+  return Array.isArray(x) && x.every(r => isSplineRing(r));
+}
+
 /** Evaluates one Catmull-Rom segment at parameter t ∈ [0, 1]. */
 export function evalCatmullRom(
   p0: [number, number], p1: [number, number],

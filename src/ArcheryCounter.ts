@@ -1,12 +1,12 @@
 import { findTarget, pointInPolygon } from './targetDetection';
 import { decodeBase64Jpeg } from './imageLoader';
 import { detectArrowsNN } from './arrowDetector';
-import type { EllipseData, TargetBoundary, ColourCalibration, Pixel } from './targetDetection';
-import type { SplineRing } from './spline';
-import type { ScoredArrow } from './scoring';
+import type { TargetBoundary, ColourCalibration, Pixel } from './targetDetection';
+import { SplineRing, isSplineRing } from './spline';
+import { ScoredArrow, isScoredArrow } from './scoring';
 
 export type { SplineRing };
-export type { EllipseData, Pixel, TargetBoundary, ColourCalibration };
+export type { Pixel, TargetBoundary, ColourCalibration };
 export type { ScoredArrow };
 
 export interface TargetResult {
@@ -14,22 +14,23 @@ export interface TargetResult {
   paperBoundary: [number, number][];
 }
 
+export function isTargetResult(x: unknown): x is TargetResult {
+  return typeof x === "object" && x != null &&
+    Array.isArray((x as TargetResult).rings) &&
+    (x as TargetResult).rings.every(ring => isSplineRing(ring)) &&
+    Array.isArray((x as TargetResult).paperBoundary) &&
+    (x as TargetResult).paperBoundary.every(([px, py]) => typeof px === "number" && typeof py === "number");
+}
+
 export interface ProcessImageResult {
   /** Per-target results (rings + boundary). Length ≥ 1 on success. */
   targets: TargetResult[];
   /** All detected arrows, scored against the nearest target. Tips outside all boundaries are discarded. */
   arrows: ScoredArrow[];
-  // --- backwards-compat single-target fields (targets[0]) ---
-  rings: SplineRing[];
-  paperBoundary?: TargetBoundary;
-  calibration?: ColourCalibration;
-  /** Raw per-ray transition points for each ring (index 0 = innermost). */
-  ringPoints?: Pixel[][];
 }
 
 const ArcheryCounter = {
   async processImage(
-    imageUri: string,
     base64: string,
     options?: { modelPath?: string },
   ): Promise<ProcessImageResult> {
@@ -61,10 +62,6 @@ const ArcheryCounter = {
     return {
       targets,
       arrows,
-      rings: result.rings,
-      paperBoundary: result.paperBoundary,
-      calibration: result.calibration,
-      ringPoints: result.ringPoints,
     };
   },
 };
