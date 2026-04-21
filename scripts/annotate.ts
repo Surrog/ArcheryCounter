@@ -18,7 +18,6 @@ const db = new Pool({
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
 });
-const K_POINTS = 8;
 
 const RING_COLORS = [
   '#FFD700', '#FFD700',
@@ -133,7 +132,7 @@ function generateddbToTargets(rawBoundary: any, rawRings: any): TargetData[] {
   } else {
     for (const boundary of rawBoundary as TargetBoundary[]) {
       let target = {
-        paperBoundary: rawBoundary as TargetBoundary,
+        paperBoundary: boundary as TargetBoundary,
         ringSets: [] as RingSet[],
       } as TargetData;
       result.push(target);
@@ -146,18 +145,24 @@ function generateddbToTargets(rawBoundary: any, rawRings: any): TargetData[] {
     result[0].ringSets = [rawRings as RingSet];
   } else {
     for (const rings of rawRings as RingSet[]) {
-        const centroid = splineCentroid(rings[0]);
-        let max_dist = Infinity;
-        let closest_target_idx = 0;
-        for (let i = 0; i < targetsCentroid.length; i++) {
-          // find the closest target centroid for this ring set
-          const dist = Math.hypot(centroid[0] - targetsCentroid[i][0], centroid[1] - targetsCentroid[i][1]);
-          if (dist < max_dist) {
-            max_dist = dist;
-            closest_target_idx = i;
-          }  
-        }
+      let closest_target_idx = 0;
+      if (rings[0].points.length === 0) {
+        // skip empty rings
+        logEvent('warn', 'empty_ring', 'null', 'skipping empty ring set during migration');
         result[closest_target_idx].ringSets.push(rings);
+        continue;
+      }
+      const centroid = splineCentroid(rings[0]);
+      let max_dist = Infinity;
+      for (let i = 0; i < targetsCentroid.length; i++) {
+        // find the closest target centroid for this ring set
+        const dist = Math.hypot(centroid[0] - targetsCentroid[i][0], centroid[1] - targetsCentroid[i][1]);
+        if (dist < max_dist) {
+          max_dist = dist;
+          closest_target_idx = i;
+        }  
+      }
+      result[closest_target_idx].ringSets.push(rings);
     }
   }
 
@@ -181,14 +186,12 @@ function isOldAnnotationRings(rings: any): boolean {
 */
 function annotationToTargetData(rawBoundary: any, rawRings: any): TargetData[] {
   const result = [] as TargetData[];
-  let needToUpdate = false;
   if (isOldAnnotationBoundary(rawBoundary)) {
     logEvent('warn', 'old_annotation_boundary', 'null', 'migrating old annotation boundary format to new multi-target format');
     result.push({
       paperBoundary: { points: rawBoundary as [number, number][] },
       ringSets: [] as RingSet[],
     });
-    needToUpdate = true;
   } else {
     for (const boundary of rawBoundary as TargetBoundary[]) {
       result.push({
@@ -201,7 +204,6 @@ function annotationToTargetData(rawBoundary: any, rawRings: any): TargetData[] {
   if (isOldAnnotationRings(rawRings)) {
     logEvent('warn', 'old_annotation_rings', 'null', 'migrating old annotation rings format to new multi-target format');
     result[0].ringSets = [rawRings as RingSet];
-    needToUpdate = true;
   } else {
     result[0].ringSets = rawRings as RingSet[];
   }
@@ -253,7 +255,7 @@ async function fetchGeneratedData(data: ImageData): Promise<[ImageData, boolean]
 
 async function fetchAnnotationData(data: ImageData): Promise<[ImageData, boolean]>  {
   const { rows } = await db.query(
-    'SELECT rings, paper_boundary, arrows FROM annotation WHERE filename = $1',
+    'SELECT rings, paper_boundary, arrows FROM annotations WHERE filename = $1',
     [data.filename],
   );
   if (rows.length == 0) {
@@ -323,9 +325,8 @@ async function processImage(imgPath: string, imgData: ImageData): Promise<ImageD
 function generateHtml(filenames: string[]): string {
   const tpl = fs.readFileSync(path.join(__dirname, 'annotate.html'), 'utf-8');
   return tpl
-    .replace('{{IMAGES}}',      JSON.stringify(filenames))
-    .replace('{{RING_COLORS}}', JSON.stringify(RING_COLORS))
-    .replace('{{K_POINTS}}',    String(K_POINTS));
+    .replaceAll('{{IMAGES_TAG}}',      JSON.stringify(filenames))
+    .replaceAll('{{RING_COLORS_TAG}}', JSON.stringify(RING_COLORS))
 }
 
 type GenState = 'ready' | 'queued' | 'computing' | 'error' | 'unknown';
@@ -573,7 +574,7 @@ async function main(): Promise<void> {
             const imgMeta = imageCache.get(filename);
             const w = imgMeta?.width ?? 0, h = imgMeta?.height ?? 0;
             const targets = (ann.targets ?? []).map((t: any) => ({
-              paperBoundary: clampBoundary(t.paperBoundary ?? [], w, h) ?? [],
+              paperBoundary:  { points: clampBoundary(t.paperBoundary.points, w, h) ?? [] },
               ringSets:      t.ringSets ?? [],
             }));
             const { boundary: dbBoundary, rings: dbRings, arrows: dbArrows } = targetsToDB(targets, ann.arrows ?? []);
@@ -615,8 +616,8 @@ async function main(): Promise<void> {
           const imgPath = path.join(IMAGES_DIR, filename);
           const { rgba, width, height } = await loadImageNode(imgPath);
           const t = findRingSetFromCenter(rgba, width, height, cx, cy);
-          const boundary = clampBoundary(t.paperBoundary.points, width, height) ?? [];
-          respond(200, JSON.stringify({ rings: t.rings, paperBoundary: boundary }));
+          t.paperBoundary.points = clampBoundary(t.paperBoundary.points, width, height) ?? [];
+          respond(200, JSON.stringify({ rings: t.rings, paperBoundary: t.paperBoundary }));
         } catch (e) {
           console.error('detect-ringset error:', e);
           respond(500, JSON.stringify({ error: String(e) }));
