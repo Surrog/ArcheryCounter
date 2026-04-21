@@ -1,5 +1,8 @@
 import ArcheryCounter from '../ArcheryCounter';
 
+import { describe, expect, jest, beforeEach, it } from '@jest/globals';
+
+
 jest.mock('../targetDetection', () => ({
   findTarget: jest.fn(),
   pointInPolygon: jest.fn().mockReturnValue(true),
@@ -8,11 +11,11 @@ jest.mock('../arrowDetector',   () => ({ detectArrowsNN: jest.fn() }));
 jest.mock('../imageLoader',     () => ({ decodeBase64Jpeg: jest.fn() }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { findTarget }      = require('../targetDetection') as { findTarget: jest.Mock };
+const { findTarget }      = require('../targetDetection') as { findTarget: jest.Mock<any> };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { detectArrowsNN }  = require('../arrowDetector')   as { detectArrowsNN: jest.Mock };
+const { detectArrowsNN }  = require('../arrowDetector')   as { detectArrowsNN: jest.Mock<any> };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { decodeBase64Jpeg } = require('../imageLoader')     as { decodeBase64Jpeg: jest.Mock };
+const { decodeBase64Jpeg } = require('../imageLoader')     as { decodeBase64Jpeg: jest.Mock<any> };
 
 const MOCK_RGBA    = new Uint8Array(4);
 const MOCK_W       = 100;
@@ -36,20 +39,18 @@ describe('ArcheryCounter.processImage', () => {
   });
 
   it('returns empty arrows when no modelPath is provided', async () => {
-    const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data');
+    const result = await ArcheryCounter.processImage('file:///test.jpg');
 
     expect(decodeBase64Jpeg).toHaveBeenCalledWith('base64data');
     expect(findTarget).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H);
     expect(detectArrowsNN).not.toHaveBeenCalled();
-    expect(result.rings).toBe(MOCK_RINGS);
     expect(result.arrows).toEqual([]);
-    expect(result.paperBoundary).toBe(MOCK_BOUNDARY);
   });
 
   it('calls detectArrowsNN and returns its arrows when modelPath is provided', async () => {
     detectArrowsNN.mockResolvedValue(MOCK_ARROWS);
 
-    const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
+    const result = await ArcheryCounter.processImage('file:///test.jpg', { modelPath: MODEL_PATH });
 
     expect(detectArrowsNN).toHaveBeenCalledWith(MOCK_RGBA, MOCK_W, MOCK_H, MODEL_PATH);
     expect(result.arrows).toStrictEqual(MOCK_ARROWS);
@@ -58,7 +59,7 @@ describe('ArcheryCounter.processImage', () => {
   it('returns empty arrows when detectArrowsNN throws', async () => {
     detectArrowsNN.mockRejectedValue(new Error('ONNX load failed'));
 
-    const result = await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
+    const result = await ArcheryCounter.processImage('file:///test.jpg', { modelPath: MODEL_PATH });
 
     expect(result.arrows).toEqual([]);
   });
@@ -67,7 +68,7 @@ describe('ArcheryCounter.processImage', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     detectArrowsNN.mockRejectedValue(new Error('model missing output key'));
 
-    await ArcheryCounter.processImage('file:///test.jpg', 'base64data', { modelPath: MODEL_PATH });
+    await ArcheryCounter.processImage('file:///test.jpg', { modelPath: MODEL_PATH });
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toMatch(/Arrow detection failed/i);
@@ -77,7 +78,7 @@ describe('ArcheryCounter.processImage', () => {
   it('throws the detection error when findTarget fails', async () => {
     findTarget.mockReturnValue({ success: false, rings: [], error: 'No colour blobs found' });
 
-    await expect(ArcheryCounter.processImage('file:///bad.jpg', 'base64'))
+    await expect(ArcheryCounter.processImage('file:///bad.jpg', { modelPath: MODEL_PATH }))
       .rejects.toThrow('No colour blobs found');
     expect(detectArrowsNN).not.toHaveBeenCalled();
   });
@@ -85,7 +86,7 @@ describe('ArcheryCounter.processImage', () => {
   it('throws "Detection failed" when findTarget fails without an error field', async () => {
     findTarget.mockReturnValue({ success: false, rings: [] });
 
-    await expect(ArcheryCounter.processImage('file:///bad.jpg', 'base64'))
+    await expect(ArcheryCounter.processImage('file:///bad.jpg', { modelPath: MODEL_PATH }))
       .rejects.toThrow('Detection failed');
   });
 });

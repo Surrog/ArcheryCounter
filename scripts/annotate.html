@@ -256,7 +256,7 @@ function deduceScore(tipX, tipY, rings, boundary) {
 }
 
 // ---- State ----
-let store = { annotations: {}, modified: [] };
+let store = { modified: [] };
 let staleImages = new Set(); // filenames with stale/missing detections
 let generationStatus = {}; // filename → 'ready'|'queued'|'computing'
 let currentIdx = 0;
@@ -402,8 +402,8 @@ function onScoreSelect(score) {
     hideScorePicker();
     markModified(currentIdx);
     updateImageList();
-    render();
     updateDataPanel();
+    render();
   }
 }
 
@@ -515,7 +515,9 @@ function render() {
 
   let svgContent = '';
 
-  console.log('[render] image data:', filename, 'cached:', !!imageDataCache[filename], 'data:', imageDataCache[filename]);
+  console.log('[render] image data:', filename, 'cached:', !!imageDataCache[filename], 
+    'data: width:', imageDataCache[filename].width, 'height:', imageDataCache[filename].height, 
+    'targets:', targets, 'arrows:', arrows); // I'm ok with this log being a bit noisy since it helps catch data issues
 
   targets.forEach((target, ti) => {
     const isActiveTarget = ti === currentTargetIdx;
@@ -637,7 +639,6 @@ function render() {
 
   container.innerHTML = wrapEl;
   attachSvgListeners();
-  updateDataPanel();
 }
 
 // ---- Add ring set (detect-ringset flow) ----
@@ -704,6 +705,7 @@ async function detectAndAddRingSet(filename, cx, cy) {
     }
     markModified(savedIdx);
     updateImageList();
+    updateDataPanel()
     render();
   } catch (e) {
     console.error('[detect-ringset] error:', e);
@@ -725,6 +727,7 @@ function removeActiveRingSet() {
   }
   markModified(currentIdx);
   updateImageList();
+  updateDataPanel();
   render();
 }
 
@@ -761,6 +764,7 @@ function attachSvgListeners() {
         ]);
         markModified(currentIdx);
         updateImageList();
+        updateDataPanel();
         render();
       }
       return;
@@ -795,6 +799,7 @@ function attachSvgListeners() {
       const boundary = target?.paperBoundary ?? null;
       const suggested = deduceScore(pendingTip[0], pendingTip[1], rings, boundary);
       showScorePicker('Score:', suggested === 0 ? 0 : suggested || undefined, e.clientX, e.clientY);
+      updateDataPanel();
       render();
     }
   });
@@ -814,6 +819,7 @@ function attachSvgListeners() {
         target.paperBoundary.points.splice(idx, 1);
         markModified(currentIdx);
         updateImageList();
+        updateDataPanel();
         render();
       } else if (handleType === 'ring_pt') {
         const ti = parseInt(el.getAttribute('data-ti'), 10);
@@ -825,6 +831,7 @@ function attachSvgListeners() {
           ring.points.splice(pi, 1);
           markModified(currentIdx);
           updateImageList();
+          updateDataPanel();
           render();
         }
       } else if (handleType === 'arrow_tip') {
@@ -832,6 +839,7 @@ function attachSvgListeners() {
         data.annotated.arrows.splice(ai, 1);
         markModified(currentIdx);
         updateImageList();
+        updateDataPanel();
         render();
       }
     });
@@ -883,6 +891,7 @@ function attachSvgListeners() {
         } else if (drag.type === 'arrow_tip') {
           data.annotated.arrows[drag.ai].tip = [mpt.x, mpt.y];
         }
+        updateDataPanel();
         render();
       };
 
@@ -892,6 +901,7 @@ function attachSvgListeners() {
         if (svgElUp) svgElUp.classList.remove('dragging');
         markModified(currentIdx);
         updateImageList();
+        updateDataPanel();
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
@@ -1018,14 +1028,12 @@ async function save() {
   console.log(`[save] clicked — modified: [${store.modified.join(', ') || 'none'}]`);
   const out = {};
   for (const filename of store.modified) {
-    out[filename] = imageDataCache[filename].annotated;
+    const ann = imageDataCache[filename].annotated 
+    out[filename] = structuredClone(ann);
+    console.log(`[save] ${filename}: targets=${ann.targets?.length ?? 0} arrows=${ann.arrows.length}`);
   }
   const total = Object.keys(out).length;
   console.log(`[save] sending ${total} annotation(s)`);
-  for (const [filename, ann] of Object.entries(out)) {
-    const modified = store.modified.includes(filename);
-    console.log(`[save]   ${modified ? '* ' : '  '}${filename}: targets=${ann.targets?.length ?? 0} arrows=${ann.arrows.length}`);
-  }
   try {
     const res = await fetch('/api/save', {
       method: 'POST',
@@ -1036,6 +1044,7 @@ async function save() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body = await res.json();
     console.log(`[save] server response:`, body);
+    showStatusMsg(`Saved ${total} annotation${total !== 1 ? 's' : ''} successfully.`, 2000);
   } catch (e) {
     console.error('[save] failed:', e);
     alert('Save failed: ' + e);
@@ -1064,6 +1073,7 @@ function resetRings() {
 
   markModified(currentIdx);
   updateImageList();
+  updateDataPanel();
   render();
 }
 
@@ -1072,6 +1082,7 @@ function resetArrows() {
   data.annotated.arrows = structuredClone(data.generated.arrows);
   markModified(currentIdx);
   updateImageList();
+  updateDataPanel();
   render();
 }
 
@@ -1154,6 +1165,7 @@ document.addEventListener('keydown', (e) => {
         hideScorePicker();
         markModified(currentIdx);
         updateImageList();
+        updateDataPanel();
         render();
       } else {
         hideScorePicker();

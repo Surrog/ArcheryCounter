@@ -1,6 +1,9 @@
 import { findTarget, pointInPolygon, polyToRayDists } from '../targetDetection';
 import type { TargetBoundary } from '../targetDetection';
 
+import { expect, describe, it } from '@jest/globals';
+
+
 // ---------------------------------------------------------------------------
 // pointInPolygon
 // ---------------------------------------------------------------------------

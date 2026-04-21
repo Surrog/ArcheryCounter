@@ -3,6 +3,8 @@ import { launchImageLibrary } from 'react-native-image-picker';
 import ArcheryCounter from '../ArcheryCounter';
 import { useArcheryScorer } from '../useArcheryScorer';
 
+import { expect, describe, it, jest, beforeEach } from '@jest/globals';
+
 jest.mock('react-native-image-picker', () => ({
   launchImageLibrary: jest.fn(),
 }));
@@ -10,7 +12,7 @@ jest.mock('react-native-image-picker', () => ({
 jest.mock('../ArcheryCounter', () => ({
   __esModule: true,
   default: {
-    processImage: jest.fn().mockResolvedValue({
+    processImage: jest.fn<any>().mockResolvedValue({
       targets: [{
         rings: Array(10).fill({ points: Array.from({ length: 8 }, () => [500, 400]) }),
         paperBoundary: [],
@@ -20,7 +22,7 @@ jest.mock('../ArcheryCounter', () => ({
   },
 }));
 
-const mockLaunch = launchImageLibrary as jest.Mock;
+const mockLaunch = launchImageLibrary as jest.Mock<any>;
 
 describe('useArcheryScorer', () => {
   beforeEach(() => {
@@ -74,7 +76,7 @@ describe('useArcheryScorer', () => {
     });
 
     // Override mock for this test only
-    (ArcheryCounter.processImage as jest.Mock).mockRejectedValueOnce(new Error('CV error'));
+    (ArcheryCounter.processImage as jest.Mock<any>).mockRejectedValueOnce(new Error('CV error'));
 
     const { result } = renderHook(() => useArcheryScorer());
 
@@ -91,7 +93,7 @@ describe('useArcheryScorer', () => {
       didCancel: false,
       assets: [{ uri: 'file:///bad.jpg', width: 100, height: 100 }],
     });
-    (ArcheryCounter.processImage as jest.Mock).mockRejectedValueOnce('plain string error');
+    (ArcheryCounter.processImage as jest.Mock<any>).mockRejectedValueOnce('plain string error');
 
     const { result } = renderHook(() => useArcheryScorer());
     await act(async () => { await result.current.pickAndProcess(); });

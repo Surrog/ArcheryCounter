@@ -5,6 +5,9 @@ import {
   ellipseToSplinePoints,
 } from '../spline';
 
+import { expect, describe, it } from '@jest/globals';
+
+
 // ---------------------------------------------------------------------------
 // evalCatmullRom
 // ---------------------------------------------------------------------------

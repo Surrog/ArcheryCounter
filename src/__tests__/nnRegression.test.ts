@@ -24,10 +24,13 @@
 
 import * as fs   from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 // jpeg-js is a devDependency used only in Node.js contexts
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const jpegJs = require('jpeg-js') as typeof import('jpeg-js');
+
+import { describe, expect, jest, beforeAll, it } from '@jest/globals';
+
 
 import { letterboxGray, extractPolygons, releaseBoundarySession } from '../boundaryDetector';
 import { letterboxRgba, releaseSession as releaseArrowSession } from '../arrowDetector';
@@ -92,7 +95,7 @@ describe('letterboxGray preprocessing (boundary detector)', () => {
   });
 
   it('is skipped if test image is absent', () => {
-    if (!imageExists(BOUNDARY_IMAGE)) pending('image not found');
+    if (!imageExists(BOUNDARY_IMAGE)) return;
   });
 
   it('produces a 512×512 output buffer', () => {
@@ -150,7 +153,7 @@ describe('letterboxRgba preprocessing (arrow detector)', () => {
   });
 
   it('is skipped if test image is absent', () => {
-    if (!imageExists(ARROW_IMAGE)) pending('image not found');
+    if (!imageExists(ARROW_IMAGE)) return;
   });
 
   it('produces a 3×640×640 output buffer', () => {
@@ -255,7 +258,7 @@ describe('Python boundary_dataset preprocessing matches TypeScript letterboxGray
   }, 90_000);
 
   it('is skipped if image or Python deps are absent', () => {
-    if (skipReason) pending(skipReason);
+    if (skipReason) return;
   });
 
   it('has correct scale and padding for a 4000×4000 image', () => {
@@ -317,7 +320,7 @@ describe('NN end-to-end inference (boundary + arrow)', () => {
   describe('boundary detector', () => {
     it('is skipped if model or image is absent', () => {
       if (!modelExists(BOUNDARY_MODEL) || !imageExists(BOUNDARY_IMAGE))
-        pending('boundary model or image not found');
+        return;
     });
 
     it('produces at least 1 polygon for a known target image', () => {
@@ -340,7 +343,7 @@ describe('NN end-to-end inference (boundary + arrow)', () => {
   describe('arrow detector', () => {
     it('is skipped if model or image is absent', () => {
       if (!modelExists(ARROW_MODEL) || !imageExists(ARROW_IMAGE))
-        pending('arrow model or image not found');
+        return;
     });
 
     it('returns an array for a known image (empty is acceptable)', () => {
@@ -425,8 +428,8 @@ describe('arrowDetector: throws descriptive error when ONNX output key is wrong'
       jest.doMock('onnxruntime-node', () => ({
         Tensor: class { constructor(public type: string, public data: unknown, public dims: number[]) {} },
         InferenceSession: {
-          create: jest.fn().mockResolvedValue({
-            run: jest.fn().mockResolvedValue({ bad_output: { data: new Float32Array(0) } }),
+          create: jest.fn<any>().mockResolvedValue({
+            run: jest.fn<any>().mockResolvedValue({ bad_output: { data: new Float32Array(0) } }),
           }),
         },
       }), { virtual: true });

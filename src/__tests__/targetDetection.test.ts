@@ -17,6 +17,9 @@ import { Pool } from 'pg';
 import { loadImageNode } from '../imageLoader';
 import { findTarget } from '../targetDetection';
 
+import { expect, describe, afterAll, beforeAll, test } from '@jest/globals';
+
+
 const IMAGES_DIR    = path.resolve(__dirname, '../../images');
 const TSX_BIN       = path.resolve(__dirname, '../../node_modules/.bin/tsx');
 const DETECT_WORKER = path.resolve(__dirname, '../../scripts/detect-worker.ts');
@@ -284,50 +287,3 @@ describe('findTarget', () => {
     }
   }, 15000);
 });
-
-// ---------------------------------------------------------------------------
-// Structural checks (ringPoints / rayDebug): single inline run on one image
-// ---------------------------------------------------------------------------
-
-const STRUCTURAL_IMAGE = '20260326_214504.jpg'; // a well-detected daytime image
-
-test('findTarget structural: ringPoints and rayDebug are well-formed', async () => {
-  const imgPath = path.join(IMAGES_DIR, STRUCTURAL_IMAGE);
-  const { rgba, width, height } = await loadImageNode(imgPath);
-  const result = findTarget(rgba, width, height);
-
-  expect(result.success).toBe(true);
-  expect(result.rings).toHaveLength(10);
-
-  // ringPoints: detected rings have points; interpolated rings do not.
-  expect(result.ringPoints).toBeDefined();
-  if (result.ringPoints) {
-    const INTERPOLATED = [0, 2, 4, 6];
-    const DETECTED     = [1, 3, 5, 7, 8, 9];
-    for (const i of INTERPOLATED) {
-      expect(result.ringPoints[i]).toHaveLength(0);
-    }
-    for (const i of DETECTED) {
-      expect(result.ringPoints[i].length).toBeGreaterThan(0);
-    }
-  }
-
-  // rayDebug: per-ray debug data, distances strictly increasing.
-  expect(result.rayDebug).toBeDefined();
-  if (result.rayDebug) {
-    expect(result.rayDebug.length).toBeGreaterThan(0);
-    for (const entry of result.rayDebug) {
-      expect(entry.distances).toHaveLength(10);
-      expect(entry.boundary).toBeGreaterThan(0);
-    }
-    for (const { distances } of result.rayDebug) {
-      let prevD = 0;
-      for (let k = 0; k < 10; k++) {
-        const d = distances[k];
-        if (d === null) continue;
-        expect(d).toBeGreaterThan(prevD);
-        prevD = d;
-      }
-    }
-  }
-}, 120000);

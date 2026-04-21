@@ -1,5 +1,8 @@
 import { computeLetterboxTransform } from '../letterboxTransform';
 
+import { describe, expect, it } from '@jest/globals';
+
+
 describe('computeLetterboxTransform', () => {
   describe('wider image than view (letterbox: bars top/bottom)', () => {
     // Image 1000x500 (aspect 2:1) inside view 800x600 (aspect 4:3)
