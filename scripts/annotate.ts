@@ -147,7 +147,6 @@ function generateddbToTargets(rawBoundary: any, rawRings: any): TargetData[] {
     for (const rings of rawRings as RingSet[]) {
       let closest_target_idx = 0;
       if (rings[0].points.length === 0) {
-        // skip empty rings
         logEvent('warn', 'empty_ring', 'null', 'skipping empty ring set during migration');
         result[closest_target_idx].ringSets.push(rings);
         continue;
@@ -205,7 +204,26 @@ function annotationToTargetData(rawBoundary: any, rawRings: any): TargetData[] {
     logEvent('warn', 'old_annotation_rings', 'null', 'migrating old annotation rings format to new multi-target format');
     result[0].ringSets = [rawRings as RingSet];
   } else {
-    result[0].ringSets = rawRings as RingSet[];
+    for (const rings of rawRings as RingSet[]) {
+      if (rings[0].points.length === 0) {
+        // skip empty rings
+        logEvent('warn', 'empty_annotation_ring', 'null', 'skipping empty ring set during annotation migration');
+        result[0].ringSets.push(rings);
+        continue;
+      }
+      const centroid = splineCentroid(rings[0]);
+      let closest_target_idx = 0;
+      let max_dist = Infinity;
+      for (let i = 0; i < result.length; i++) {
+        // find the closest target centroid for this ring set
+        const dist = Math.hypot(centroid[0] - splineCentroid(result[i].paperBoundary)[0], centroid[1] - splineCentroid(result[i].paperBoundary)[1]);
+        if (dist < max_dist) {
+          max_dist = dist;
+          closest_target_idx = i;
+        }  
+      }
+      result[closest_target_idx].ringSets.push(rings);
+    }
   }
 
   return result;
@@ -302,7 +320,7 @@ async function processImage(imgPath: string, imgData: ImageData): Promise<ImageD
   const filename = path.basename(imgPath);
   console.log(`  [1/3] loadImageNode ${filename}…`);
   const { rgba, width, height } = await loadImageNode(imgPath);
-  console.log(`  [3/3] findTarget ${filename}…`);
+  console.log(`  [2/3] findTarget ${filename}…`);
   const result = findTarget(rgba, width, height);
   if (result.success) {
     console.log(`  findTarget success: ${filename}`);
@@ -314,6 +332,7 @@ async function processImage(imgPath: string, imgData: ImageData): Promise<ImageD
     }
   }
   console.log(`  done: ${filename}`);
+  console.log(`  [3/3] detectArrows ${filename}…`);
   const arrows = await detectArrowsNN(rgba, width, height, path.resolve(__dirname, '../models/arrow-detector.onnx'));
   for (const a of arrows) {
     imgData.generated.arrows.push({ tip: a.tip, score: a.score });
@@ -419,7 +438,6 @@ async function main(): Promise<void> {
   const html = generateHtml(filenames);
 
   async function computeGeneratedData(filename: string, imgPath: string, imageData: ImageData): Promise<ImageData> {
-    // Slow path: run detection synchronously
     broadcastSSE({ type: 'status', filename, state: 'computing' });
     imageData = await processImage(imgPath, imageData);
     const {boundary: dbBoundary, rings: dbRings, arrows: dbArrows} = targetsToDB(imageData.generated.targets, imageData.generated.arrows);
@@ -548,7 +566,9 @@ async function main(): Promise<void> {
       respond(202, '{"status":"computing"}');
       try {
         const imgPath = path.join(IMAGES_DIR, filename);
-        const imageData = await computeGeneratedData(filename, imgPath, await loadImage(imgPath, filename));
+        let imageData = await computeGeneratedData(filename, imgPath, await loadImage(imgPath, filename));
+        let isValid = true;
+        [imageData, isValid] = await fetchAnnotationData(imageData);
         imageCache.set(filename, imageData)
       } catch (err) {
         console.error('Recompute error:', err);

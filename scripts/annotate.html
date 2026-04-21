@@ -608,7 +608,7 @@ function render() {
 
   // Annotated arrows
   if (showA && !isGenerated) {
-    ann.arrows.forEach((arrow, ai) => {
+    data.annotated.arrows.forEach((arrow, ai) => {
       const { tip, score } = arrow;
       const isMiss = score === 0;
       const isIncomplete = score === null || score === undefined;
@@ -1058,7 +1058,7 @@ function resetRings() {
   const data = getImageData(currentIdx);
   data.generated.targets.forEach((dt, t) => {
     if (data.annotated.targets[t]) {
-      data.annotated.targets[t].ringSets = dt.ringSets.map(rs => rs.map(r => ({ points: r.points.map(p => [p[0], p[1]]) })));
+      data.annotated.targets[t].ringSets = structuredClone(dt.ringSets);
     }
   });
 
