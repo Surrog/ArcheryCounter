@@ -40,7 +40,7 @@
     "@types/pg": "^8.18.0",
     "@types/react": "^19.2.0",
     "@types/react-test-renderer": "^19.1.0",
-    "eslint": "^9.39.4",
+    "eslint": "^10.2.1",
     "hyparquet": "^1.25.1",
     "hyparquet-writer": "^0.13.0",
     "jest": "^30.0.0",
