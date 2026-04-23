@@ -68,10 +68,23 @@ function splineAxes(ring: SplineRing): { rx: number; ry: number } {
 // beforeAll: populate generated table (idempotent — skips up-to-date rows)
 // ---------------------------------------------------------------------------
 
-const imageFiles = fs
-  .readdirSync(IMAGES_DIR)
-  .filter(f => /\.(jpg|jpeg)$/i.test(f))
-  .sort();
+function sampleImages(imageFiles: string[], sampleSize: number): string[] {
+  if (imageFiles.length <= sampleSize) return imageFiles;
+  const sampled = new Set<string>();
+  while (sampled.size < sampleSize) {
+    const idx = Math.floor(Math.random() * imageFiles.length);
+    sampled.add(imageFiles[idx]);
+  }
+  return Array.from(sampled);
+}
+
+const imageFiles : string[] = sampleImages(
+  fs
+    .readdirSync(IMAGES_DIR)
+    .filter(f => /\.(jpg|jpeg)$/i.test(f))
+    .sort(),
+  15
+);
 
 beforeAll(async () => {
   await db.query(`

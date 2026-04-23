@@ -4,11 +4,11 @@ import { describe, expect, jest, beforeEach, it } from '@jest/globals';
 
 
 jest.mock('../targetDetection', () => ({
-  findTarget: jest.fn(),
-  pointInPolygon: jest.fn().mockReturnValue(true),
+  findTarget: jest.fn<any>(),
+  pointInPolygon: jest.fn<any>().mockReturnValue(true),
 }));
-jest.mock('../arrowDetector',   () => ({ detectArrowsNN: jest.fn() }));
-jest.mock('../imageLoader',     () => ({ decodeBase64Jpeg: jest.fn() }));
+jest.mock('../arrowDetector',   () => ({ detectArrowsNN: jest.fn<any>() }));
+jest.mock('../imageLoader',     () => ({ decodeBase64Jpeg: jest.fn<any>() }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { findTarget }      = require('../targetDetection') as { findTarget: jest.Mock<any> };

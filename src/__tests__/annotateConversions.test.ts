@@ -3,7 +3,7 @@ import { describe, expect, it, beforeAll, afterAll, jest } from '@jest/globals';
 // Prevent logEvent from writing to disk
 jest.mock('fs', () => ({
   ...jest.requireActual<typeof import('fs')>('fs'),
-  appendFileSync: jest.fn(),
+  appendFileSync: jest.fn<any>(),
 }));
 
 import {
