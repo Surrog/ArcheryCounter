@@ -3,9 +3,9 @@ ArrowDataset — loads annotations from PostgreSQL, letterbox-resizes images to
 512×512 (no crop), generates heatmaps and a radial-distance channel.
 
 Outputs per sample:
-  image      : (4, 512, 512) float32  — normalised RGB + radial distance channel
-  tip_hm     : (1, 128, 128) float32  — Gaussian heatmap of tip positions
-  score_map  : (128, 128)    int64    — score label at each tip pixel, -1 = ignore
+  image      : (3, 640, 640) float32  — normalised RGB + radial distance channel
+  tip_hm     : (1, 160, 160) float32  — Gaussian heatmap of tip positions
+  score_map  : (160, 160)    int64    — score label at each tip pixel, -1 = ignore
   meta       : dict with filename, scale, pad_x, pad_y, orig_w, orig_h
 """
 
@@ -13,6 +13,7 @@ import os
 import math
 import json
 from functools import lru_cache
+import hashlib
 
 import numpy as np
 from PIL import Image
@@ -77,31 +78,6 @@ def _load_letterboxed(path: str) -> tuple:
     return np.array(img_lb, dtype=np.uint8), scale, pad_x, pad_y, orig_w, orig_h
 
 
-def make_radial_channel(ring_sets, scale: float, pad_x: int, pad_y: int,
-                        size: int = INPUT_SIZE) -> np.ndarray:
-    """Return a (size, size) float32 array: normalised distance from target centre.
-
-    0 = centre, 1 = outermost ring boundary, >1 = outside target (clamped at 2).
-    Uses the first ring set.
-    ring_sets: RingSet[]  — flat list of ring sets, each ring set is SplineRing[]
-    """
-    rings = ring_sets[0]  # first ring set
-    pts0  = np.asarray(rings[0]['points'], dtype=np.float64)
-    cx    = pts0[:, 0].mean() * scale + pad_x
-    cy    = pts0[:, 1].mean() * scale + pad_y
-
-    outer_idx = min(9, len(rings) - 1)
-    pts_out   = np.asarray(rings[outer_idx]['points'], dtype=np.float64)
-    pts_lb    = pts_out * scale + np.array([pad_x, pad_y])
-    outer_r   = np.hypot(pts_lb[:, 0] - cx, pts_lb[:, 1] - cy).mean()
-    if outer_r < 1:
-        outer_r = size / 2.0
-
-    ys, xs = np.mgrid[0:size, 0:size].astype(np.float32)
-    dist   = np.hypot(xs - cx, ys - cy) / outer_r
-    return np.clip(dist, 0.0, 2.0).astype(np.float32)
-
-
 def draw_gaussian(heatmap: np.ndarray, cx: float, cy: float,
                   sigma: float = SIGMA) -> None:
     """Render a 2D Gaussian (peak = 1) into heatmap in-place."""
@@ -140,8 +116,8 @@ def _score_against_ring_set(tip, rings) -> int:
     """
     cx, cy = _ring_set_centroid(rings)
     radii = [
-        np.hypot(np.asarray(r['points'], dtype=np.float64)[:, 0] - cx,
-                 np.asarray(r['points'], dtype=np.float64)[:, 1] - cy).mean()
+        np.hypot((pts := np.asarray(r['points'], dtype=np.float64))[:, 0] - cx,
+                 pts[:, 1] - cy).mean()
         for r in rings
     ]
     d = math.hypot(tip[0] - cx, tip[1] - cy)
@@ -185,29 +161,27 @@ class ArrowDataset(Dataset):
         augment: bool  = True,
         val_split: float = 0.1,
         is_val: bool   = False,
-        use_radial: bool = True,
     ):
         self.images_dir = images_dir
         self.augment    = augment and not is_val
-        self.use_radial = use_radial
 
         # ── load annotations ──────────────────────────────────────────────
-        conn = psycopg2.connect(db_url)
-        cur  = conn.cursor()
-        cur.execute("""
-            SELECT filename, arrows, rings
-            FROM   annotations
-            WHERE  arrows IS NOT NULL
-              AND  jsonb_array_length(arrows) > 0
-              AND  rings  IS NOT NULL
-              AND  jsonb_array_length(rings)  > 0
-        """)
-        rows = cur.fetchall()
-        conn.close()
+        with psycopg2.connect(db_url) as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT filename, arrows, rings
+                FROM   annotations
+                WHERE  arrows IS NOT NULL
+                AND  jsonb_array_length(arrows) > 0
+                AND  rings  IS NOT NULL
+                AND  jsonb_array_length(rings)  > 0
+            """)
+            rows = cur.fetchall()
 
         # Deterministic train/val split by filename hash
         def is_val_sample(fname):
-            return (hash(fname) % 1000) < int(val_split * 1000)
+            h = int(hashlib.md5(fname.encode()).hexdigest(), 16)
+            return (h % 1000) < int(val_split * 1000)
+
 
         self.samples = []
         for fname, arrows_j, rings_j in rows:
@@ -267,12 +241,11 @@ class ArrowDataset(Dataset):
         path = os.path.join(self.images_dir, fname)
         img_np_cached, scale, pad_x, pad_y, orig_w, orig_h = _load_letterboxed(path)
         img_np = img_np_cached.copy()   # copy so augmentation doesn't mutate the cache
-        radial = make_radial_channel(ring_sets, scale, pad_x, pad_y)
 
         # Collect tip keypoints in letterboxed INPUT_SIZE-space.
         keypoints     = []
         kp_arrow_idxs = []   # arrow index (int)
-        scores_raw    = []   # parallel to keypoints
+        scores_by_arrow = {}
 
         for i, arrow in enumerate(arrows):
             tip = arrow['tip']
@@ -282,7 +255,7 @@ class ArrowDataset(Dataset):
                 continue
             keypoints.append((tx, ty))
             kp_arrow_idxs.append(i)
-            scores_raw.append(score_tip(tip, ring_sets))
+            scores_by_arrow[i] = score_tip(tip, ring_sets)
 
         # ── spatial augmentation ──────────────────────────────────────────
         if self.augment and keypoints:
@@ -295,14 +268,6 @@ class ArrowDataset(Dataset):
             aug_kps        = res['keypoints']
             aug_arrow_idxs = res['kp_arrow_idxs']
 
-            # Replay exact same spatial transform on the radial channel.
-            rad_rgb = np.stack([radial] * 3, axis=-1)   # fake 3-ch for replay
-            rad_res = A.ReplayCompose.replay(
-                res['replay'], image=rad_rgb,
-                keypoints=[], kp_arrow_idxs=[],
-            )
-            radial = rad_res['image'][:, :, 0]
-
             # Rebuild surviving tips from augmented keypoints.
             tip_map = {}   # arrow_idx -> (x, y)
             for (x, y), arr_i in zip(aug_kps, aug_arrow_idxs):
@@ -310,9 +275,9 @@ class ArrowDataset(Dataset):
 
             surviving  = sorted(tip_map)
             keypoints  = [tip_map[i]  for i in surviving]
-            scores_seq = [scores_raw[i] for i in surviving]
+            scores_seq = [scores_by_arrow[i] for i in surviving]
         else:
-            scores_seq = scores_raw
+            scores_seq = [scores_by_arrow[i] for i in kp_arrow_idxs]
 
         # ── colour augmentation (image only) ──────────────────────────────
         if self.augment:
@@ -338,11 +303,7 @@ class ArrowDataset(Dataset):
         img_f = (img_f - mean) / std
         img_t = torch.from_numpy(img_f).permute(2, 0, 1)   # (3, H, W)
 
-        if self.use_radial:
-            rad_t = torch.from_numpy(radial).unsqueeze(0)
-            x = torch.cat([img_t, rad_t], dim=0)            # (4, H, W)
-        else:
-            x = img_t                                        # (3, H, W)
+        x = img_t                                        # (3, H, W)
 
         return {
             'image':     x,

@@ -221,11 +221,10 @@ def main():
     print(f'Device: {device}')
 
     # ── data ──────────────────────────────────────────────────────────────
-    use_radial = args.input_channels == 4
     train_ds = ArrowDataset(args.db, args.images, augment=True,
-                            val_split=args.val_split, is_val=False, use_radial=use_radial)
+                            val_split=args.val_split, is_val=False)
     val_ds   = ArrowDataset(args.db, args.images, augment=False,
-                            val_split=args.val_split, is_val=True, use_radial=use_radial)
+                            val_split=args.val_split, is_val=True)
 
     # Use the val split for recall tracking — large enough now to be stable.
     recall_ds = val_ds

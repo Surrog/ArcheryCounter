@@ -18,7 +18,6 @@ from dataset import (
     ArrowDataset,
     draw_gaussian,
     letterbox,
-    make_radial_channel,
     score_tip,
 )
 
@@ -40,16 +39,6 @@ def _fake_rings(cx=100.0, cy=100.0, r_inner=10.0, r_outer=100.0):
         ]
         ring_set.append({"points": pts})
     return [ring_set]  # RingSet[] with one ring set
-
-
-def _fake_sample(n_arrows=2, img_w=400, img_h=300):
-    """Return (fname, arrows, rings) as ArrowDataset.samples entries."""
-    rings = _fake_rings(cx=img_w / 2, cy=img_h / 2, r_inner=10, r_outer=min(img_w, img_h) / 2 - 5)
-    arrows = [
-        {"tip": [img_w / 2 + i * 15, img_h / 2 + i * 10]}
-        for i in range(n_arrows)
-    ]
-    return ("fake.jpg", arrows, rings)
 
 
 # ── unit tests ────────────────────────────────────────────────────────────────
@@ -126,35 +115,21 @@ class TestScoreTip:
         assert scores == sorted(scores, reverse=True)
 
 
-class TestMakeRadialChannel:
-    def test_centre_is_zero(self):
-        rings = _fake_rings(cx=256, cy=256, r_inner=5, r_outer=100)
-        ch = make_radial_channel(rings, scale=1.0, pad_x=0, pad_y=0, size=512)
-        assert ch[256, 256] == pytest.approx(0.0, abs=0.05)
-
-    def test_shape(self):
-        rings = _fake_rings()
-        ch = make_radial_channel(rings, scale=1.0, pad_x=0, pad_y=0, size=64)
-        assert ch.shape == (64, 64)
-
-    def test_values_clamped(self):
-        rings = _fake_rings(cx=32, cy=32, r_inner=5, r_outer=10)
-        ch = make_radial_channel(rings, scale=1.0, pad_x=0, pad_y=0, size=64)
-        assert ch.min() >= 0.0
-        assert ch.max() <= 2.0
-
-
 # ── regression: ReplayCompose radial-channel replay ───────────────────────────
 
 class TestSpatialAugReplay:
-    """Regression for the label_fields errors when replaying on the radial channel."""
+    """Regression: ReplayCompose replay on a second image must not raise.
+
+    Uses the same label_fields configuration as ArrowDataset._spatial so
+    these tests accurately reflect production behaviour.
+    """
 
     def _make_spatial(self):
         return A.ReplayCompose(
             [A.HorizontalFlip(p=1.0)],
             keypoint_params=A.KeypointParams(
                 format="xy",
-                label_fields=["kp_kinds", "kp_arrow_idxs"],
+                label_fields=["kp_arrow_idxs"],
                 remove_invisible=True,
             ),
         )
@@ -166,35 +141,33 @@ class TestSpatialAugReplay:
         res = spatial(
             image=img,
             keypoints=[(100.0, 200.0), (300.0, 400.0)],
-            kp_kinds=["tip", "nock"],
-            kp_arrow_idxs=[0, 0],
+            kp_arrow_idxs=[0, 1],
         )
 
-        # Replay on radial channel — this previously raised ValueError
+        # Replay on a second image (proxy for the radial channel).
         radial = np.random.rand(512, 512).astype(np.float32)
         rad_rgb = np.stack([radial] * 3, axis=-1)
         rad_res = A.ReplayCompose.replay(
             res["replay"], image=rad_rgb,
-            keypoints=[], kp_kinds=[], kp_arrow_idxs=[],
+            keypoints=[], kp_arrow_idxs=[],
         )
         assert rad_res["image"].shape == (512, 512, 3)
 
     def test_replay_applies_same_flip(self):
-        """Radial channel must receive the same spatial transform as the image."""
+        """Replay must apply the same spatial transform to a second image."""
         spatial = self._make_spatial()
         img = np.zeros((512, 512, 3), dtype=np.uint8)
         img[:, :256] = 255  # left half white
 
-        res = spatial(image=img, keypoints=[], kp_kinds=[], kp_arrow_idxs=[])
-        # After a guaranteed flip, the right half should be white
+        res = spatial(image=img, keypoints=[], kp_arrow_idxs=[])
+        # After a guaranteed flip, the right half should be white.
         assert res["image"][:, 256:].mean() > 200
 
-        # Radial channel with same left-half-bright pattern
         radial = np.zeros((512, 512, 3), dtype=np.uint8)
         radial[:, :256] = 255
         rad_res = A.ReplayCompose.replay(
             res["replay"], image=radial,
-            keypoints=[], kp_kinds=[], kp_arrow_idxs=[],
+            keypoints=[], kp_arrow_idxs=[],
         )
         assert rad_res["image"][:, 256:].mean() > 200
 
@@ -210,13 +183,15 @@ def _make_dataset(tmp_path, n_arrows=2, augment=True):
 
     rings = _fake_rings(cx=img_w / 2, cy=img_h / 2, r_inner=10, r_outer=min(img_w, img_h) / 2 - 5)
     arrows = [
-        {"tip": [img_w / 2 + i * 15, img_h / 2 + i * 10], "nock": [img_w / 2 + i * 15 - 30, img_h / 2 + i * 10 - 20]}
+        {"tip": [img_w / 2 + i * 15, img_h / 2 + i * 10]}
         for i in range(n_arrows)
     ]
 
     mock_cur = MagicMock()
+    mock_cur.__enter__.return_value = mock_cur   # `with conn.cursor() as cur` → cur is mock_cur
     mock_cur.fetchall.return_value = [(fname, arrows, rings)]
     mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn  # `with connect(...) as conn` → conn is mock_conn
     mock_conn.cursor.return_value = mock_cur
 
     with patch("dataset.psycopg2.connect", return_value=mock_conn):
@@ -235,14 +210,14 @@ class TestArrowDatasetGetitem:
         ds = _make_dataset(tmp_path, n_arrows=2, augment=False)
         assert len(ds) == 1
         sample = ds[0]
-        assert sample["image"].shape    == (4, INPUT_SIZE, INPUT_SIZE)
+        assert sample["image"].shape    == (3, INPUT_SIZE, INPUT_SIZE)
         assert sample["tip_hm"].shape   == (1, HEATMAP_SIZE, HEATMAP_SIZE)
         assert sample["score_map"].shape == (HEATMAP_SIZE, HEATMAP_SIZE)
 
     def test_output_shapes_with_augment(self, tmp_path):
         ds = _make_dataset(tmp_path, n_arrows=2, augment=True)
         sample = ds[0]
-        assert sample["image"].shape    == (4, INPUT_SIZE, INPUT_SIZE)
+        assert sample["image"].shape    == (3, INPUT_SIZE, INPUT_SIZE)
         assert sample["tip_hm"].shape   == (1, HEATMAP_SIZE, HEATMAP_SIZE)
         assert sample["score_map"].shape == (HEATMAP_SIZE, HEATMAP_SIZE)
 
@@ -251,21 +226,14 @@ class TestArrowDatasetGetitem:
         sample = ds[0]
         assert sample["tip_hm"].max().item() > 0.9
 
-    def test_radial_channel_range(self, tmp_path):
-        ds = _make_dataset(tmp_path, n_arrows=1, augment=False)
-        sample = ds[0]
-        rad = sample["image"][3]  # 4th channel
-        assert rad.min().item() >= 0.0
-        assert rad.max().item() <= 2.0 + 1e-4
-
     def test_meta_fields_present(self, tmp_path):
         ds = _make_dataset(tmp_path, n_arrows=1, augment=False)
         sample = ds[0]
         for key in ("filename", "scale", "pad_x", "pad_y", "orig_w", "orig_h"):
             assert key in sample["meta"], f"missing meta key: {key}"
 
-    def test_augment_replay_no_error(self, tmp_path):
-        """Regression: replay on radial channel must not raise label_fields error."""
+    def test_augment_does_not_raise(self, tmp_path):
+        """Augmented __getitem__ must not raise across varied random draws."""
         ds = _make_dataset(tmp_path, n_arrows=3, augment=True)
-        for _ in range(5):   # run several times to hit different random augmentations
+        for _ in range(5):
             ds[0]
