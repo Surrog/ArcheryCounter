@@ -6,7 +6,7 @@ Outputs per sample:
   image      : (4, 512, 512) float32  — normalised RGB + radial distance channel
   tip_hm     : (1, 128, 128) float32  — Gaussian heatmap of tip positions
   score_map  : (128, 128)    int64    — score label at each tip pixel, -1 = ignore
-  meta       : dict with filename, scale, pad_x, pad_y for coord recovery
+  meta       : dict with filename, scale, pad_x, pad_y, orig_w, orig_h
 """
 
 import os
@@ -77,15 +77,15 @@ def _load_letterboxed(path: str) -> tuple:
     return np.array(img_lb, dtype=np.uint8), scale, pad_x, pad_y, orig_w, orig_h
 
 
-def make_radial_channel(rings_tss, scale: float, pad_x: int, pad_y: int,
+def make_radial_channel(ring_sets, scale: float, pad_x: int, pad_y: int,
                         size: int = INPUT_SIZE) -> np.ndarray:
     """Return a (size, size) float32 array: normalised distance from target centre.
 
     0 = centre, 1 = outermost ring boundary, >1 = outside target (clamped at 2).
-    Uses the first ring set of the first target.
-    rings_tss: SplineRing[][][]  (targets × ring sets × rings)
+    Uses the first ring set.
+    ring_sets: RingSet[]  — flat list of ring sets, each ring set is SplineRing[]
     """
-    rings = rings_tss[0][0]  # first target, first ring set
+    rings = ring_sets[0]  # first ring set
     pts0  = np.asarray(rings[0]['points'], dtype=np.float64)
     cx    = pts0[:, 0].mean() * scale + pad_x
     cy    = pts0[:, 1].mean() * scale + pad_y
@@ -151,16 +151,14 @@ def _score_against_ring_set(tip, rings) -> int:
     return 0  # miss
 
 
-def score_tip(tip, rings_tss) -> int:
-    """Geometric score (0 = miss, 1–10) from multi-target ring annotations.
+def score_tip(tip, ring_sets) -> int:
+    """Geometric score (0 = miss, 1–10) against the nearest ring set.
 
-    Finds the nearest ring set across all targets and scores the tip against it.
-    rings_tss: SplineRing[][][]  (targets × ring sets × rings)
+    ring_sets: RingSet[]  — flat list of ring sets, each ring set is SplineRing[]
     """
-    all_sets = [rs for target in rings_tss for rs in target]
-    if not all_sets:
+    if not ring_sets:
         return 0
-    best = min(all_sets, key=lambda rs: math.hypot(
+    best = min(ring_sets, key=lambda rs: math.hypot(
         tip[0] - _ring_set_centroid(rs)[0],
         tip[1] - _ring_set_centroid(rs)[1],
     ))
@@ -215,19 +213,16 @@ class ArrowDataset(Dataset):
         for fname, arrows_j, rings_j in rows:
             if is_val != is_val_sample(fname):
                 continue
-            arrows   = arrows_j if isinstance(arrows_j, list) else json.loads(arrows_j)
-            rings_tss = rings_j  if isinstance(rings_j,  list) else json.loads(rings_j)
-            # rings_tss is SplineRing[][][] — must have at least one ring set with ≥7 rings
-            if not arrows or not any(
-                len(rs) >= 7
-                for target in rings_tss for rs in target
-            ):
+            arrows    = arrows_j if isinstance(arrows_j, list) else json.loads(arrows_j)
+            ring_sets = rings_j  if isinstance(rings_j,  list) else json.loads(rings_j)
+            # ring_sets is RingSet[] — must have at least one ring set with ≥7 rings
+            if not arrows or not any(len(rs) >= 7 for rs in ring_sets):
                 continue
             # Filter arrows that have at least a tip
             valid = [a for a in arrows if a.get('tip') is not None]
             if not valid:
                 continue
-            self.samples.append((fname, valid, rings_tss))
+            self.samples.append((fname, valid, ring_sets))
 
         # Images are loaded on demand via _load_letterboxed() (module-level LRU
         # cache, maxsize=80).  Each worker process builds its own LRU lazily,
@@ -267,14 +262,14 @@ class ArrowDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
-        fname, arrows, rings_tss = self.samples[idx]
+        fname, arrows, ring_sets = self.samples[idx]
 
         path = os.path.join(self.images_dir, fname)
         img_np_cached, scale, pad_x, pad_y, orig_w, orig_h = _load_letterboxed(path)
         img_np = img_np_cached.copy()   # copy so augmentation doesn't mutate the cache
-        radial = make_radial_channel(rings_tss, scale, pad_x, pad_y)
+        radial = make_radial_channel(ring_sets, scale, pad_x, pad_y)
 
-        # Collect tip keypoints in letterboxed 512-space.
+        # Collect tip keypoints in letterboxed INPUT_SIZE-space.
         keypoints     = []
         kp_arrow_idxs = []   # arrow index (int)
         scores_raw    = []   # parallel to keypoints
@@ -283,12 +278,11 @@ class ArrowDataset(Dataset):
             tip = arrow['tip']
             tx  = tip[0] * scale + pad_x
             ty  = tip[1] * scale + pad_y
-            # Skip tips outside the letterboxed image (annotation out of bounds)
             if not (0 <= tx < INPUT_SIZE and 0 <= ty < INPUT_SIZE):
                 continue
             keypoints.append((tx, ty))
             kp_arrow_idxs.append(i)
-            scores_raw.append(score_tip(tip, rings_tss))
+            scores_raw.append(score_tip(tip, ring_sets))
 
         # ── spatial augmentation ──────────────────────────────────────────
         if self.augment and keypoints:
@@ -309,40 +303,40 @@ class ArrowDataset(Dataset):
             )
             radial = rad_res['image'][:, :, 0]
 
-            # Rebuild surviving tips from augmented keypoints
+            # Rebuild surviving tips from augmented keypoints.
             tip_map = {}   # arrow_idx -> (x, y)
             for (x, y), arr_i in zip(aug_kps, aug_arrow_idxs):
                 tip_map[int(arr_i)] = (x, y)
 
             surviving  = sorted(tip_map)
-            keypoints  = [tip_map[i] for i in surviving]
-            scores_raw = [scores_raw[i] for i in surviving]
+            keypoints  = [tip_map[i]  for i in surviving]
+            scores_seq = [scores_raw[i] for i in surviving]
+        else:
+            scores_seq = scores_raw
 
         # ── colour augmentation (image only) ──────────────────────────────
         if self.augment:
             img_np = self._colour(image=img_np)['image']
 
         # ── build heatmaps ────────────────────────────────────────────────
-        hs = HEATMAP_SIZE / INPUT_SIZE   # 0.25
+        hs = HEATMAP_SIZE / INPUT_SIZE
 
         tip_hm    = np.zeros((HEATMAP_SIZE, HEATMAP_SIZE), dtype=np.float32)
         score_map = np.full((HEATMAP_SIZE, HEATMAP_SIZE), -1, dtype=np.int64)
 
-        for (tx, ty), sc in zip(keypoints, scores_raw):
+        for (tx, ty), sc in zip(keypoints, scores_seq):
             hx, hy = tx * hs, ty * hs
             draw_gaussian(tip_hm, hx, hy, SIGMA)
-            ihx = int(round(hx))
-            ihy = int(round(hy))
+            ihx, ihy = int(round(hx)), int(round(hy))
             if 0 <= ihx < HEATMAP_SIZE and 0 <= ihy < HEATMAP_SIZE:
                 score_map[ihy, ihx] = sc
 
         # ── assemble tensors ──────────────────────────────────────────────
-        # RGB: normalise with ImageNet stats
         img_f = img_np.astype(np.float32) / 255.0
         mean  = np.array(IMAGENET_MEAN, dtype=np.float32)
         std   = np.array(IMAGENET_STD,  dtype=np.float32)
-        img_f = (img_f - mean) / std          # (512, 512, 3)
-        img_t = torch.from_numpy(img_f).permute(2, 0, 1)   # (3, 512, 512)
+        img_f = (img_f - mean) / std
+        img_t = torch.from_numpy(img_f).permute(2, 0, 1)   # (3, H, W)
 
         if self.use_radial:
             rad_t = torch.from_numpy(radial).unsqueeze(0)
@@ -352,8 +346,8 @@ class ArrowDataset(Dataset):
 
         return {
             'image':     x,
-            'tip_hm':    torch.from_numpy(tip_hm).unsqueeze(0),    # (1,128,128)
-            'score_map': torch.from_numpy(score_map),               # (128,128)
+            'tip_hm':    torch.from_numpy(tip_hm).unsqueeze(0),
+            'score_map': torch.from_numpy(score_map),
             'meta': {
                 'filename': fname,
                 'scale':    scale,

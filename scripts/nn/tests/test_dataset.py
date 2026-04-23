@@ -26,16 +26,20 @@ from dataset import (
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _fake_rings(cx=100.0, cy=100.0, r_inner=10.0, r_outer=100.0):
-    """Return 10 fake rings (list of dicts with 'points') centred at (cx, cy)."""
-    rings = []
+    """Return rings in RingSet[] format: one ring set of 10 SplineRings.
+
+    Matches the DB format: a flat list of RingSets, where each RingSet is
+    a list of SplineRing dicts (each with a 'points' key).
+    """
+    ring_set = []
     for i in range(10):
         r = r_inner + (r_outer - r_inner) * i / 9
         pts = [
             [cx + r * math.cos(a), cy + r * math.sin(a)]
             for a in np.linspace(0, 2 * math.pi, 8, endpoint=False)
         ]
-        rings.append({"points": pts})
-    return rings
+        ring_set.append({"points": pts})
+    return [ring_set]  # RingSet[] with one ring set
 
 
 def _fake_sample(n_arrows=2, img_w=400, img_h=300):
@@ -233,7 +237,6 @@ class TestArrowDatasetGetitem:
         sample = ds[0]
         assert sample["image"].shape    == (4, INPUT_SIZE, INPUT_SIZE)
         assert sample["tip_hm"].shape   == (1, HEATMAP_SIZE, HEATMAP_SIZE)
-        assert sample["nock_hm"].shape  == (1, HEATMAP_SIZE, HEATMAP_SIZE)
         assert sample["score_map"].shape == (HEATMAP_SIZE, HEATMAP_SIZE)
 
     def test_output_shapes_with_augment(self, tmp_path):
@@ -241,7 +244,6 @@ class TestArrowDatasetGetitem:
         sample = ds[0]
         assert sample["image"].shape    == (4, INPUT_SIZE, INPUT_SIZE)
         assert sample["tip_hm"].shape   == (1, HEATMAP_SIZE, HEATMAP_SIZE)
-        assert sample["nock_hm"].shape  == (1, HEATMAP_SIZE, HEATMAP_SIZE)
         assert sample["score_map"].shape == (HEATMAP_SIZE, HEATMAP_SIZE)
 
     def test_heatmap_has_peaks(self, tmp_path):
