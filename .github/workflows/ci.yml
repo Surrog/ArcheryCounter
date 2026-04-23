@@ -95,9 +95,11 @@ jobs:
           DB_NAME: postgres
 
       - name: Install Python test dependencies
+        working-directory: scripts/nn
         run: uv sync --group test
 
       - name: Run Python tests
+        working-directory: scripts/nn
         run: uv run pytest tests/ -v
         env:
           DB_HOST: localhost
