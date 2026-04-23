@@ -2,9 +2,11 @@ import ArcheryCounter from '../ArcheryCounter';
 
 import { describe, expect, jest, beforeEach, it } from '@jest/globals';
 
-
 jest.mock('../targetDetection', () => ({
-  findTarget: jest.fn<any>(),
+  findTarget: jest.fn<any>().mockReturnValue({
+    success: true,
+    targets: [{ rings: [{ points: [[50, 50], [60, 50], [60, 60], [50, 60]] }], paperBoundary: { points: [[0, 0], [100, 0], [100, 100], [0, 100]] } }]
+  }),
   pointInPolygon: jest.fn<any>().mockReturnValue(true),
 }));
 jest.mock('../arrowDetector',   () => ({ detectArrowsNN: jest.fn<any>() }));
