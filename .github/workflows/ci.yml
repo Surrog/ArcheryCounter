@@ -100,7 +100,7 @@ jobs:
 
       - name: Run Python tests
         working-directory: scripts/nn
-        run: uv run pytest tests/ -v
+        run: uv run pytest . -v
         env:
           DB_HOST: localhost
           DB_PORT: 5432
