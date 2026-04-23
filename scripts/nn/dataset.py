@@ -1,9 +1,9 @@
 """
 ArrowDataset — loads annotations from PostgreSQL, letterbox-resizes images to
-512×512 (no crop), generates heatmaps and a radial-distance channel.
+640×640, generates heatmaps and a radial-distance channel.
 
 Outputs per sample:
-  image      : (3, 640, 640) float32  — normalised RGB + radial distance channel
+  image      : (3, 640, 640) float32  — normalised RGB
   tip_hm     : (1, 160, 160) float32  — Gaussian heatmap of tip positions
   score_map  : (160, 160)    int64    — score label at each tip pixel, -1 = ignore
   meta       : dict with filename, scale, pad_x, pad_y, orig_w, orig_h
@@ -115,11 +115,10 @@ def _score_against_ring_set(tip, rings) -> int:
     Score = 10 - i where i is the first ring index that contains the tip.
     """
     cx, cy = _ring_set_centroid(rings)
-    radii = [
-        np.hypot((pts := np.asarray(r['points'], dtype=np.float64))[:, 0] - cx,
-                 pts[:, 1] - cy).mean()
-        for r in rings
-    ]
+    radii = []
+    for r in rings:
+        pts = np.asarray(r['points'], dtype=np.float64)
+        radii.append(np.hypot(pts[:, 0] - cx, pts[:, 1] - cy).mean())
     d = math.hypot(tip[0] - cx, tip[1] - cy)
     for i, r in enumerate(radii):
         if d <= r:
@@ -176,6 +175,7 @@ class ArrowDataset(Dataset):
                 AND  jsonb_array_length(rings)  > 0
             """)
             rows = cur.fetchall()
+        conn.close()
 
         # Deterministic train/val split by filename hash
         def is_val_sample(fname):
@@ -203,9 +203,7 @@ class ArrowDataset(Dataset):
         # so memory is bounded per-worker rather than forked N times from main.
 
         # ── augmentation pipelines ────────────────────────────────────────
-        # Spatial transforms (applied identically to image and radial channel
-        # via ReplayCompose; keypoints are transformed automatically).
-        self._spatial = A.ReplayCompose(
+        self._spatial = A.Compose(
             [
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
@@ -225,7 +223,7 @@ class ArrowDataset(Dataset):
             ),
         )
 
-        # Colour transforms (image only, not radial channel)
+        # Colour transforms
         self._colour = A.Compose([
             A.ColorJitter(brightness=0.4, contrast=0.3, saturation=0.3, hue=0.1, p=0.8),
             A.GaussianBlur(blur_limit=(3, 7), p=0.3),
@@ -303,10 +301,8 @@ class ArrowDataset(Dataset):
         img_f = (img_f - mean) / std
         img_t = torch.from_numpy(img_f).permute(2, 0, 1)   # (3, H, W)
 
-        x = img_t                                        # (3, H, W)
-
         return {
-            'image':     x,
+            'image':     img_t,
             'tip_hm':    torch.from_numpy(tip_hm).unsqueeze(0),
             'score_map': torch.from_numpy(score_map),
             'meta': {

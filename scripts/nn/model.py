@@ -2,14 +2,11 @@
 ArrowDetector — MobileNetV2 backbone + FPN neck + two prediction heads.
 
 Heads:
-  tip_hm    : (B, 1, 128, 128) Gaussian heatmap of arrow tip positions
-  score_map : (B, 11, 128, 128) score logits at every spatial position
+  tip_hm    : (B, 1, 160, 160) Gaussian heatmap of arrow tip positions
+  score_map : (B, 11, 160, 160) score logits at every spatial position
               (used at detected tip locations; 0 = miss, 1–10 = score)
 
-Input: (B, 4, 512, 512) — normalised RGB + radial distance channel.
-
-The first conv of MobileNetV2 is extended from 3→4 input channels; the new
-channel's weights are initialised to zero so pretrained behaviour is preserved.
+Input: (B, 3, 640, 640) — normalised RGB.
 """
 
 import math
@@ -81,9 +78,9 @@ class FPN(nn.Module):
 class HeatmapHead(nn.Sequential):
     """Small conv head: (B, FPN_CH, H, W) → (B, 1, H, W) in [0, 1]."""
 
-    # Prior probability of a positive pixel (~5 tips spread over 128×128 heatmap).
+    # Prior probability of a positive pixel (~5 tips spread over 160×160 heatmap).
     # Initialising the bias to log(prior/(1-prior)) makes sigmoid outputs start
-    # near `prior` rather than 0.5.  Without this, the 16 000 negative pixels
+    # near `prior` rather than 0.5.  Without this, the 25 600 negative pixels
     # drive the bias sharply negative in the first epoch, collapsing all outputs
     # below the 0.35 recall threshold before the positive signal can compete.
     _PRIOR = 0.01
@@ -113,10 +110,9 @@ class ScoreHead(nn.Sequential):
 class ArrowDetector(nn.Module):
     """Full model: backbone + FPN + tip/score heads."""
 
-    def __init__(self, in_channels: int = 4, backbone: str = 'mobilenet_v2'):
+    def __init__(self, backbone: str = 'mobilenet_v2'):
         """
         Args:
-            in_channels: 4 = RGB + radial (default), 3 = RGB only.
             backbone: 'mobilenet_v2' (default) or 'mobilenet_v3_large'.
         """
         super().__init__()
@@ -128,20 +124,6 @@ class ArrowDetector(nn.Module):
         # ── backbone ──────────────────────────────────────────────────────
         base  = cfg['builder'](cfg['weights'])
         feats = base.features
-
-        old_conv = feats[0][0]
-        if in_channels != 3:
-            new_conv = nn.Conv2d(
-                in_channels, old_conv.out_channels,
-                kernel_size=old_conv.kernel_size,
-                stride=old_conv.stride,
-                padding=old_conv.padding,
-                bias=False,
-            )
-            with torch.no_grad():
-                new_conv.weight[:, :3] = old_conv.weight
-                new_conv.weight[:, 3:] = 0.0
-            feats[0][0] = new_conv
 
         self.stage2 = nn.Sequential(*feats[:c2i + 1])
         self.stage3 = nn.Sequential(*feats[c2i + 1: c3i + 1])
@@ -156,10 +138,10 @@ class ArrowDetector(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: (B, 4, 512, 512)
+            x: (B, 3, 640, 640)
         Returns:
-            tip_hm    : (B, 1, 128, 128)
-            score_map : (B, 11, 128, 128)
+            tip_hm    : (B, 1, 160, 160)
+            score_map : (B, 11, 160, 160)
         """
         c2 = self.stage2(x)
         c3 = self.stage3(c2)
@@ -185,17 +167,17 @@ def heatmap_nms(hm: torch.Tensor, kernel: int = 5) -> torch.Tensor:
     pad   = kernel // 2
     local_max = F.max_pool2d(hm, kernel_size=kernel, stride=1, padding=pad)
     keep  = (hm == local_max).float()
-    return (hm * keep).squeeze()
+    return (hm * keep).squeeze(0).squeeze(0)
 
 
 def decode_heatmap(tip_hm: torch.Tensor, score_map: torch.Tensor,
                    threshold: float = 0.85,
                    scale: float = 1.0, pad_x: int = 0, pad_y: int = 0,
-                   input_size: int = 512, heatmap_size: int = 128):
+                   input_size: int = 640, heatmap_size: int = 160) -> list[dict]:
     """Extract arrow tips from heatmap and map back to original image coords.
 
     Args:
-        tip_hm     : (1, H, W) or (H, W) heatmap after NMS
+        tip_hm     : (1, H, W) or (H, W) heatmap
         score_map  : (11, H, W) score logits
         threshold  : minimum heatmap value to accept a peak
         scale, pad_x, pad_y: letterbox parameters from dataset.letterbox()
@@ -215,7 +197,7 @@ def decode_heatmap(tip_hm: torch.Tensor, score_map: torch.Tensor,
         confidence = hm[hy, hx].item()
 
         # Map heatmap coords → original image coords
-        lbx = (hx + 0.5) * ratio   # letterboxed 512-space
+        lbx = (hx + 0.5) * ratio   # letterboxed 640-space
         lby = (hy + 0.5) * ratio
         orig_x = (lbx - pad_x) / scale
         orig_y = (lby - pad_y) / scale

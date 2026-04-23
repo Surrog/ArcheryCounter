@@ -122,7 +122,6 @@ Three conditions to train and compare on the same data split:
 | Radial only | 2ch (grey + radial) | Replace RGB with luminance; test if geometry alone is sufficient |
 | RGB + radial | 4ch (current) | Baseline |
 
-- ✅ `--input-channels 3|4` added to `train.py`; `ArrowDetector(in_channels=...)` adjusts first conv
 - Result: RGB-only (3ch) = **0.858**, RGB+radial (4ch) = **0.905** → radial channel worth **+0.047**.
 - **Decision (2026-04-01):** Switched to RGB-only (3ch). Radial channel requires ring detection at inference — but `eval-nn.ts` passes empty rings, causing a train/eval mismatch. −0.047 recall accepted to eliminate this dependency. `arrowDetector.ts` updated: `fillRadialChannel` removed, tensor shape `[1,3,640,640]`.
 

@@ -4,7 +4,7 @@ Export ArrowDetector checkpoint to ONNX.
 Usage:
     python export.py --checkpoint checkpoints/best.pt --out arrow_detector.onnx
 
-The exported model accepts a single input 'image' of shape (1, 4, INPUT_SIZE, INPUT_SIZE)
+The exported model accepts a single input 'image' of shape (1, 3, INPUT_SIZE, INPUT_SIZE)
 and produces two outputs:
     tip_hm    : (1, 1, HEATMAP_SIZE, HEATMAP_SIZE)
     score_map : (1, 11, HEATMAP_SIZE, HEATMAP_SIZE)
@@ -29,13 +29,11 @@ from dataset import INPUT_SIZE, HEATMAP_SIZE
 def export_onnx(checkpoint_path: str, out_path: str) -> None:
     print(f'Loading checkpoint: {checkpoint_path}')
     ckpt  = torch.load(checkpoint_path, map_location='cpu')
-    in_ch = ckpt.get('in_channels', 4)
-    model = ArrowDetector(in_channels=in_ch)
+    model = ArrowDetector()
     model.load_state_dict(ckpt['model'])
     model.eval()
 
-    print(f'Input channels: {in_ch}')
-    dummy = torch.zeros(1, in_ch, INPUT_SIZE, INPUT_SIZE)
+    dummy = torch.zeros(1, 3, INPUT_SIZE, INPUT_SIZE)
 
     print(f'Exporting to ONNX: {out_path}')
     torch.onnx.export(

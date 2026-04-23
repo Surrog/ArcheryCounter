@@ -5,7 +5,7 @@ Usage:
     python train.py [--epochs 60] [--batch 8] [--lr 1e-3] [--out checkpoints/]
 
 Outputs (in --out directory):
-    best.pt           — best checkpoint (by val recall@45px)
+    best.pt           — best checkpoint (by val recall f1 score)
     last.pt           — checkpoint after final epoch
     train_log.csv     — per-epoch metrics
 """
@@ -16,7 +16,6 @@ import csv
 import math
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
@@ -36,7 +35,7 @@ def focal_loss(pred: torch.Tensor, gt: torch.Tensor,
 
     Normalisation: divide pos and neg terms separately so the background term
     cannot dominate when there are very few positive pixels per image.
-    With ~5 tips in a 128×128 heatmap (16 384 pixels), normalising the full sum
+    With ~5 tips in a 160×160 heatmap (25 600 pixels), normalising the full sum
     by n_pos alone made the background term ~3 000× too strong, causing the model
     to collapse to near-zero outputs.
     """
@@ -73,7 +72,6 @@ def recall_at_threshold(pred_tips: list, gt_tips: list,
     if not pred_tips:
         return 0.0
 
-    import numpy as np
     pairs = []
     for gi, gt in enumerate(gt_tips):
         for pi, pd in enumerate(pred_tips):
@@ -109,7 +107,9 @@ def run_epoch(model, loader, optimizer, device, train: bool,
                 l_tip      = focal_loss(tip_hm, tip_gt)
                 l_sparsity = tip_hm.mean()          # penalise broadly-hot heatmaps
                 l_score    = score_loss(s_map, score_gt)
-                loss       = l_tip + sparsity_weight * l_sparsity + 0.3 * l_score
+                loss       = l_tip + 0.3 * l_score
+                if train:
+                    loss = loss + sparsity_weight * l_sparsity
 
             if train:
                 optimizer.zero_grad()
@@ -198,13 +198,11 @@ def main():
     parser.add_argument('--db',        type=str,   default=DB_URL)
     parser.add_argument('--images',    type=str,   default=IMAGES_DIR)
     parser.add_argument('--patience',  type=int,   default=10,
-                        help='Stop if recall has not improved for this many epochs '
+                        help='Stop if f1 has not improved for this many epochs '
                              '(counted only after backbone unfreeze). 0 = disabled.')
     parser.add_argument('--sparsity-weight', type=float, default=5.0,
                         help='Weight for heatmap sparsity loss (default 5.0). '
                              'Higher values force fewer, more confident predictions.')
-    parser.add_argument('--input-channels', type=int, default=4, choices=[3, 4],
-                        help='3 = RGB only (no radial), 4 = RGB + radial (default)')
     parser.add_argument('--backbone', type=str, default='mobilenet_v2',
                         choices=['mobilenet_v2', 'mobilenet_v3_large'])
     parser.add_argument('--resume',    action='store_true',
@@ -226,10 +224,8 @@ def main():
     val_ds   = ArrowDataset(args.db, args.images, augment=False,
                             val_split=args.val_split, is_val=True)
 
-    # Use the val split for recall tracking — large enough now to be stable.
-    recall_ds = val_ds
 
-    print(f'Train: {len(train_ds)} images   Val: {len(val_ds)} images   Recall-set: {len(recall_ds)} images')
+    print(f'Train: {len(train_ds)} images   Val: {len(val_ds)} images')
     if len(train_ds) == 0:
         raise RuntimeError('No training samples found — check DB connection and annotations.')
 
@@ -241,11 +237,10 @@ def main():
     val_loader    = DataLoader(val_ds,    batch_size=args.batch, shuffle=False,
                                num_workers=args.workers, pin_memory=True,
                                persistent_workers=_persistent, prefetch_factor=_prefetch)
-    recall_loader = val_loader
 
     # ── model + optimiser ──────────────────────────────────────────────────
-    model = ArrowDetector(in_channels=args.input_channels, backbone=args.backbone).to(device)
-    print(f'Input channels: {args.input_channels}  Backbone: {args.backbone}  Sparsity λ: {args.sparsity_weight}')
+    model = ArrowDetector(backbone=args.backbone).to(device)
+    print(f'Input channels: 3  Backbone: {args.backbone}  Sparsity λ: {args.sparsity_weight}')
     # torch.compile MPS support is still maturing — skip for now.
     # Re-enable once PyTorch MPS Metal shader bugs are resolved.
     # model = torch.compile(model, fullgraph=False)
@@ -266,7 +261,7 @@ def main():
 
     # ── training loop ──────────────────────────────────────────────────────
     log_path    = os.path.join(args.out, 'train_log.csv')
-    best_recall = 0.0
+    best_f1 = 0.0
     start_epoch = 1
     UNFREEZE_EPOCH = 10
     epochs_no_improve = 0
@@ -280,7 +275,7 @@ def main():
             ckpt = torch.load(last_path, map_location=device)
             model.load_state_dict(ckpt['model'])
             start_epoch = ckpt['epoch'] + 1
-            best_recall = ckpt.get('f1', ckpt.get('recall', 0.0))
+            best_f1 = ckpt.get('f1', ckpt.get('recall', 0.0))
             # Restore backbone freeze state and rebuild optimizer to match
             if start_epoch <= UNFREEZE_EPOCH:
                 pass  # backbone still frozen, optimizer already correct
@@ -297,13 +292,12 @@ def main():
                     scheduler.step()
             # Don't restore optimizer state — parameter groups may differ between
             # warmup (head-only) and fine-tune (full model) phases.
-            print(f'Resumed from epoch {ckpt["epoch"]} (best recall so far: {best_recall:.3f})')
+            print(f'Resumed from epoch {ckpt["epoch"]} (best f1 so far: {best_f1:.3f})')
 
     with open(log_path, 'a' if args.resume else 'w', newline='') as f:
         writer = csv.writer(f)
         if not args.resume:
             writer.writerow(['epoch', 'train_tip', 'train_score', 'train_sparsity',
-                             'val_tip', 'val_score', 'val_sparsity',
                              'val_recall', 'val_precision', 'val_f1', 'val_pred_count'])
 
         for epoch in range(start_epoch, args.epochs + 1):
@@ -323,14 +317,8 @@ def main():
                 model, train_loader, optimizer, device, train=True,
                 sparsity_weight=args.sparsity_weight,
             )
-            va_tip, va_score, va_sparsity = run_epoch(
-                model, val_loader,   optimizer, device, train=False,
-                sparsity_weight=args.sparsity_weight,
-            )
-            # Measure recall, precision, F1 on the recall set.
-            # max_preds=50 prevents dense heatmaps from gaming recall.
             recall, precision, f1, pred_count = validate_recall(
-                model, recall_loader, device
+                model, val_loader, device
             )
             scheduler.step()
 
@@ -338,12 +326,10 @@ def main():
             print(
                 f'Epoch {epoch:3d}/{args.epochs}  '
                 f'train tip={tr_tip:.4f} score={tr_score:.4f} sparse={tr_sparsity:.4f}  '
-                f'val tip={va_tip:.4f}  '
                 f'recall@45={recall:.3f} prec={precision:.3f} F1={f1:.3f} '
                 f'n_pred={pred_count:.1f}  lr={lr:.2e}'
             )
             writer.writerow([epoch, tr_tip, tr_score, tr_sparsity,
-                             va_tip, va_score, va_sparsity,
                              recall, precision, f1, pred_count])
             f.flush()
 
@@ -356,13 +342,12 @@ def main():
                 'recall':      recall,
                 'precision':   precision,
                 'f1':          f1,
-                'in_channels': args.input_channels,
             }
             torch.save(ckpt, os.path.join(args.out, 'last.pt'))
-            if f1 >= best_recall:   # best_recall tracks F1 for checkpoint selection
-                best_recall = f1
+            if f1 >= best_f1:   # best_recall tracks F1 for checkpoint selection
+                best_f1 = f1
                 torch.save(ckpt, os.path.join(args.out, 'best.pt'))
-                print(f'  → new best F1: {best_recall:.3f}  (recall={recall:.3f} prec={precision:.3f})')
+                print(f'  → new best F1: {best_f1:.3f}  (recall={recall:.3f} prec={precision:.3f})')
                 if epoch > UNFREEZE_EPOCH:
                     epochs_no_improve = 0
             elif epoch > UNFREEZE_EPOCH and args.patience > 0:
@@ -371,7 +356,7 @@ def main():
                     print(f'Early stopping: no improvement for {args.patience} epochs.')
                     break
 
-    print(f'\nTraining complete. Best val F1: {best_recall:.3f}')
+    print(f'\nTraining complete. Best val F1: {best_f1:.3f}')
     print(f'Checkpoints saved to: {args.out}/')
 
 
