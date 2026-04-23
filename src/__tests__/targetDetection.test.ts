@@ -22,7 +22,6 @@ import { expect, describe, afterAll, beforeAll, test } from '@jest/globals';
 
 const IMAGES_DIR    = path.resolve(__dirname, '../../images');
 const TSX_BIN       = path.resolve(__dirname, '../../node_modules/.bin/tsx');
-const DETECT_WORKER = path.resolve(__dirname, '../../scripts/detect-worker.ts');
 const CONCURRENCY   = Math.min(os.cpus().length, 4);
 
 const db = new Pool({
@@ -66,43 +65,6 @@ function splineAxes(ring: SplineRing): { rx: number; ry: number } {
 }
 
 // ---------------------------------------------------------------------------
-// Algorithm hash
-// ---------------------------------------------------------------------------
-
-function computeAlgorithmHash(): string {
-  const files = [
-    path.resolve(__dirname, '../../src/targetDetection.ts'),
-    path.resolve(__dirname, '../../src/arrowDetector.ts'),
-  ].filter(f => fs.existsSync(f)).map(f => fs.readFileSync(f));
-  return crypto.createHash('sha256').update(Buffer.concat(files)).digest('hex').slice(0, 16);
-}
-
-// ---------------------------------------------------------------------------
-// Worker runner
-// ---------------------------------------------------------------------------
-
-function runWorker(imgPath: string): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(TSX_BIN, [DETECT_WORKER, imgPath], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '', stderr = '';
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    const timer = setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch {}
-      reject(new Error('Worker timed out'));
-    }, 5 * 60 * 1000);
-    proc.on('close', code => {
-      clearTimeout(timer);
-      if (code !== 0) { reject(new Error(`Worker exited ${code}: ${stderr.slice(0, 300)}`)); return; }
-      try { resolve(JSON.parse(stdout)); }
-      catch { reject(new Error(`Bad JSON from worker: ${stdout.slice(0, 200)}`)); }
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
 // beforeAll: populate generated table (idempotent — skips up-to-date rows)
 // ---------------------------------------------------------------------------
 
@@ -124,51 +86,6 @@ beforeAll(async () => {
       updated_at     TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  await db.query(`ALTER TABLE generated ADD COLUMN IF NOT EXISTS width INT`);
-  await db.query(`ALTER TABLE generated ADD COLUMN IF NOT EXISTS height INT`);
-
-  const currentHash = computeAlgorithmHash();
-  const { rows } = await db.query('SELECT filename, algorithm_hash FROM generated');
-  const inGenerated = new Map<string, string>(
-    rows.map((r: any) => [r.filename as string, r.algorithm_hash as string]),
-  );
-
-  const stale = imageFiles.filter(f => inGenerated.get(f) !== currentHash);
-  if (stale.length === 0) return;
-
-  console.log(`Detecting ${stale.length} image(s) with ${CONCURRENCY} workers…`);
-  let done = 0;
-  for (let i = 0; i < stale.length; i += CONCURRENCY) {
-    const batch = stale.slice(i, i + CONCURRENCY);
-    await Promise.all(batch.map(async filename => {
-      const imgPath = path.join(IMAGES_DIR, filename);
-      try {
-        const result = await runWorker(imgPath);
-        await db.query(
-          `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (filename) DO UPDATE
-             SET algorithm_hash = EXCLUDED.algorithm_hash,
-                 paper_boundary = EXCLUDED.paper_boundary,
-                 rings          = EXCLUDED.rings,
-                 arrows         = EXCLUDED.arrows,
-                 width          = EXCLUDED.width,
-                 height         = EXCLUDED.height,
-                 updated_at     = NOW()`,
-          [filename, currentHash,
-           JSON.stringify(result.paperBoundary),
-           JSON.stringify(result.rings),
-           JSON.stringify(result.arrows),
-           result.width ?? null,
-           result.height ?? null],
-        );
-        done++;
-        console.log(`  [${done}/${stale.length}] ${filename}`);
-      } catch (err) {
-        console.error(`  FAILED ${filename}: ${err}`);
-      }
-    }));
-  }
 }, 30 * 60 * 1000);
 
 // ---------------------------------------------------------------------------

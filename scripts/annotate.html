@@ -26,7 +26,9 @@
     #controls button.save-disabled:hover { background: #1e4428; }
     #controls button.secondary { background: #2a3a5a; }
     #controls button.secondary:hover { background: #3a4a7a; }
-    #save-msg { font-size: 0.75rem; color: #e07070; padding: 4px 0 0; display: none; line-height: 1.4; }
+    #status-msg { font-size: 0.75rem; color: #e07070; padding: 4px 0 0; display: none; line-height: 1.4; }
+    #status-msg.ok { color: #70e070; }
+    #status-msg.fail { color: #e07070; }
     #controls .divider { border: none; border-top: 1px solid #333; margin: 2px 0; }
 
     #toolbar { padding: 8px 14px; border-bottom: 1px solid #333; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
@@ -142,7 +144,7 @@
     <h1>Annotation Tool</h1>
     <div id="controls">
       <button id="btn-save">Save</button>
-      <div id="save-msg"></div>
+      <div id="status-msg"></div>
       <button id="btn-add-arrow">Add arrow (A)</button>
       <button id="btn-add-ringset">Add ring set (R)</button>
       <button id="btn-remove-ringset" class="secondary">Remove ring set</button>
@@ -402,7 +404,6 @@ function onScoreSelect(score) {
     hideScorePicker();
     markModified(currentIdx);
     updateImageList();
-    updateDataPanel();
     render();
   }
 }
@@ -496,6 +497,7 @@ async function selectImage(idx) {
     renderLoading('\u26a0 ' + loadError);
     return;
   }
+  updateDataPanel();
   render();
 }
 
@@ -658,7 +660,7 @@ async function detectAndAddRingSet(filename, cx, cy) {
       const body = await res.json().catch(() => ({}));
       const msg = body.error || 'HTTP ' + res.status;
       console.error(`[detect-ringset] FAILED: ${msg}`);
-      showStatusMsg('\u26a0 Detection failed: ' + msg, 5000);
+      showStatusMsg('\u26a0 Detection failed: ' + msg, false, 5000);
       return;
     }
     // rings: SplineRing[], paperBoundary: TargetBoundary
@@ -666,7 +668,7 @@ async function detectAndAddRingSet(filename, cx, cy) {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     if (!rings || rings.length === 0) {
       console.warn(`[detect-ringset] no rings returned (${elapsed}s)`);
-      showStatusMsg('\u26a0 No rings detected at that location.', 5000);
+      showStatusMsg('\u26a0 No rings detected at that location.', false, 5000);
       return;
     }
     console.log(`[detect-ringset] got ${rings.length} rings, boundary ${paperBoundary?.points.length ?? 0} pts (${elapsed}s)`);
@@ -697,7 +699,7 @@ async function detectAndAddRingSet(filename, cx, cy) {
     }
     console.log(`[detect-ringset] ${statusMsg} — targets after: ${data.annotated.targets.length}, ringSets: ${data.annotated.targets.map(t => t.ringSets.length).join(',')}`);
 
-    showStatusMsg(statusMsg, 4000);
+    showStatusMsg(statusMsg, true, 4000);
 
     // If the user navigated to a different image during detection, switch back
     if (currentIdx !== savedIdx) {
@@ -705,11 +707,10 @@ async function detectAndAddRingSet(filename, cx, cy) {
     }
     markModified(savedIdx);
     updateImageList();
-    updateDataPanel()
     render();
   } catch (e) {
     console.error('[detect-ringset] error:', e);
-    showStatusMsg('\u26a0 Detection error: ' + e, 5000);
+    showStatusMsg('\u26a0 Detection error: ' + e, false, 5000);
   }
 }
 
@@ -727,7 +728,6 @@ function removeActiveRingSet() {
   }
   markModified(currentIdx);
   updateImageList();
-  updateDataPanel();
   render();
 }
 
@@ -764,7 +764,6 @@ function attachSvgListeners() {
         ]);
         markModified(currentIdx);
         updateImageList();
-        updateDataPanel();
         render();
       }
       return;
@@ -819,7 +818,6 @@ function attachSvgListeners() {
         target.paperBoundary.points.splice(idx, 1);
         markModified(currentIdx);
         updateImageList();
-        updateDataPanel();
         render();
       } else if (handleType === 'ring_pt') {
         const ti = parseInt(el.getAttribute('data-ti'), 10);
@@ -831,7 +829,6 @@ function attachSvgListeners() {
           ring.points.splice(pi, 1);
           markModified(currentIdx);
           updateImageList();
-          updateDataPanel();
           render();
         }
       } else if (handleType === 'arrow_tip') {
@@ -839,7 +836,6 @@ function attachSvgListeners() {
         data.annotated.arrows.splice(ai, 1);
         markModified(currentIdx);
         updateImageList();
-        updateDataPanel();
         render();
       }
     });
@@ -891,7 +887,6 @@ function attachSvgListeners() {
         } else if (drag.type === 'arrow_tip') {
           data.annotated.arrows[drag.ai].tip = [mpt.x, mpt.y];
         }
-        updateDataPanel();
         render();
       };
 
@@ -901,7 +896,6 @@ function attachSvgListeners() {
         if (svgElUp) svgElUp.classList.remove('dragging');
         markModified(currentIdx);
         updateImageList();
-        updateDataPanel();
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
@@ -940,11 +934,13 @@ function updateImageList() {
     btn.addEventListener('click', () => selectImage(i));
     list.appendChild(btn);
   });
+  updateDataPanel();
 }
 
 // ---- Data panel ----
 function updateDataPanel() {
   const data = getImageData(currentIdx);
+  if (!data) return;
   let html = '';
 
   data.annotated.targets.forEach((target, ti) => {
@@ -1016,19 +1012,26 @@ function updateDataPanel() {
 // ---- Save to DB ----
 
 // ms=0 → persistent until next call; ms>0 → auto-hide after ms
-function showStatusMsg(text, ms = 0) {
-  const el = document.getElementById('save-msg');
+function showStatusMsg(text, ok, ms = 0) {
+  const el = document.getElementById('status-msg');
   el.textContent = text;
+  el.classList.remove('ok', 'fail');
+  el.classList.add(ok ? 'ok' : 'fail');
   el.style.display = 'block';
   clearTimeout(el._hideTimer);
   if (ms > 0) el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
 }
 
 async function save() {
+  if (store.modified.length === 0) {
+    showStatusMsg('No changes to save.', true, 2000);
+    return true;
+  }
+  
   console.log(`[save] clicked — modified: [${store.modified.join(', ') || 'none'}]`);
   const out = {};
   for (const filename of store.modified) {
-    const ann = imageDataCache[filename].annotated 
+    const ann = imageDataCache[filename].annotated;
     out[filename] = structuredClone(ann);
     console.log(`[save] ${filename}: targets=${ann.targets?.length ?? 0} arrows=${ann.arrows.length}`);
   }
@@ -1044,14 +1047,15 @@ async function save() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body = await res.json();
     console.log(`[save] server response:`, body);
-    showStatusMsg(`Saved ${total} annotation${total !== 1 ? 's' : ''} successfully.`, 2000);
+    showStatusMsg(`Saved ${total} annotation${total !== 1 ? 's' : ''} successfully.`, true, 2000);
   } catch (e) {
     console.error('[save] failed:', e);
     alert('Save failed: ' + e);
-    return;
+    return false;
   }
   store.modified = [];
   updateImageList();
+  return true;
 }
 
 // ---- Reset functions ----
@@ -1073,7 +1077,6 @@ function resetRings() {
 
   markModified(currentIdx);
   updateImageList();
-  updateDataPanel();
   render();
 }
 
@@ -1082,7 +1085,6 @@ function resetArrows() {
   data.annotated.arrows = structuredClone(data.generated.arrows);
   markModified(currentIdx);
   updateImageList();
-  updateDataPanel();
   render();
 }
 
@@ -1135,7 +1137,7 @@ async function deleteCurrentImage() {
 }
 
 // ---- Keyboard handler ----
-document.addEventListener('keydown', (e) => {
+document.addEventListener('keydown', async (e) => {
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
@@ -1165,7 +1167,6 @@ document.addEventListener('keydown', (e) => {
         hideScorePicker();
         markModified(currentIdx);
         updateImageList();
-        updateDataPanel();
         render();
       } else {
         hideScorePicker();
@@ -1188,12 +1189,15 @@ document.addEventListener('keydown', (e) => {
     if (score !== undefined) { onScoreSelect(score); return; }
   }
 
+  // AW-6: keyboard navigation with 'b' and 'n'
+  // Note: we should always save even if at the first or last image, because the user may have made changes that need to be saved
+  // We block user going to the next image if save fails, to avoid losing unsaved changes
   if (e.key === 'b' || e.key === 'B') {
-    if (currentIdx > 0) { save(); selectImage(currentIdx - 1); }
+    if (await save() && currentIdx > 0) { selectImage(currentIdx - 1); }
     return;
   }
   if (e.key === 'n' || e.key === 'N') {
-    if (currentIdx < IMAGES.length - 1) { save(); selectImage(currentIdx + 1); }
+    if (await save() && currentIdx < IMAGES.length - 1) { selectImage(currentIdx + 1); } 
     return;
   }
 

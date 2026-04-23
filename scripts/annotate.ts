@@ -4,10 +4,9 @@ import * as http from 'http';
 import * as crypto from 'crypto';
 import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
-import { findTarget, findRingSetFromCenter, ArcheryResult, TargetBoundary, isTargetBoundary } from '../src/targetDetection';
-import { isSplineRing, splineCentroid, SplineRing, RingSet, isRingSet } from '../src/spline';
+import { findTarget, findRingSetFromCenter } from '../src/targetDetection';
 import { detectArrowsNN } from '../src/arrowDetector';
-import { TargetData, ImageData, ArrowData, generateddbToTargets, annotationToTargets, logEvent, LOG_PATH } from './annotateInterface';
+import { ImageData, generateddbToTargets, annotationToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
@@ -38,25 +37,9 @@ fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
 // Worker process for background detection (AW-5)
 // ---------------------------------------------------------------------------
 
-function clampBoundary(
-  pts: [number, number][] | null,
-  w: number,
-  h: number,
-): [number, number][] | null {
-  if (!pts) return null;
-  return pts.map(([x, y]) => [
-    Math.round(Math.max(0, Math.min(w - 1, x))),
-    Math.round(Math.max(0, Math.min(h - 1, y))),
-  ]);
-}
 
 async function loadImage(imgPath: string, filename: string): Promise<ImageData> {
-  let base64: string;
-  let width: number;
-  let height: number;
-
-  console.log(`fast path: loading ${filename}…`);
-  ({ base64, width, height } = await loadImageBase64(imgPath));
+  let { base64, width, height } = await loadImageBase64(imgPath);
   return {
     filename: filename,
     base64: base64,
@@ -87,7 +70,7 @@ async function fetchGeneratedData(data: ImageData): Promise<[ImageData, boolean]
 
   data.generated.targets = generateddbToTargets(rows[0].paper_boundary, rows[0].rings);
   data.generated.arrows = rows[0].arrows ?? [];
-  console.log(`found generated data: ${JSON.stringify(data.generated, null, 2)}`)
+  console.log(`found generated data: ${JSON.stringify(data.generated, null, 2)}`) // I'm fine with this log being a bit noisy since generated data is the basis for annotation and we want to be sure it's loaded correctly
 
   return [data, true];
 }
@@ -106,20 +89,12 @@ async function fetchAnnotationData(data: ImageData): Promise<[ImageData, boolean
 
   data.annotated.targets = annotationToTargets(rows[0].paper_boundary, rows[0].rings);
   data.annotated.arrows = rows[0].arrows ?? [];
-  console.log(`found annotation data: ${JSON.stringify(data.annotated, null, 2)}`)
+  console.log(`found annotation data: ${JSON.stringify(data.annotated, null, 2)}`) // I'm fine with this log being a bit noisy since annotation data is the main source of truth and we want to be sure it's loaded correctly
 
   return [data, true];
 }
 
 
-/** Convert TargetData[] → DB format { boundary: TargetBoundary[], rings: RingSet[], arrows: ArrowData[] } */
-function targetsToDB(targets: TargetData[], arrows: ArrowData[]): { boundary: TargetBoundary[]; rings: RingSet[], arrows: ArrowData[] } {
-  return {
-    boundary: targets.map((t: TargetData) => t.paperBoundary ?? []),
-    rings:    targets.map((t: TargetData) => t.ringSets ?? []).flat(),
-    arrows:   arrows,
-  };
-}
 
 /** Hash of algorithm source files — used to detect stale detections in DB. */
 function computeAlgorithmHash(): string {
@@ -151,13 +126,19 @@ async function processImage(imgPath: string, imgData: ImageData): Promise<ImageD
         ringSets: [t.rings],
       });
     }
+  } else {
+    console.warn(`  findTarget failed: ${filename} — ${result.error ?? 'unknown'}`);
+  }
+  console.log(`  [3/3] detectArrows ${filename}…`);
+  try {
+    const arrows = await detectArrowsNN(rgba, width, height, path.resolve(__dirname, '../models/arrow-detector.onnx'));  
+    for (const a of arrows) {
+      imgData.generated.arrows.push({ tip: a.tip, score: a.score });
+    }
+  } catch (e) {
+    console.warn('Error detecting arrows:', e);
   }
   console.log(`  done: ${filename}`);
-  console.log(`  [3/3] detectArrows ${filename}…`);
-  const arrows = await detectArrowsNN(rgba, width, height, path.resolve(__dirname, '../models/arrow-detector.onnx'));
-  for (const a of arrows) {
-    imgData.generated.arrows.push({ tip: a.tip, score: a.score });
-  }
   return imgData;
 }
 
@@ -219,7 +200,7 @@ async function main(): Promise<void> {
 
   // Wipe annotations rows with corrupt ring data
   const { rowCount: wiped } = await db.query(`
-    UPDATE annotations SET rings = '[]', paper_boundary = NULL
+    DELETE FROM annotations
      WHERE rings::text LIKE '%null%' AND rings <> 'null'::jsonb
   `);
   if (wiped) {
@@ -336,7 +317,7 @@ async function main(): Promise<void> {
     } else if (req.method === 'GET' && req.url?.startsWith('/api/image/')) {
       const filename = decodeURIComponent(req.url.slice('/api/image/'.length));
       if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
-      try {
+
       // if the image is not in cache, load it (and run detection if needed) before responding
       if (!imageCache.has(filename)) {
         try {
@@ -358,7 +339,7 @@ async function main(): Promise<void> {
             imageData = await computeGeneratedData(filename, imgPath, imageData)
           }
 
-          [imageData, isReady] = await fetchAnnotationData(imageData);
+          [imageData] = await fetchAnnotationData(imageData);
           
           imageCache.set(filename, imageData)
         } catch (err) {
@@ -369,12 +350,7 @@ async function main(): Promise<void> {
           return;
         }
       }
-
       respond(200, JSON.stringify(imageCache.get(filename)!));
-    } catch (e) {
-      console.error('Error processing image:', e);
-      respond(500, '{"error":"internal error"}');
-    } 
     } else if (req.method === 'POST' && req.url?.startsWith('/api/recompute/')) {
       const filename = decodeURIComponent(req.url.slice('/api/recompute/'.length));
       if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
@@ -388,8 +364,7 @@ async function main(): Promise<void> {
       try {
         const imgPath = path.join(IMAGES_DIR, filename);
         let imageData = await computeGeneratedData(filename, imgPath, await loadImage(imgPath, filename));
-        let isValid = true;
-        [imageData, isValid] = await fetchAnnotationData(imageData);
+        [imageData] = await fetchAnnotationData(imageData);
         imageCache.set(filename, imageData)
       } catch (err) {
         console.error('Recompute error:', err);

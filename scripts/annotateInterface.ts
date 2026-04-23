@@ -1,5 +1,5 @@
 import { TargetBoundary, isTargetBoundary } from '../src/targetDetection';
-import { isSplineRing, SplineRing, RingSet, splineCentroid, isRingSet } from '../src/spline';
+import { isSplineRing, RingSet, splineCentroid, isRingSet } from '../src/spline';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -52,6 +52,7 @@ export function isBoundaryValid(pts: TargetBoundary): boolean {
     pts.points.some(p => p[0] !== 0 || p[1] !== 0);                   // at least one non-zero vertex
 }
 
+// Note: right now duplicates of annotation / generated format: here to handle case where we ever diverge the two formats in the future, and to keep the type guards simple 
 function isOldFormatBoundary(pts: any): boolean {
   return Array.isArray(pts) && pts.length > 0 &&
   Array.isArray(pts[0]) && pts[0].length === 2 &&
@@ -63,8 +64,8 @@ function isOldFormatRings(rings: any): boolean {
     rings.every(r => isSplineRing(r));
 }
 
-function isRingsArrayArray(rings: any): boolean {
-  return Array.isArray(rings) && rings.length > 0 && Array.isArray(rings[0]) && rings[0].length > 0 && isSplineRing(rings[0][0]);
+function isBoundaryRingsArrayPair(rawBoundary: any, rawRings: any): rawBoundary is any[] {
+  return Array.isArray(rawBoundary) && Array.isArray(rawRings);
 }
 
 /** Convert DB format ex: 
@@ -76,6 +77,11 @@ export function generateddbToTargets(rawBoundary: any, rawRings: any): TargetDat
   let result = [] as TargetData[];
   let targetsCentroid = [];
 
+  if (rawBoundary == null || rawRings == null || !isBoundaryRingsArrayPair(rawBoundary, rawRings)) {
+    logEvent('error', 'missing_boundary_or_rings', 'null', 'cannot convert to TargetData: missing or non-array boundary/rings');
+    return result;
+  }
+
   if (isOldFormatBoundary(rawBoundary)) {
     logEvent('warn', 'old_format_boundary', 'null', 'migrating old boundary format to new multi-target format');
     let target = {
@@ -85,11 +91,11 @@ export function generateddbToTargets(rawBoundary: any, rawRings: any): TargetDat
     result.push(target);
     targetsCentroid.push(splineCentroid(target.paperBoundary));
   } else {
-    if (isRingsArrayArray(rawRings)) {
-      rawRings = rawRings.flat();
-    }
-
     for (const boundary of rawBoundary as TargetBoundary[]) {
+      if (boundary.points.length === 0 || boundary.points.every(p => p[0] === 0 && p[1] === 0)) {
+        logEvent('warn', 'empty_boundary', 'null', 'skipping empty boundary during migration');
+        continue;
+      }
       let target = {
         paperBoundary: boundary as TargetBoundary,
         ringSets: [] as RingSet[],
@@ -99,15 +105,19 @@ export function generateddbToTargets(rawBoundary: any, rawRings: any): TargetDat
     }
   }
 
+  if (result.length === 0) {
+    logEvent('error', 'no_valid_targets', 'null', 'no valid targets found during migration');
+    return result;
+  }
+
   if (isOldFormatRings(rawRings)) {
     logEvent('warn', 'old_format_rings', 'null', 'migrating old rings format to new multi-target format');
     result[0].ringSets = [rawRings as RingSet];
   } else {
     for (const rings of rawRings as RingSet[]) {
       let closest_target_idx = 0;
-      if (rings[0].points.length === 0) {
-        logEvent('warn', 'empty_ring', 'null', 'skipping empty ring set during migration');
-        result[closest_target_idx].ringSets.push(rings);
+      if (rings.length == 0 || rings[0].points.length === 0) {
+        logEvent('warn', 'empty_ring_set', 'null', 'skipping empty ring set during migration');
         continue;
       }
       const centroid = splineCentroid(rings[0]);
@@ -127,6 +137,31 @@ export function generateddbToTargets(rawBoundary: any, rawRings: any): TargetDat
   return result;
 }
 
+/** Clamp boundary points to image dimensions. */
+export function clampBoundary(
+  pts: [number, number][] | null,
+  w: number,
+  h: number,
+): [number, number][] | null {
+  if (!pts) return null;
+  return pts.map(([x, y]) => [
+    Math.round(Math.max(0, Math.min(w - 1, x))),
+    Math.round(Math.max(0, Math.min(h - 1, y))),
+  ]);
+}
+
+/** Convert TargetData[] → DB format { boundary, rings, arrows }. */
+export function targetsToDB(
+  targets: TargetData[],
+  arrows: ArrowData[],
+): { boundary: TargetBoundary[]; rings: RingSet[]; arrows: ArrowData[] } {
+  return {
+    boundary: targets.map(t => t.paperBoundary ?? ({ points: [] } as TargetBoundary)),
+    rings:    targets.map(t => t.ringSets ?? []).flat(),
+    arrows,
+  };
+}
+
 function isOldAnnotationBoundary(pts: any): boolean {
   return Array.isArray(pts) && pts.length > 0 &&
     Array.isArray(pts[0]) && pts[0].length === 2 &&
@@ -137,9 +172,6 @@ function isOldAnnotationRings(rings: any): boolean {
   return isRingSet(rings);
 }
 
-function isAnnotationArrayArray(rings: any): boolean {
-  return Array.isArray(rings) && rings.length > 0 && Array.isArray(rings[0]) && rings[0].length > 0 && isSplineRing(rings[0][0]);
-}
 
 /* Convert DB format ex:
  * old format rawBoundary: [[[0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]]]	rawRings: [[[{"points": [[457.30871071476906, 571.6529817201078], [453.86854999412947, 593.4868550286966], [435.31679070577894, 607.0463091200133], [412.49682012154534, 606.4923021061218], [394.34928520452786, 593.0623855167768], [388.5098006123553, 571.6529817201078], [398.1278187510277, 552.988843238466], [415.06058755293225, 544.7041261508197], [432.5846108956093, 544.6684391425641], [447.8855782083494, 554.1659918577445]]}, {"points": [[491.0746265153625, 571.6529817201078], [483.99711763454275, 615.3765407273429], [446.89561364582937, 642.6822618624738], [401.0783668957828, 641.6346876190569], [364.9654258251155, 614.411008992849], [353.665203087992, 571.6529817201078], [372.9460075007156, 534.6931864329105], [406.1793100437917, 517.370364571853], [441.40568310771897, 517.5199704151199], [472.1361990210538, 536.5468845067828]]}, {"points": [[528.1876967239184, 571.6529817201078], [512.1015213336848, 635.7955852390007], [456.6105730937149, 672.5818326195562], [391.6791295207504, 670.5625657501962], [338.57692011349127, 633.5833806428565], [318.14301267354597, 571.6529817201078], [341.7045239887297, 511.9949200234744], [394.4371492163758, 481.231709502451], [452.64663982009836, 482.92386299933014], [501.87857773707486, 514.937781485552]]}, {"points": [[565.4988880107312, 571.6529817201078], [540.3053120753408, 656.2868386637778], [466.27541230873766, 702.3271491610776], [382.29069583260724, 699.4571935520561], [312.04573121059906, 652.8594176993515], [282.18995596190814, 571.6529817201078], [311.50876229197144, 490.0564149852642], [382.4480108031212, 444.3329355830616], [464.02630061184334, 447.90086832193793], [531.7697933933273, 493.22054209750496]]}, {"points": [[603.1192344351948, 571.6529817201078], [567.8902162978543, 676.3284447123884], [475.6146685113878, 731.0704242254358], [373.40895647073995, 726.7923765675564], [287.4087619451176, 670.7592236318849], [247.31594008950717, 571.6529817201078], [279.7152435756911, 466.9570715229521], [370.2746488543679, 406.8671799213082], [476.32002592134825, 410.06467232631985], [563.8913231211919, 469.8828846856228]]}, {"points": [[641.3014576450207, 571.6529817201078], [595.920610973559, 696.6937185210629], [484.956323871505, 759.8210831372332], [364.6109571109527, 753.8698343572521], [262.1175913127149, 689.1343346793656], [210.48371649436643, 571.6529817201078], [248.24776107240675, 444.09460723505146], [357.97992847099346, 369.02792140322356], [488.786828365769, 371.6957996819099], [596.2566394414232, 446.3681059466288]]}, {"points": [[677.3820066499252, 571.6529817201078], [620.7628051606512, 714.742629086953], [493.9486253684132, 787.4965414155843], [355.3391946822307, 782.4053849447298], [237.7477701861023, 706.8400461277332], [175.24014133977445, 571.6529817201078], [217.02533311753146, 421.4101854982511], [345.1663183446101, 329.5916844654713], [501.61669898326954, 332.20951809834], [628.8965830897062, 422.65379877445287]]}, {"points": [[714.450074255263, 571.6529817201078], [646.0429550028542, 733.1097330616616], [503.50887490524457, 816.9199640263774], [345.98207988127297, 811.2036231230962], [213.58080585743105, 724.3983734853014], [140.1424713728702, 571.6529817201078], [185.0289001690232, 398.1634162166879], [332.21259607125694, 289.724226679632], [514.7115087051111, 291.9078377949859], [662.0836627169866, 398.5419740449332]]}, {"points": [[751.5317467638911, 571.6529817201078], [673.8357790109557, 753.3024016769157], [512.8158045972668, 845.563748321162], [336.5905467516034, 840.1077900251162], [186.91562729402486, 743.771759728473], [106.53204442679248, 571.6529817201078], [155.4759006045294, 376.6919052029593], [320.27283070904224, 252.97740738660855], [526.3876215263191, 255.97245758695294], [692.9781637407375, 376.0958051696731]]}, {"points": [[789.5736813681051, 571.6529817201078], [701.7904886946785, 773.6126871201835], [522.7671160635089, 876.1907357941182], [326.9831717952573, 869.6762497637326], [159.8655506462996, 763.4247907988499], [72.73764628574139, 571.6529817201078], [123.58796486957948, 353.52396376121624], [308.13390669270143, 215.61764078249513], [538.405578356426, 218.98498970045023], [724.3154581696116, 353.32792805447053]]}]]]	2026-04-15 17:51:20.000 +0200	[{"tip": [418, 594], "nock": null, "score": 10}, {"tip": [430, 596], "nock": null, "score": "X"}, {"tip": [435, 510], "nock": null, "score": 8}]
@@ -148,14 +180,28 @@ function isAnnotationArrayArray(rings: any): boolean {
 */
 export function annotationToTargets(rawBoundary: any, rawRings: any): TargetData[] {
   const result = [] as TargetData[];
+  const boundaryCentroids = [];
+
+  if (rawBoundary == null || rawRings == null || !isBoundaryRingsArrayPair(rawBoundary, rawRings)) {
+    logEvent('error', 'missing_boundary_or_rings', 'null', 'cannot convert to TargetData: missing or non-array boundary/rings');
+    return result;
+  }
+
   if (isOldAnnotationBoundary(rawBoundary)) {
     logEvent('warn', 'old_annotation_boundary', 'null', 'migrating old annotation boundary format to new multi-target format');
+    boundaryCentroids.push(splineCentroid({ points: rawBoundary as [number, number][] }));
     result.push({
       paperBoundary: { points: rawBoundary as [number, number][] },
       ringSets: [] as RingSet[],
     });
   } else {
     for (const boundary of rawBoundary as TargetBoundary[]) {
+      if (boundary.points.length === 0 || boundary.points.every(p => p[0] === 0 && p[1] === 0)) {
+        logEvent('warn', 'empty_boundary', 'null', 'skipping empty boundary during migration');
+        continue;
+      }
+      boundaryCentroids.push(splineCentroid(boundary));
+
       result.push({
         paperBoundary: boundary as TargetBoundary,
         ringSets: [] as RingSet[],
@@ -163,27 +209,27 @@ export function annotationToTargets(rawBoundary: any, rawRings: any): TargetData
     }
   }
 
+  if (result.length === 0) {
+    logEvent('error', 'no_valid_targets', 'null', 'no valid targets found during migration');
+    return result;
+  }
+
   if (isOldAnnotationRings(rawRings)) {
     logEvent('warn', 'old_annotation_rings', 'null', 'migrating old annotation rings format to new multi-target format');
     result[0].ringSets = [rawRings as RingSet];
   } else {
-    if (isAnnotationArrayArray(rawRings)) {
-      logEvent('warn', 'old_annotation_rings_array', 'null', 'migrating old annotation rings format (array of array of rings) to new multi-target format');
-      rawRings = rawRings.flat();
-    }
     for (const rings of rawRings as RingSet[]) {
-    let closest_target_idx = 0;
-      if (rings[0].points.length === 0) {
+      let closest_target_idx = 0;
+      if (rings.length === 0 || rings[0].points.length === 0) {
         // skip empty rings
         logEvent('warn', 'empty_annotation_ring', 'null', 'skipping empty ring set during annotation migration');
-        result[closest_target_idx].ringSets.push(rings);
         continue;
       }
       const centroid = splineCentroid(rings[0]);
       let max_dist = Infinity;
-      for (let i = 0; i < result.length; i++) {
+      for (let i = 0; i < boundaryCentroids.length; i++) {
         // find the closest target centroid for this ring set
-        const dist = Math.hypot(centroid[0] - splineCentroid(result[i].paperBoundary)[0], centroid[1] - splineCentroid(result[i].paperBoundary)[1]);
+        const dist = Math.hypot(centroid[0] - boundaryCentroids[i][0], centroid[1] - boundaryCentroids[i][1]);
         if (dist < max_dist) {
           max_dist = dist;
           closest_target_idx = i;

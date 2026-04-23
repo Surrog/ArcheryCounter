@@ -17,7 +17,7 @@ export function isSplineRing(x: unknown): x is SplineRing {
 }
 
 export function isRingSet(x: unknown): x is RingSet {
-  return Array.isArray(x) && x.every(r => isSplineRing(r));
+  return Array.isArray(x) && x.length > 0 && x.every(r => isSplineRing(r));
 }
 
 /** Evaluates one Catmull-Rom segment at parameter t ∈ [0, 1]. */

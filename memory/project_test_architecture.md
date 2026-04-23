@@ -4,7 +4,7 @@ description: How tests are structured to run fast via pre-computed DB cache
 type: project
 ---
 
-Tests use a `generated` DB table (populated by `scripts/detect-worker.ts`) instead of running the detection algorithm inline.
+the detection algorithm inline.
 
 **Key files:**
 - `src/__tests__/globalSetup.ts`: Runs once before all test suites (Jest `globalSetup`), detects all images in `images/` using a process pool (CONCURRENCY = min(cpus, 4)), stores results in `generated` table. Skips images whose `algorithm_hash` matches current. Forces re-detection when algorithm files change.
