@@ -96,7 +96,7 @@ jobs:
 
       - name: Install Python test dependencies
         working-directory: scripts/nn
-        run: uv sync --group test
+        run: uv sync --group dev
 
       - name: Run Python tests
         working-directory: scripts/nn
