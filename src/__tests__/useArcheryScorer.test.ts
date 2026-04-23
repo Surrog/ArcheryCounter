@@ -6,7 +6,7 @@ import { useArcheryScorer } from '../useArcheryScorer';
 import { expect, describe, it, jest, beforeEach } from '@jest/globals';
 
 jest.mock('react-native-image-picker', () => ({
-  launchImageLibrary: jest.fn<any>(),
+  launchImageLibrary: jest.fn<any>().mockReturnValue(Promise.resolve({ didCancel: true })),
 }));
 
 jest.mock('../ArcheryCounter', () => ({
