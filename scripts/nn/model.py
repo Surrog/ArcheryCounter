@@ -160,6 +160,7 @@ class ArrowDetector(nn.Module):
 
 def heatmap_nms(hm: torch.Tensor, kernel: int = 5) -> torch.Tensor:
     """Zero out non-maxima in a heatmap. Input: (H, W) or (1, H, W)."""
+    assert hm.dim() in (2, 3)
     if hm.dim() == 2:
         hm = hm.unsqueeze(0).unsqueeze(0)
     else:

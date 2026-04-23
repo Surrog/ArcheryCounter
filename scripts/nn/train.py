@@ -140,7 +140,7 @@ def validate_recall(model, val_loader, device, threshold: float = 45.0,
     with torch.no_grad():
         for batch in val_loader:
             imgs     = batch['image'].to(device)
-            tip_hms, s_maps = model(imgs)
+            tip_hms, _ = model(imgs)
 
             for b in range(imgs.size(0)):
                 meta    = {k: v[b] if hasattr(v, '__getitem__') else v
@@ -178,10 +178,10 @@ def validate_recall(model, val_loader, device, threshold: float = 45.0,
                 total_gt   += len(gt_tips)
                 total_pred += len(pred_tips)
 
-    recall    = sum(all_recall) / max(len(all_recall), 1)
+    recall    = total_tp / max(total_gt, 1)   # micro, consistent with precision
     precision = total_tp / max(total_pred, 1)
     f1        = (2 * precision * recall / (precision + recall)
-                 if (precision + recall) > 0 else 0.0)
+                if (precision + recall) > 0 else 0.0)
     return recall, precision, f1, total_pred / max(len(all_recall), 1)
 
 
@@ -272,7 +272,7 @@ def main():
         if not os.path.exists(last_path):
             print('No last.pt found — starting from scratch.')
         else:
-            ckpt = torch.load(last_path, map_location=device)
+            ckpt = torch.load(last_path, map_location=device, weights_only=True)
             model.load_state_dict(ckpt['model'])
             start_epoch = ckpt['epoch'] + 1
             best_f1 = ckpt.get('f1', ckpt.get('recall', 0.0))
@@ -344,7 +344,7 @@ def main():
                 'f1':          f1,
             }
             torch.save(ckpt, os.path.join(args.out, 'last.pt'))
-            if f1 >= best_f1:   # best_recall tracks F1 for checkpoint selection
+            if f1 >= best_f1:   # best F1 for checkpoint selection
                 best_f1 = f1
                 torch.save(ckpt, os.path.join(args.out, 'best.pt'))
                 print(f'  → new best F1: {best_f1:.3f}  (recall={recall:.3f} prec={precision:.3f})')

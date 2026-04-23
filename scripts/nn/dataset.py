@@ -1,6 +1,6 @@
 """
 ArrowDataset — loads annotations from PostgreSQL, letterbox-resizes images to
-640×640, generates heatmaps and a radial-distance channel.
+640×640, generates heatmaps.
 
 Outputs per sample:
   image      : (3, 640, 640) float32  — normalised RGB
