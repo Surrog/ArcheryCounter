@@ -290,7 +290,8 @@ describe('Python boundary_dataset preprocessing matches TypeScript letterboxGray
 
 const ROOT = path.resolve(__dirname, '../..');
 const REGRESSION_SCRIPT = path.join(ROOT, 'scripts/nn-regression-check.ts');
-const TS_NODE_CMD = `npx ts-node --project ${path.join(ROOT, 'tsconfig.scripts.json')}`;
+const TS_NODE_EXEC = 'npx';
+const TS_NODE_ARGS = ['ts-node', '--project', path.join(ROOT, 'tsconfig.scripts.json'), REGRESSION_SCRIPT];
 
 type RegressionResult = {
   boundary: { file: string; polygonCount: number; vertexCounts: number[] } | null;
@@ -299,7 +300,7 @@ type RegressionResult = {
 };
 
 function runRegressionScript(): RegressionResult {
-  const output = execSync(`${TS_NODE_CMD} ${REGRESSION_SCRIPT}`, {
+  const output = execFileSync(TS_NODE_EXEC, TS_NODE_ARGS, {
     cwd:      ROOT,
     timeout:  90_000,
     encoding: 'utf8',
