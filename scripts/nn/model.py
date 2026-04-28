@@ -2,9 +2,10 @@
 ArrowDetector — MobileNetV2 backbone + FPN neck + two prediction heads.
 
 Heads:
-  tip_hm    : (B, 1, 160, 160) Gaussian heatmap of arrow tip positions
-  score_map : (B, 11, 160, 160) score logits at every spatial position
+  tip_hm     : (B, 1, 160, 160) Gaussian heatmap of arrow tip positions
+  score_map  : (B, 11, 160, 160) score logits at every spatial position
               (used at detected tip locations; 0 = miss, 1–10 = score)
+  offset_map : (B, 2, 160, 160) sub-pixel (Δx, Δy) offsets
 
 Input: (B, 3, 640, 640) — normalised RGB.
 """
@@ -39,6 +40,7 @@ BACKBONE_CONFIGS = {
 
 FPN_CH = 128     # channel width used throughout the FPN
 N_SCORES = 11    # classes: 0 = miss, 1-10 = archery score
+N_OFFSETS = 2    # sub-pixel offsets (Δx, Δy)
 
 
 class ConvBnRelu(nn.Sequential):
@@ -107,8 +109,25 @@ class ScoreHead(nn.Sequential):
         )
 
 
+class OffsetHead(nn.Sequential):
+    """Sub-pixel offset head: (B, FPN_CH, H, W) → (B, 2, H, W).
+
+    Predicts (Δx, Δy) in [-0.5, 0.5] heatmap coordinates.
+    Supervised with L1 loss only at GT tip pixel locations; see offset_loss()
+    in train.py.  Zero-initialised so the model starts with no offset bias.
+    """
+
+    def __init__(self):
+        super().__init__(
+            ConvBnRelu(FPN_CH, 64),
+            nn.Conv2d(64, N_OFFSETS, 1),
+        )
+        # nn.init.zeros_(self[-1].weight) weight left at Kaiming default so spatial variation is learned from epoch 0.
+        nn.init.zeros_(self[-1].bias)
+
+
 class ArrowDetector(nn.Module):
-    """Full model: backbone + FPN + tip/score heads."""
+    """Full model: backbone + FPN + tip/score/offset heads."""
 
     def __init__(self, backbone: str = 'mobilenet_v2'):
         """
@@ -131,17 +150,19 @@ class ArrowDetector(nn.Module):
         self.stage5 = nn.Sequential(*feats[c4i + 1: c5i + 1])
 
         # ── neck + heads ──────────────────────────────────────────────────
-        self.fpn        = FPN(c2ch, c3ch, c4ch, c5ch)
-        self.tip_head   = HeatmapHead()
-        self.score_head = ScoreHead()
+        self.fpn         = FPN(c2ch, c3ch, c4ch, c5ch)
+        self.tip_head    = HeatmapHead()
+        self.score_head  = ScoreHead()
+        self.offset_head = OffsetHead()
 
     def forward(self, x):
         """
         Args:
             x: (B, 3, 640, 640)
         Returns:
-            tip_hm    : (B, 1, 160, 160)
-            score_map : (B, 11, 160, 160)
+            tip_hm     : (B, 1, 160, 160)  heatmap in [0, 1]
+            score_map  : (B, 11, 160, 160) score logits
+            offset_map : (B, 2, 160, 160)  sub-pixel (Δx, Δy) offsets
         """
         c2 = self.stage2(x)
         c3 = self.stage3(c2)
@@ -150,10 +171,11 @@ class ArrowDetector(nn.Module):
 
         p2 = self.fpn(c2, c3, c4, c5)
 
-        tip_hm    = self.tip_head(p2)
-        score_map = self.score_head(p2)
+        tip_hm     = self.tip_head(p2)
+        score_map  = self.score_head(p2)
+        offset_map = self.offset_head(p2)
 
-        return tip_hm, score_map
+        return tip_hm, score_map, offset_map
 
 
 # ── post-processing helpers (used at inference) ───────────────────────────────
@@ -172,6 +194,7 @@ def heatmap_nms(hm: torch.Tensor, kernel: int = 5) -> torch.Tensor:
 
 
 def decode_heatmap(tip_hm: torch.Tensor, score_map: torch.Tensor,
+                   offset_map: torch.Tensor | None = None,
                    threshold: float = 0.85,
                    scale: float = 1.0, pad_x: int = 0, pad_y: int = 0,
                    input_size: int = 640, heatmap_size: int = 160) -> list[dict]:
@@ -180,13 +203,14 @@ def decode_heatmap(tip_hm: torch.Tensor, score_map: torch.Tensor,
     Args:
         tip_hm     : (1, H, W) or (H, W) heatmap
         score_map  : (11, H, W) score logits
+        offset_map : (2, H, W) sub-pixel offsets (Δx, Δy); None = skip
         threshold  : minimum heatmap value to accept a peak
         scale, pad_x, pad_y: letterbox parameters from dataset.letterbox()
 
     Returns:
         list of dicts: {'tip': [x, y], 'score': int, 'confidence': float}
     """
-    hm   = heatmap_nms(tip_hm.squeeze())
+    hm = heatmap_nms(tip_hm.squeeze())
     ys, xs = torch.where(hm > threshold)
     if len(xs) == 0:
         return []
@@ -197,9 +221,13 @@ def decode_heatmap(tip_hm: torch.Tensor, score_map: torch.Tensor,
     for hx, hy in zip(xs.tolist(), ys.tolist()):
         confidence = hm[hy, hx].item()
 
+        # Sub-pixel correction: shift by predicted fractional offset
+        dx = offset_map[0, hy, hx].item() if offset_map is not None else 0.0
+        dy = offset_map[1, hy, hx].item() if offset_map is not None else 0.0
+
         # Map heatmap coords → original image coords
-        lbx = (hx + 0.5) * ratio   # letterboxed 640-space
-        lby = (hy + 0.5) * ratio
+        lbx = (hx + 0.5 + dx) * ratio
+        lby = (hy + 0.5 + dy) * ratio
         orig_x = (lbx - pad_x) / scale
         orig_y = (lby - pad_y) / scale
 

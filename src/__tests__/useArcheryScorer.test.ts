@@ -1,9 +1,8 @@
+import { expect, describe, it, jest, beforeEach } from '@jest/globals';
 import { act, renderHook } from '@testing-library/react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import ArcheryCounter from '../ArcheryCounter';
 import { useArcheryScorer } from '../useArcheryScorer';
-
-import { expect, describe, it, jest, beforeEach } from '@jest/globals';
 
 jest.mock('react-native-image-picker', () => ({
   launchImageLibrary: jest.fn<any>().mockReturnValue(Promise.resolve({ didCancel: true })),

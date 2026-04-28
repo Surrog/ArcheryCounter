@@ -1,10 +1,11 @@
 """
 ArrowDataset — loads annotations from PostgreSQL, letterbox-resizes images to
-640×640, generates heatmaps.
+640×640, generates heatmaps and offset maps.
 
 Outputs per sample:
   image      : (3, 640, 640) float32  — normalised RGB
   tip_hm     : (1, 160, 160) float32  — Gaussian heatmap of tip positions
+  offset_map : (2, 160, 160) float32  — sub-pixel (Δx, Δy) at each tip pixel
   score_map  : (160, 160)    int64    — score label at each tip pixel, -1 = ignore
   meta       : dict with filename, scale, pad_x, pad_y, orig_w, orig_h
 """
@@ -86,7 +87,8 @@ def draw_gaussian(heatmap: np.ndarray, cx: float, cy: float,
     x0, y0 = int(round(cx)) - radius, int(round(cy)) - radius
 
     # Clamp to heatmap bounds
-    px0 = max(0, x0);  py0 = max(0, y0)
+    px0 = max(0, x0)
+    py0 = max(0, y0)
     px1 = min(heatmap.shape[1], x0 + size)
     py1 = min(heatmap.shape[0], y0 + size)
     gx0, gy0 = px0 - x0, py0 - y0
@@ -108,13 +110,14 @@ def _ring_set_centroid(rs) -> tuple:
     return pts[:, 0].mean(), pts[:, 1].mean()
 
 
-def _score_against_ring_set(tip, rings) -> int:
+def _score_against_ring_set(tip, rings, centroid=None) -> int:
     """Geometric score (0 = miss, 1–10) for a single ring set.
 
     rings[0] = innermost, rings[-1] = outermost.
     Score = 10 - i where i is the first ring index that contains the tip.
+    Centroid is optional (if not provided, computed from innermost ring)
     """
-    cx, cy = _ring_set_centroid(rings)
+    cx, cy = centroid if centroid is not None else _ring_set_centroid(rings)
     radii = []
     for r in rings:
         pts = np.asarray(r['points'], dtype=np.float64)
@@ -133,11 +136,14 @@ def score_tip(tip, ring_sets) -> int:
     """
     if not ring_sets:
         return 0
-    best = min(ring_sets, key=lambda rs: math.hypot(
-        tip[0] - _ring_set_centroid(rs)[0],
-        tip[1] - _ring_set_centroid(rs)[1],
-    ))
-    return _score_against_ring_set(tip, best)
+    best, centroid = min(
+        ((rs, _ring_set_centroid(rs)) for rs in ring_sets),
+        key=lambda pair: math.hypot(
+            tip[0] - pair[1][0],
+            tip[1] - pair[1][1],
+        ),
+    )
+    return _score_against_ring_set(tip, best, centroid=centroid)
 
 
 # ── dataset ───────────────────────────────────────────────────────────────────
@@ -170,9 +176,9 @@ class ArrowDataset(Dataset):
                 SELECT filename, arrows, rings
                 FROM   annotations
                 WHERE  arrows IS NOT NULL
-                AND  jsonb_array_length(arrows) > 0
-                AND  rings  IS NOT NULL
-                AND  jsonb_array_length(rings)  > 0
+                    AND  jsonb_array_length(arrows) > 0
+                    AND  rings  IS NOT NULL
+                    AND  jsonb_array_length(rings)  > 0
             """)
             rows = cur.fetchall()
         conn.close()
@@ -181,7 +187,6 @@ class ArrowDataset(Dataset):
         def is_val_sample(fname):
             h = int(hashlib.md5(fname.encode()).hexdigest(), 16)
             return (h % 1000) < int(val_split * 1000)
-
 
         self.samples = []
         for fname, arrows_j, rings_j in rows:
@@ -284,15 +289,18 @@ class ArrowDataset(Dataset):
         # ── build heatmaps ────────────────────────────────────────────────
         hs = HEATMAP_SIZE / INPUT_SIZE
 
-        tip_hm    = np.zeros((HEATMAP_SIZE, HEATMAP_SIZE), dtype=np.float32)
-        score_map = np.full((HEATMAP_SIZE, HEATMAP_SIZE), -1, dtype=np.int64)
+        tip_hm     = np.zeros((HEATMAP_SIZE, HEATMAP_SIZE), dtype=np.float32)
+        offset_map = np.zeros((2, HEATMAP_SIZE, HEATMAP_SIZE), dtype=np.float32)
+        score_map  = np.full((HEATMAP_SIZE, HEATMAP_SIZE), -1, dtype=np.int64)
 
         for (tx, ty), sc in zip(keypoints, scores_seq):
             hx, hy = tx * hs, ty * hs
             draw_gaussian(tip_hm, hx, hy, SIGMA)
             ihx, ihy = int(round(hx)), int(round(hy))
             if 0 <= ihx < HEATMAP_SIZE and 0 <= ihy < HEATMAP_SIZE:
-                score_map[ihy, ihx] = sc
+                score_map[ihy, ihx]  = sc
+                offset_map[0, ihy, ihx] = hx - ihx   # Δx
+                offset_map[1, ihy, ihx] = hy - ihy   # Δy
 
         # ── assemble tensors ──────────────────────────────────────────────
         img_f = img_np.astype(np.float32) / 255.0
@@ -302,9 +310,10 @@ class ArrowDataset(Dataset):
         img_t = torch.from_numpy(img_f).permute(2, 0, 1)   # (3, H, W)
 
         return {
-            'image':     img_t,
-            'tip_hm':    torch.from_numpy(tip_hm).unsqueeze(0),
-            'score_map': torch.from_numpy(score_map),
+            'image':      img_t,
+            'tip_hm':     torch.from_numpy(tip_hm).unsqueeze(0),
+            'offset_map': torch.from_numpy(offset_map),
+            'score_map':  torch.from_numpy(score_map),
             'meta': {
                 'filename': fname,
                 'scale':    scale,

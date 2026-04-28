@@ -62,6 +62,19 @@ def score_loss(score_map: torch.Tensor, score_gt: torch.Tensor) -> torch.Tensor:
     return F.cross_entropy(logits, labels, ignore_index=-1)
 
 
+def offset_loss(offset_pred: torch.Tensor, offset_gt: torch.Tensor,
+                score_gt: torch.Tensor) -> torch.Tensor:
+    """L1 offset loss, supervised only at GT tip pixel positions.
+
+    offset_pred : (B, 2, H, W) predicted (Δx, Δy)
+    offset_gt   : (B, 2, H, W) target offsets (valid where score_gt != -1)
+    score_gt    : (B, H, W) int64; -1 = no tip, used as mask
+    """
+    tip_mask = (score_gt != -1).unsqueeze(1).float()   # (B, 1, H, W)
+    n = tip_mask.sum().clamp(min=1)
+    return (tip_mask * (offset_pred - offset_gt).abs()).sum() / n
+
+
 # ── validation metric ─────────────────────────────────────────────────────────
 
 def recall_at_threshold(pred_tips: list, gt_tips: list,
@@ -94,20 +107,22 @@ def recall_at_threshold(pred_tips: list, gt_tips: list,
 def run_epoch(model, loader, optimizer, device, train: bool,
               sparsity_weight: float = 5.0):
     model.train(train)
-    total_tip = total_score = total_sparsity = total_n = 0.0
+    total_tip = total_score = total_offset = total_sparsity = total_n = 0.0
 
     with torch.set_grad_enabled(train):
         for batch in loader:
-            imgs     = batch['image'].to(device)
-            tip_gt   = batch['tip_hm'].to(device)
-            score_gt = batch['score_map'].to(device)
+            imgs       = batch['image'].to(device)
+            tip_gt     = batch['tip_hm'].to(device)
+            offset_gt  = batch['offset_map'].to(device)
+            score_gt   = batch['score_map'].to(device)
 
             with torch.autocast(device_type=device, enabled=(device != 'cpu')):
-                tip_hm, s_map = model(imgs)
+                tip_hm, s_map, off_map = model(imgs)
                 l_tip      = focal_loss(tip_hm, tip_gt)
+                l_offset   = offset_loss(off_map, offset_gt, score_gt)
                 l_sparsity = tip_hm.mean()          # penalise broadly-hot heatmaps
                 l_score    = score_loss(s_map, score_gt)
-                loss       = l_tip + 0.3 * l_score
+                loss       = l_tip + l_offset + 0.3 * l_score
                 if train:
                     loss = loss + sparsity_weight * l_sparsity
 
@@ -118,12 +133,13 @@ def run_epoch(model, loader, optimizer, device, train: bool,
 
             B = imgs.size(0)
             total_tip      += l_tip.item()      * B
+            total_offset   += l_offset.item()   * B
             total_score    += l_score.item()    * B
             total_sparsity += l_sparsity.item() * B
             total_n        += B
 
     n = max(total_n, 1)
-    return total_tip / n, total_score / n, total_sparsity / n
+    return total_tip / n, total_offset / n, total_score / n, total_sparsity / n
 
 
 def validate_recall(model, val_loader, device, threshold: float = 45.0,
@@ -134,13 +150,13 @@ def validate_recall(model, val_loader, device, threshold: float = 45.0,
     heatmaps cannot game recall by predicting everywhere.
     """
     model.eval()
-    all_recall = []
+    n_images = len(val_loader.dataset)
     total_tp = total_gt = total_pred = 0
 
     with torch.no_grad():
         for batch in val_loader:
-            imgs     = batch['image'].to(device)
-            tip_hms, _ = model(imgs)
+            imgs = batch['image'].to(device)
+            tip_hms, _, off_maps = model(imgs)
 
             for b in range(imgs.size(0)):
                 meta    = {k: v[b] if hasattr(v, '__getitem__') else v
@@ -151,29 +167,31 @@ def validate_recall(model, val_loader, device, threshold: float = 45.0,
 
                 # Decode predictions: sort by confidence, keep top-max_preds
                 hm    = heatmap_nms(tip_hms[b].squeeze())
+                off   = off_maps[b]                         # (2, H, W)
                 ratio = INPUT_SIZE / HEATMAP_SIZE
                 peaks = []
                 for hy, hx in zip(*torch.where(hm > hm_threshold)):
                     conf = hm[hy, hx].item()
-                    lbx  = (hx.item() + 0.5) * ratio
-                    lby  = (hy.item() + 0.5) * ratio
+                    dx   = off[0, hy, hx].item()
+                    dy   = off[1, hy, hx].item()
+                    lbx  = (hx.item() + 0.5 + dx) * ratio
+                    lby  = (hy.item() + 0.5 + dy) * ratio
                     peaks.append((conf, (lbx - pad_x) / scale, (lby - pad_y) / scale))
                 peaks.sort(key=lambda t: -t[0])
                 pred_tips = [(x, y) for _, x, y in peaks[:max_preds]]
 
                 # GT tips in original coords
                 gt_hm = batch['tip_hm'][b].squeeze()
+                gt_off = batch['offset_map'][b]   # (2, H, W)
                 gt_tips = []
                 for hy, hx in zip(*torch.where(gt_hm > 0.99)):
-                    lbx = (hx.item() + 0.5) * ratio
-                    lby = (hy.item() + 0.5) * ratio
-                    gt_tips.append((
-                        (lbx - pad_x) / scale,
-                        (lby - pad_y) / scale,
-                    ))
+                    dx  = gt_off[0, hy, hx].item()
+                    dy  = gt_off[1, hy, hx].item()
+                    lbx = (hx.item() + 0.5 + dx) * ratio
+                    lby = (hy.item() + 0.5 + dy) * ratio
+                    gt_tips.append(((lbx - pad_x) / scale, (lby - pad_y) / scale))
 
                 r = recall_at_threshold(pred_tips, gt_tips, threshold)
-                all_recall.append(r)
                 total_tp   += round(r * len(gt_tips))
                 total_gt   += len(gt_tips)
                 total_pred += len(pred_tips)
@@ -182,7 +200,7 @@ def validate_recall(model, val_loader, device, threshold: float = 45.0,
     precision = total_tp / max(total_pred, 1)
     f1        = (2 * precision * recall / (precision + recall)
                 if (precision + recall) > 0 else 0.0)
-    return recall, precision, f1, total_pred / max(len(all_recall), 1)
+    return recall, precision, f1, total_pred / max(n_images, 1)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -223,7 +241,6 @@ def main():
                             val_split=args.val_split, is_val=False)
     val_ds   = ArrowDataset(args.db, args.images, augment=False,
                             val_split=args.val_split, is_val=True)
-
 
     print(f'Train: {len(train_ds)} images   Val: {len(val_ds)} images')
     if len(train_ds) == 0:
@@ -297,7 +314,7 @@ def main():
     with open(log_path, 'a' if args.resume else 'w', newline='') as f:
         writer = csv.writer(f)
         if not args.resume:
-            writer.writerow(['epoch', 'train_tip', 'train_score', 'train_sparsity',
+            writer.writerow(['epoch', 'train_tip', 'train_offset', 'train_score', 'train_sparsity',
                              'val_recall', 'val_precision', 'val_f1', 'val_pred_count'])
 
         for epoch in range(start_epoch, args.epochs + 1):
@@ -313,7 +330,7 @@ def main():
                     optimizer, T_max=args.epochs - UNFREEZE_EPOCH
                 )
 
-            tr_tip, tr_score, tr_sparsity = run_epoch(
+            tr_tip, tr_offset, tr_score, tr_sparsity = run_epoch(
                 model, train_loader, optimizer, device, train=True,
                 sparsity_weight=args.sparsity_weight,
             )
@@ -325,11 +342,11 @@ def main():
             lr = optimizer.param_groups[0]['lr']
             print(
                 f'Epoch {epoch:3d}/{args.epochs}  '
-                f'train tip={tr_tip:.4f} score={tr_score:.4f} sparse={tr_sparsity:.4f}  '
+                f'train tip={tr_tip:.4f} off={tr_offset:.4f} score={tr_score:.4f} sparse={tr_sparsity:.4f}  '
                 f'recall@45={recall:.3f} prec={precision:.3f} F1={f1:.3f} '
                 f'n_pred={pred_count:.1f}  lr={lr:.2e}'
             )
-            writer.writerow([epoch, tr_tip, tr_score, tr_sparsity,
+            writer.writerow([epoch, tr_tip, tr_offset, tr_score, tr_sparsity,
                              recall, precision, f1, pred_count])
             f.flush()
 

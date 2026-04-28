@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 
+import torch
 import albumentations as A
 import cv2
 import numpy as np
@@ -188,7 +189,6 @@ class BoundaryDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
-        import torch
         sample = self.samples[idx]
         fname  = sample['filename']
         polys  = sample['polygons']
