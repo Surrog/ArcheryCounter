@@ -42,7 +42,7 @@
     "@types/react-test-renderer": "^19.1.0",
     "eslint": "^9.39.4",
     "hyparquet": "^1.25.1",
-    "hyparquet-writer": "^0.13.0",
+    "hyparquet-writer": "^0.14.0",
     "jest": "^30.0.0",
     "jimp": "^1.6.0",
     "metro-config": "^0.84.2",
