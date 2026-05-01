@@ -1,6 +1,5 @@
-import ArcheryCounter from '../ArcheryCounter';
-
 import { describe, expect, jest, beforeEach, it } from '@jest/globals';
+import ArcheryCounter from '../ArcheryCounter';
 
 jest.mock('../targetDetection', () => ({
   findTarget: jest.fn<any>().mockReturnValue({
