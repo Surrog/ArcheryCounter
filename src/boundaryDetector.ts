@@ -22,6 +22,7 @@
 import simplify from 'simplify-js';
 import { connectedComponents } from './connectedComponents';
 import { traceContour } from './contourTrace';
+import { getSession, OnnxSession, releaseSession } from './ortComponents';
 
 // ── constants (must match training) ──────────────────────────────────────────
 
@@ -34,26 +35,6 @@ const SIMPLIFY_TOLERANCE  = 3.0;    // Douglas-Peucker tolerance in model-input 
 
 const IMAGENET_GRAY_MEAN = 0.449;
 const IMAGENET_GRAY_STD  = 0.226;
-
-// ── ONNX session (lazy, cached) ───────────────────────────────────────────────
-
-let _session: unknown = null;
-
-async function getSession(modelPath: string): Promise<unknown> {
-  if (_session) return _session;
-  let ort: typeof import('onnxruntime-node');
-  try {
-    ort = await import('onnxruntime-node');
-  } catch {
-    ort = await import('onnxruntime-react-native' as string) as typeof import('onnxruntime-node');
-  }
-  _session = await (ort as typeof import('onnxruntime-node')).InferenceSession.create(modelPath);
-  return _session;
-}
-
-export function releaseBoundarySession(): void {
-  _session = null;
-}
 
 // ── letterbox (grayscale) ─────────────────────────────────────────────────────
 
@@ -187,6 +168,8 @@ export function extractPolygons(
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+let sessionCache: OnnxSession | null = null;
+
 /**
  * Detect paper boundary polygons in an image using the segmentation NN.
  *
@@ -205,13 +188,13 @@ export async function detectBoundaries(
 ): Promise<[number, number][][] | null> {
   const { data, scale, padX, padY } = letterboxGray(rgba, width, height);
 
-  const session = await getSession(modelPath) as import('onnxruntime-node').InferenceSession;
-  const ort = await import('onnxruntime-node').catch(
-    () => import('onnxruntime-react-native' as string),
-  ) as typeof import('onnxruntime-node');
+  if (!sessionCache || sessionCache.currentModelPath !== modelPath) {
+    if (sessionCache && !sessionCache.isReleased) releaseSession(sessionCache);
+    sessionCache = await getSession(modelPath);
+  }
 
-  const tensor = new ort.Tensor('float32', data, [1, 1, INPUT_SIZE, INPUT_SIZE]);
-  const results = await session.run({ image: tensor });
+  const tensor = new sessionCache.ort.Tensor('float32', data, [1, 1, INPUT_SIZE, INPUT_SIZE]);
+  const results = await sessionCache.session.run({ image: tensor });
   if (!results['logits']) {
     throw new Error(
       'Model output "logits" not found. Check the model was exported with output name "logits". ' +
@@ -221,4 +204,11 @@ export async function detectBoundaries(
   const logits = results['logits'].data as Float32Array;
 
   return extractPolygons(logits, scale, padX, padY);
+}
+
+export function releaseBoundarySession(): void {
+  if (sessionCache && !sessionCache.isReleased) {
+    releaseSession(sessionCache);
+    sessionCache = null;
+  }
 }

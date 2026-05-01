@@ -1,7 +1,6 @@
 // New archery target detection pipeline.
 // See docs/research.md and docs/plan.md for design notes.
 
-import { isArray } from 'util';
 import type { SplineRing } from './spline';
 import { sampleClosedSpline } from './spline';
 
@@ -48,9 +47,27 @@ export interface RayDebugEntry {
 
 /**
  * Result for a single detected target (one ring set on one sheet of paper).
- * `rings` has 7 entries when only yellow/red/blue zones were detected,
- * or 10 entries when black and white zones were also found.
- * Index 0 = innermost (bullseye), index 6 or 9 = outermost.
+ *
+ * `rings` has either 7 or 10 entries depending on how many zones were detected:
+ *
+ *  7 entries  — only yellow/red/blue zones were reliably detected.
+ *    [0] gold inner (X-ring, interpolated)
+ *    [1] gold→red boundary  (detected)
+ *    [2] red inner          (interpolated)
+ *    [3] red→blue boundary  (detected)
+ *    [4] blue inner         (interpolated)
+ *    [5] blue→black boundary (detected)
+ *    [6] paper outer edge   (from boundary scan — serves as the miss line)
+ *
+ * 10 entries  — black and white zones were also reliably detected.
+ *    [0..5] same as above
+ *    [6] black inner        (interpolated)
+ *    [7] black→white boundary (detected)
+ *    [8] white inner        (interpolated)
+ *    [9] white outer        (regression-derived)
+ *
+ * In both cases index 0 = innermost (X-ring / bullseye) and the last index
+ * is the outermost ring beyond which a tip is scored as a miss.
  */
 export interface SingleTargetResult {
   rings: SplineRing[];
@@ -66,10 +83,6 @@ export interface SingleTargetResult {
  * Full detection result for an image, which may contain multiple targets.
  * Each entry in `targets` is one detected sheet of paper with its ring set.
  * `success` is true if at least one target was detected.
- *
- * @deprecated Single-target fields (`rings`, `paperBoundary`, `calibration`,
- * `ringPoints`, `rayDebug`) are kept for backwards compatibility; prefer
- * `targets[0]` for new code.
  */
 export interface ArcheryResult {
   /** Multi-target results. Length 0 if no targets found. */
@@ -141,7 +154,7 @@ function buildHsvCache(img: Uint8Array, n: number): Float64Array {
 }
 
 function applyHsvFilter(
-  _rgba: Uint8Array, width: number, height: number,
+  width: number, height: number,
   range: HsvRange,
   hsvCache: Float64Array,
 ): Uint8Array {
@@ -414,7 +427,7 @@ function extractBoundary(blob: Uint8Array, width: number, height: number): Pixel
 // Phase 1 — Adaptive colour detection
 // ---------------------------------------------------------------------------
 
-function computeMedianHue(rgba: Uint8Array, _width: number, pixelIndices: number[]): number {
+function computeMedianHue(rgba: Uint8Array, pixelIndices: number[]): number {
   const hues: number[] = [];
   for (const idx of pixelIndices) {
     const r = rgba[idx * 4], g = rgba[idx * 4 + 1], b = rgba[idx * 4 + 2];
@@ -431,6 +444,7 @@ interface ColorBlob {
   meanRadius: number;
   pixels: number[];
   boundary: Pixel[];
+  isDegenerate: boolean;
 }
 
 function computeCentroid(pixelIndices: number[], width: number): Pixel {
@@ -457,21 +471,22 @@ function computeMedianRadius(pixelIndices: number[], width: number, centroid: Pi
 }
 
 function detectColorBlob(
-  pretreated: Uint8Array, rgba: Uint8Array,
+  rgba: Uint8Array,
   width: number, height: number,
   color: 'yellow' | 'red' | 'blue',
   hsvCache: Float64Array,
   anchor?: { x: number; y: number },
-): ColorBlob | null {
-  const minPx = width * height * 0.001;
+): ColorBlob  {
 
   // Pass 1 — wide initial range on pretreated image
-  const mask1 = applyHsvFilter(pretreated, width, height, COLOUR_RANGES[color], hsvCache);
+  const mask1 = applyHsvFilter(width, height, COLOUR_RANGES[color], hsvCache);
   const blob1 = aggregateBlobs(mask1, width, height, 2.5, anchor);
-  if (blob1.pixelCount < minPx) return null;
+  if (blob1.pixels.length < 10) {
+    return { centroid: { x: 0, y: 0 }, meanRadius: 0, pixels: [], boundary: [], isDegenerate: true };
+  }
 
   // Pass 2 — adaptive re-centering based on actual hue in original image
-  const medHue = computeMedianHue(rgba, width, blob1.pixels);
+  const medHue = computeMedianHue(rgba, blob1.pixels);
   const lo = medHue - 22, hi = medHue + 22;
 
   let hRanges: [number, number][];
@@ -495,16 +510,18 @@ function detectColorBlob(
     vMin: COLOUR_RANGES[color].vMin,
   };
 
-  const mask2 = applyHsvFilter(pretreated, width, height, narrowRange, hsvCache);
+  const mask2 = applyHsvFilter(width, height, narrowRange, hsvCache);
   // Yellow is a solid disk — use tighter aggregation to exclude nearby hay-bale
   // or clothing pixels that sit just outside the target's yellow zone.
   const mergeThresholdFactor = 2.5;
   const blob2 = aggregateBlobs(mask2, width, height, mergeThresholdFactor, anchor);
-  if (blob2.pixelCount < minPx) return null;
+  if (blob2.pixels.length < 10) {
+    return { centroid: { x: 0, y: 0 }, meanRadius: 0, pixels: [], boundary: [], isDegenerate: true };
+  }
 
   const centroid   = computeCentroid(blob2.pixels, width);
   const meanRadius = computeMedianRadius(blob2.pixels, width, centroid);
-  return { centroid, meanRadius, pixels: blob2.pixels, boundary: extractBoundary(blob2.mask, width, height) };
+  return { centroid, meanRadius, pixels: blob2.pixels, boundary: extractBoundary(blob2.mask, width, height), isDegenerate: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -524,10 +541,16 @@ const ZONE_RATIOS: Record<'yellow' | 'red' | 'blue', number> = {
 };
 
 function arrayMean(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
   return values.reduce((s, v) => s + v, 0) / values.length;
 }
 
 function arrayMedian(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  } 
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
@@ -686,10 +709,10 @@ function filterRingOutliers(pts: Pixel[], cx: number, cy: number, maxDeviation: 
 interface BootstrapEstimate { cx: number; cy: number; w: number; }
 
 function estimateCenterAndScale(
-  blobs: Partial<Record<'yellow' | 'red' | 'blue', ColorBlob>>,
+  blobs: Record<'yellow' | 'red' | 'blue', ColorBlob>,
 ): BootstrapEstimate {
   const found = (['yellow', 'red', 'blue'] as const)
-    .filter(k => blobs[k] != null)
+    .filter(k => !blobs[k]!.isDegenerate)
     .map(k => [k, blobs[k]!] as ['yellow' | 'red' | 'blue', ColorBlob]);
 
   const cx = arrayMedian(found.map(([, b]) => b.centroid.x));
@@ -1050,10 +1073,8 @@ function detectRingDistancesOnRay(
       result[9] = Math.max(result[8] as number, Math.min(boundaryDist * 0.99, predictR(9)));
     }
   } else {
-    const r7safe = r7 ?? 8 * w;
     result[8] = 9  * w < boundaryDist ? 9  * w : null;
     result[9] = 10 * w < boundaryDist ? 10 * w : null;
-    void r7safe; // r7safe not needed in this branch but keeps TS happy
   }
 
   // Final guard: ensure all non-null distances are strictly increasing.
@@ -1296,7 +1317,7 @@ export function pointInPolygon(pt: Pixel, poly: TargetBoundary): boolean {
 interface BoundaryScan {
   /** Per-ray distance from (cx,cy) to the last non-background pixel. */
   dists: number[];
-  /** Last non-background pixel per ray — used for ring[9] ellipse fitting. */
+  /** Last non-background pixel per ray */
   points: Pixel[];
 }
 
@@ -1326,12 +1347,13 @@ function scanTargetBoundary(
     let lastValidD = startRadius;
 
     for (let d = Math.max(1, Math.round(startRadius)); ; d++) {
-      const x = cx + d * cosT, y = cy + d * sinT;
+      const x = Math.round(cx + d * cosT);
+      const y = Math.round(cy + d * sinT);
       if (x < 0 || x >= width || y < 0 || y >= height) {
         dists[i] = lastValidD;
         break;
       }
-      const pidx = (Math.round(y) * width + Math.round(x)) * 4;
+      const pidx = (y * width + x) * 4;
       const [h, s, v] = rgbToHsv(rgba[pidx], rgba[pidx + 1], rgba[pidx + 2]);
       // Hay bale: brownish-yellow, moderately saturated, NOT very dark.
       // The V > 0.15 floor is critical: the black scoring zone has H ≈ 15–65°
@@ -1468,6 +1490,12 @@ function runDetectionPipeline(
     pts => filterRingOutliers(pts, cx, cy, w * 0.15),
   );
 
+  // Decide whether outer zones (black/white) were genuinely detected.
+  // Must be captured BEFORE the R2 clamp below, which can synthetically rebuild
+  // transitionPoints[7] from ring[5], masking the real detection count.
+  // Threshold: ≥ 25 % of rays (8/32) must have seen the black→white transition.
+  const outerZoneDetected = transitionPoints[7].length >= Math.ceil(N_RINGS / 4);
+
   // Fix R2: ratio-based sanity clamp for ring[7].
   // Expected r7/r5 ≈ 8/6 ≈ 1.333 (WA zone boundaries at 8w and 6w respectively).
   // Under uneven evening/indoor lighting the luminance-gradient scan can latch onto
@@ -1547,17 +1575,45 @@ function runDetectionPipeline(
     };
   })();
 
-  // ringPoints only exposes the 4 directly-detected colour-transition rings
-  // (indices 1,3,5,7) plus the regression-derived white rings (8,9).
-  const detectedRingPoints = transitionPoints.map((pts, i) =>
-    [0, 2, 4, 6].includes(i) ? [] : pts,
-  );
+  // Assemble the final ring set: 10 rings when outer zones were reliably
+  // detected, 7 rings otherwise.  In the 7-ring case rings[6] is built from
+  // the boundary scan (smoothedPoints) and acts as the miss line — any tip
+  // outside it is scored as 0 regardless of the paper edge.
+  let finalRings: SplineRing[];
+  let finalRingPoints: Pixel[][];
+
+  if (outerZoneDetected) {
+    // Full 10-ring set: yellow/red/blue/black/white zones all reliable.
+    finalRings = orderedRings;
+    finalRingPoints = transitionPoints.map((pts, i) =>
+      [0, 2, 4, 6].includes(i) ? [] : pts,
+    );
+  } else {
+    // Only yellow/red/blue zones reliably detected.
+    // Subsample smoothedPoints to ~12 control points (same density as other splines)
+    // and use the result as rings[6] — the outermost boundary.
+    const boundaryStep = Math.max(1, Math.round(smoothedPoints.length / 12));
+    const outerBoundaryRing = radialProfileToSpline(
+      smoothedPoints.filter((_, i) => i % boundaryStep === 0),
+      cx, cy,
+    );
+    finalRings = [...orderedRings.slice(0, 6), outerBoundaryRing];
+    finalRingPoints = [
+      [],                   // ring[0]: interpolated gold inner
+      transitionPoints[1],  // ring[1]: gold→red  (detected)
+      [],                   // ring[2]: interpolated red inner
+      transitionPoints[3],  // ring[3]: red→blue  (detected)
+      [],                   // ring[4]: interpolated blue inner
+      transitionPoints[5],  // ring[5]: blue→black (detected)
+      smoothedPoints,       // ring[6]: boundary scan points
+    ];
+  }
 
   return {
-    rings: orderedRings,
+    rings: finalRings,
     paperBoundary,
     calibration,
-    ringPoints: detectedRingPoints,
+    ringPoints: finalRingPoints,
     rayDebug: rayDebug.length > 0 ? rayDebug : undefined,
   };
 }
@@ -1578,23 +1634,19 @@ export function findTarget(
     const pretreatedHsv = buildHsvCache(pretreated, ds.width * ds.height);
 
     const blobs = {
-      yellow: detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'yellow', pretreatedHsv),
-      red:    detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'red',    pretreatedHsv),
-      blue:   detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'blue',   pretreatedHsv),
+      yellow: detectColorBlob(ds.data, ds.width, ds.height, 'yellow', pretreatedHsv),
+      red:    detectColorBlob(ds.data, ds.width, ds.height, 'red',    pretreatedHsv),
+      blue:   detectColorBlob(ds.data, ds.width, ds.height, 'blue',   pretreatedHsv),
     };
     for (const blob of Object.values(blobs)) {
-      if (!blob) continue;
+      if (blob.isDegenerate) continue;
       blob.centroid.x *= BOOTSTRAP_SCALE;
       blob.centroid.y *= BOOTSTRAP_SCALE;
       blob.meanRadius *= BOOTSTRAP_SCALE;
     }
 
-    if (Object.values(blobs).every(b => b === null)) {
-      return { targets: [], success: false, error: 'No colour blobs found' };
-    }
-
     const { cx, cy, w } = estimateCenterAndScale(blobs);
-    if (w <= 0 || !isFinite(cx) || !isFinite(cy)) {
+    if (w <= 0 || !isFinite(w) || !isFinite(cx) || !isFinite(cy)) {
       return { targets: [], success: false, error: 'Invalid bootstrap estimate' };
     }
 
@@ -1639,27 +1691,20 @@ export function findRingSetFromCenter(
   // Blob detection biased toward the seed point (in downsampled coords).
   const anchorDs = { x: cx / BOOTSTRAP_SCALE, y: cy / BOOTSTRAP_SCALE };
   const blobs = {
-    yellow: detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'yellow', pretreatedHsv, anchorDs),
-    red:    detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'red',    pretreatedHsv, anchorDs),
-    blue:   detectColorBlob(pretreated, ds.data, ds.width, ds.height, 'blue',   pretreatedHsv, anchorDs),
+    yellow: detectColorBlob(ds.data, ds.width, ds.height, 'yellow', pretreatedHsv, anchorDs),
+    red:    detectColorBlob(ds.data, ds.width, ds.height, 'red',    pretreatedHsv, anchorDs),
+    blue:   detectColorBlob(ds.data, ds.width, ds.height, 'blue',   pretreatedHsv, anchorDs),
   };
   for (const blob of Object.values(blobs)) {
-    if (!blob) continue;
+    if (blob.isDegenerate) continue;
     blob.centroid.x *= BOOTSTRAP_SCALE;
     blob.centroid.y *= BOOTSTRAP_SCALE;
     blob.meanRadius *= BOOTSTRAP_SCALE;
   }
 
   // Estimate ring width from nearby blobs; use provided seed as centre (not blob centroid).
-  const foundBlobs = Object.values(blobs).filter(b => b !== null) as ColorBlob[];
   let w: number;
-  if (foundBlobs.length > 0) {
-    ({ w } = estimateCenterAndScale(blobs));
-  } else {
-    // No colour blobs found near seed — fall back to image-size heuristic.
-    // A standard target fills roughly 1/5 of the shorter image dimension.
-    w = Math.min(width, height) / 50;
-  }
+  ({ w } = estimateCenterAndScale(blobs));
 
   if (w <= 0 || !isFinite(w) || !isFinite(cx) || !isFinite(cy)) {
     throw new Error('Invalid scale estimate from seed');

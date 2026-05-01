@@ -7,7 +7,7 @@ Each sample:
   meta  : dict with filename, scale, pad_x, pad_y, orig_w, orig_h
 
 DB schema:
-  annotations.paper_boundary  JSONB  — [number, number][][] (one polygon per target)
+  annotations.paper_boundary  JSONB  — [number, number][][] (one polygon per target) or {"points": [number, number][]}[] (new format with extra fields for future use)
 
 Split: 90 % train / 10 % val by deterministic filename hash (independent of
        the arrow detector split).
@@ -16,6 +16,7 @@ Split: 90 % train / 10 % val by deterministic filename hash (independent of
 import hashlib
 import json
 import os
+import logging
 
 import torch
 import albumentations as A
@@ -39,6 +40,7 @@ IMAGES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'images')
 IMAGENET_GRAY_MEAN = 0.449   # approximate grayscale mean of ImageNet
 IMAGENET_GRAY_STD  = 0.226
 
+logger = logging.getLogger(__name__)
 
 # ── geometry helpers ──────────────────────────────────────────────────────────
 
@@ -101,14 +103,12 @@ def erode_mask(mask: np.ndarray, px: int) -> np.ndarray:
 
 
 def polygon_area(poly) -> float:
-    """Shoelace formula."""
-    n = len(poly)
-    if n < 3:
+    """Shoelace formula (vectorised)."""
+    if len(poly) < 3:
         return 0.0
-    xs = [p[0] for p in poly]
-    ys = [p[1] for p in poly]
-    area = sum(xs[i] * ys[(i+1) % n] - xs[(i+1) % n] * ys[i] for i in range(n))
-    return abs(area) / 2.0
+    pts = np.asarray(poly, dtype=np.float64)
+    xs, ys = pts[:, 0], pts[:, 1]
+    return float(abs(np.dot(xs, np.roll(ys, -1)) - np.dot(np.roll(xs, -1), ys)) / 2.0)
 
 
 def val_split(filename: str) -> bool:
@@ -131,6 +131,17 @@ def build_augment() -> A.Compose:
 # ── dataset ───────────────────────────────────────────────────────────────────
 
 class BoundaryDataset(Dataset):
+    
+    def _isTargetBoundary(self, poly) -> bool:
+        return isinstance(poly, dict) and 'points' in poly and isinstance(poly['points'], list) and len(poly['points']) >= 3 
+
+    def _isListOfBoundaries(self, boundaries) -> bool:
+        return isinstance(boundaries, list) and all(self._isTargetBoundary(poly) for poly in boundaries)
+
+    def _isOldFormatBoundary(self, boundary) -> bool:
+        return isinstance(boundary, list) and all(isinstance(poly, list) and len(poly) >= 3 for poly in boundary)
+
+
     """
     Args:
         split: 'train' or 'val'
@@ -138,7 +149,6 @@ class BoundaryDataset(Dataset):
         images_dir: path to image directory
         augment: if True apply augmentation (train only)
     """
-
     def __init__(
         self,
         split: str = 'train',
@@ -173,7 +183,14 @@ class BoundaryDataset(Dataset):
             if split == 'train' and is_val:
                 continue
 
-            polys = boundary_j if isinstance(boundary_j, list) else json.loads(boundary_j)
+            if self._isListOfBoundaries(boundary_j):
+                polys = [poly['points'] for poly in boundary_j]
+            elif self._isOldFormatBoundary(boundary_j):
+                polys = boundary_j
+            else:
+                logger.warning(f"Skipping {fname} due to unrecognized boundary format")
+                continue
+
             # Filter degenerate polygons
             valid_polys = [p for p in polys if len(p) >= 3 and polygon_area(p) >= MIN_POLY_AREA]
             if not valid_polys:

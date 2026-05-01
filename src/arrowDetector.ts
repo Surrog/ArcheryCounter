@@ -5,14 +5,12 @@
  * letterbox pre-processing used during training and the standard heatmap-NMS
  * post-processing to return tip positions in original image coordinates.
  *
- * The ONNX session is created lazily and cached for the lifetime of the process.
- * Call `releaseSession()` to free it explicitly (e.g. on app background).
- *
  * Environment:
  *   - React Native app  → onnxruntime-react-native  (bundled as a static asset)
  *   - Node.js scripts   → onnxruntime-node           (loaded from the filesystem)
  */
 
+import { getSession, OnnxSession, releaseSession } from './ortComponents';
 import type { ScoredArrow } from './scoring';
 
 // ── constants (must match training) ──────────────────────────────────────────
@@ -120,39 +118,8 @@ function heatmapNMS(hm: Float32Array, H: number, W: number, k: number = NMS_KERN
 }
 
 // ── ONNX session (lazy, cached) ───────────────────────────────────────────────
+let sessionCache: OnnxSession | null = null;
 
-let _session: any = null;
-let _ort: any = null;
-
-async function getSession(modelPath: string): Promise<{ session: any; ort: any }> {
-  if (_session) return { session: _session, ort: _ort };
-
-  // Prefer onnxruntime-react-native in RN; fall back to onnxruntime-node in Node.js
-  let ort: any;
-  try {
-    ort = require('onnxruntime-react-native');
-  } catch {
-    try {
-      ort = require('onnxruntime-node');
-    } catch {
-      throw new Error(
-        'ONNX runtime not available. Install onnxruntime-node (Node.js) or onnxruntime-react-native (React Native).',
-      );
-    }
-  }
-
-  _session = await ort.InferenceSession.create(modelPath);
-  _ort = ort;
-  return { session: _session, ort: _ort };
-}
-
-export function releaseSession(): void {
-  if (_session) {
-    try { _session.release?.(); } catch {}
-    _session = null;
-    _ort = null;
-  }
-}
 
 // ── main inference function ───────────────────────────────────────────────────
 
@@ -176,10 +143,13 @@ export async function detectArrowsNN(
 ): Promise<ScoredArrow[]> {
   const { data, scale, padX, padY } = letterboxRgba(rgba, width, height);
 
-  const { session, ort } = await getSession(modelPath);
+  if (!sessionCache || sessionCache.currentModelPath !== modelPath) {
+    if (sessionCache && !sessionCache.isReleased) releaseSession(sessionCache);
+    sessionCache = await getSession(modelPath);
+  }
 
-  const inputTensor = new ort.Tensor('float32', data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-  const results = await session.run({ image: inputTensor });
+  const inputTensor = new sessionCache.ort.Tensor('float32', data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
+  const results = await sessionCache.session.run({ image: inputTensor });
 
   if (!results['tip_hm']) {
     throw new Error(
@@ -196,23 +166,28 @@ export async function detectArrowsNN(
 
   const tipHmRaw  = results['tip_hm'].data   as Float32Array;   // (1,1,HEATMAP_SIZE,HEATMAP_SIZE)
   const scoreRaw  = results['score_map'].data as Float32Array;   // (1,11,HEATMAP_SIZE,HEATMAP_SIZE)
-
+  const offsetMap = results['offset_map']?.data as Float32Array; // (1,2,HEATMAP_SIZE,HEATMAP_SIZE) or undefined
+  
   const tipHm = heatmapNMS(tipHmRaw, HEATMAP_SIZE, HEATMAP_SIZE);
 
-  type Peak = { hx: number; hy: number; confidence: number };
+  type Peak = { hx: number; hy: number; dx: number; dy: number; confidence: number };
   const peaks: Peak[] = [];
   for (let hy = 0; hy < HEATMAP_SIZE; hy++) {
     for (let hx = 0; hx < HEATMAP_SIZE; hx++) {
       const confidence = tipHm[hy * HEATMAP_SIZE + hx];
-      if (confidence > threshold) peaks.push({ hx, hy, confidence });
+      if (confidence > threshold) {
+        const dx = offsetMap ? offsetMap[hy * HEATMAP_SIZE + hx]                         : 0;
+        const dy = offsetMap ? offsetMap[HEATMAP_SIZE * HEATMAP_SIZE + hy * HEATMAP_SIZE + hx] : 0;
+        peaks.push({ hx, hy, dx, dy, confidence });
+      }
     }
   }
   peaks.sort((a, b) => b.confidence - a.confidence);
 
   const arrows: ScoredArrow[] = [];
-  for (const { hx, hy } of peaks.slice(0, maxDetections)) {
-    const lbx   = (hx + 0.5) * RATIO;
-    const lby   = (hy + 0.5) * RATIO;
+  for (const { hx, hy, dx, dy } of peaks.slice(0, maxDetections)) {
+    const lbx   = (hx + 0.5 + dx) * RATIO;
+    const lby   = (hy + 0.5 + dy) * RATIO;
     const origX = (lbx - padX) / scale;
     const origY = (lby - padY) / scale;
 
@@ -227,4 +202,11 @@ export async function detectArrowsNN(
   }
 
   return arrows;
+}
+
+export function releaseArrowSession(): void {
+  if (sessionCache && !sessionCache.isReleased) {
+    releaseSession(sessionCache);
+    sessionCache = null;
+  }
 }
