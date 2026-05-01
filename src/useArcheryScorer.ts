@@ -1,14 +1,13 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { launchImageLibrary } from 'react-native-image-picker';
-import ArcheryCounter, { RingEllipse } from './ArcheryCounter';
-import type { TargetBoundary, Pixel } from './targetDetection';
-import type { ArrowDetection } from './arrowDetection';
+import ArcheryCounter, { ScoredArrow } from './ArcheryCounter';
+import type { TargetResult } from './ArcheryCounter';
+import type { Pixel } from './targetDetection';
 
 export interface ScorerState {
   imageUri: string | null;
-  rings: RingEllipse[] | null;
-  paperBoundary: TargetBoundary | null;
-  arrows: ArrowDetection[] | null;
+  targets: TargetResult[] | null;
+  arrows: ScoredArrow[] | null;
   ringPoints: Pixel[][] | null;
   /** Original pixel dimensions of the image, as reported by the image picker */
   imageWidth: number | null;
@@ -19,8 +18,7 @@ export interface ScorerState {
 
 const initialState: ScorerState = {
   imageUri: null,
-  rings: null,
-  paperBoundary: null,
+  targets: null,
   arrows: null,
   ringPoints: null,
   imageWidth: null,
@@ -31,6 +29,8 @@ const initialState: ScorerState = {
 
 export function useArcheryScorer() {
   const [state, setState] = useState<ScorerState>(initialState);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const pickAndProcess = useCallback(async () => {
     const pickerResult = await launchImageLibrary({
@@ -50,11 +50,13 @@ export function useArcheryScorer() {
     setState({ ...initialState, loading: true });
 
     try {
-      const { rings, paperBoundary = null, arrows, ringPoints = null } = await ArcheryCounter.processImage(uri, asset.base64!);
-      setState({ imageUri: uri, rings, paperBoundary, arrows, ringPoints, imageWidth, imageHeight, loading: false, error: null });
+      const { targets, arrows, ringPoints = null } = await ArcheryCounter.processImage(uri, asset.base64!);
+      if (mountedRef.current) {
+        setState({ imageUri: uri, targets, arrows, ringPoints, imageWidth, imageHeight, loading: false, error: null });
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      setState({ ...initialState, error: message });
+      if (mountedRef.current) setState({ ...initialState, error: message });
     }
   }, []);
 

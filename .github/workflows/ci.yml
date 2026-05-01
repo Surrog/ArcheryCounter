@@ -41,8 +41,66 @@ jobs:
           DB_PASSWORD: postgres
           DB_NAME: postgres
 
-      - name: Run Jest
-        run: npm test -- --ci --testTimeout=120000
+      - name: Run Jest with coverage
+        run: npm run test:coverage -- --ci --testTimeout=120000
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_NAME: postgres
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 30
+
+  # ── Python: NN ground-truth tests ────────────────────────────────────────────
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Node (for DB seeding)
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Start Postgres
+        run: docker compose up -d postgres
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U postgres && break
+            sleep 1
+          done
+
+      - name: Seed DB from parquet
+        run: npm run seed-from-parquet
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_NAME: postgres
+
+      - name: Install Python test dependencies
+        working-directory: scripts/nn
+        run: uv sync --group dev
+
+      - name: Run Python tests
+        working-directory: scripts/nn
+        run: uv run pytest tests/ -v
         env:
           DB_HOST: localhost
           DB_PORT: 5432

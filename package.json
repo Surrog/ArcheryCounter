@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
+    "test:coverage": "jest --coverage",
     "visualize": "ts-node --transpile-only --project tsconfig.scripts.json scripts/visualize.ts",
     "annotate": "ts-node --transpile-only --project tsconfig.scripts.json scripts/annotate.ts",
     "dump-annotations": "node --no-warnings --import ts-node/esm scripts/dump-annotations.ts",
@@ -17,11 +18,14 @@
   "dependencies": {
     "@react-native/new-app-screen": "0.84.1",
     "jpeg-js": "^0.4.4",
+    "onnxruntime-node": "^1.24.3",
+    "onnxruntime-react-native": "^1.24.3",
     "react": "19.2.5",
     "react-native": "0.84.1",
     "react-native-image-picker": "^8.0.0",
     "react-native-safe-area-context": "^5.5.2",
-    "react-native-svg": "^15.15.3"
+    "react-native-svg": "^15.15.3",
+    "simplify-js": "^1.2.4"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

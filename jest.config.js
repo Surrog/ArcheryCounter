@@ -1,16 +1,16 @@
 module.exports = {
   preset: 'react-native',
-  maxWorkers: 2,
+  maxWorkers: 32,
+  globalSetup: '<rootDir>/src/__tests__/globalSetup.ts',
   testMatch: ['<rootDir>/src/__tests__/**/*.test.(ts|tsx)'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
-  moduleNameMapper: {
-    // Map the native module to our mock
-    '^./NativeArcheryCounter$': '<rootDir>/src/__mocks__/NativeArcheryCounter.ts',
-    '^../NativeArcheryCounter$': '<rootDir>/src/__mocks__/NativeArcheryCounter.ts',
-    // Map ArcheryCounter to our mock (for useArcheryScorer tests)
-    '^./ArcheryCounter$': '<rootDir>/src/__mocks__/NativeArcheryCounter.ts',
-    '^../ArcheryCounter$': '<rootDir>/src/__mocks__/NativeArcheryCounter.ts',
-  },
+  collectCoverageFrom: [
+    'src/**/*.ts',
+    '!src/**/__tests__/**',
+    '!src/**/__mocks__/**',
+  ],
+  coverageReporters: ['text', 'lcov'],
+  moduleNameMapper: {},
   transformIgnorePatterns: [
     'node_modules/(?!(react-native|@react-native|react-native-svg|react-native-image-picker)/)',
   ],

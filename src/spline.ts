@@ -8,6 +8,18 @@ export interface SplineRing {
   points: [number, number][];
 }
 
+export type RingSet = SplineRing[]; // One per target
+
+export function isSplineRing(x: unknown): x is SplineRing {
+  return typeof x === "object" && x != null &&
+    Array.isArray((x as SplineRing).points) &&
+    (x as SplineRing).points.every(([px, py]) => typeof px === "number" && typeof py === "number");
+}
+
+export function isRingSet(x: unknown): x is RingSet {
+  return Array.isArray(x) && x.length > 0 && x.every(r => isSplineRing(r));
+}
+
 /** Evaluates one Catmull-Rom segment at parameter t ∈ [0, 1]. */
 export function evalCatmullRom(
   p0: [number, number], p1: [number, number],
@@ -26,7 +38,8 @@ export function sampleClosedSpline(
   points: [number, number][], nSamples: number,
 ): [number, number][] {
   const K = points.length;
-  if (K < 2) return [...points] as [number, number][];
+  if (K === 0) return [];
+  if (K === 1) return Array.from({ length: nSamples }, () => points[0] as [number, number]);
   const result: [number, number][] = [];
   const sps = Math.ceil(nSamples / K);
   for (let k = 0; k < K; k++) {
@@ -56,6 +69,21 @@ export function pointInClosedSpline(
     }
   }
   return inside;
+}
+
+/** Returns the mean of all control-point coordinates. */
+export function splineCentroid(ring: SplineRing): [number, number] {
+  const n = ring.points.length;
+  return [
+    ring.points.reduce((s, p) => s + p[0], 0) / n,
+    ring.points.reduce((s, p) => s + p[1], 0) / n,
+  ];
+}
+
+/** Returns the mean distance from the centroid to each control point. */
+export function splineRadius(ring: SplineRing): number {
+  const [cx, cy] = splineCentroid(ring);
+  return ring.points.reduce((s, p) => s + Math.hypot(p[0] - cx, p[1] - cy), 0) / ring.points.length;
 }
 
 /**
