@@ -10,9 +10,7 @@
  */
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as crypto from 'crypto';
-import { spawn } from 'child_process';
 import { Pool } from 'pg';
 import { loadImageNode } from '../imageLoader';
 import { findTarget } from '../targetDetection';
@@ -20,9 +18,7 @@ import { findTarget } from '../targetDetection';
 import { expect, describe, afterAll, beforeAll, test } from '@jest/globals';
 
 
-const IMAGES_DIR    = path.resolve(__dirname, '../../images');
-const TSX_BIN       = path.resolve(__dirname, '../../node_modules/.bin/tsx');
-const CONCURRENCY   = Math.min(os.cpus().length, 4);
+const IMAGES_DIR = path.resolve(__dirname, '../../images');
 
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
@@ -99,6 +95,42 @@ beforeAll(async () => {
       updated_at     TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  const algHash = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(path.resolve(__dirname, '../targetDetection.ts')))
+    .digest('hex')
+    .slice(0, 16);
+
+  const { rows: genRows } = await db.query(
+    'SELECT filename, algorithm_hash FROM generated WHERE filename = ANY($1)',
+    [imageFiles],
+  );
+  const inGenerated = new Map<string, string>(genRows.map((r: any) => [r.filename as string, r.algorithm_hash as string]));
+
+  const pending = imageFiles.filter(f => inGenerated.get(f) !== algHash);
+
+  for (const filename of pending) {
+    const imgPath = path.join(IMAGES_DIR, filename);
+    const { rgba, width, height } = await loadImageNode(imgPath);
+    const result = findTarget(rgba, width, height);
+    // boundary: TargetBoundary[]  rings: SplineRing[][] (one ring-set per target)
+    const boundary = result.success ? result.targets.map(t => t.paperBoundary) : [];
+    const rings    = result.success ? result.targets.map(t => t.rings) : [];
+    await db.query(
+      `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+       VALUES ($1, $2, $3, $4, '[]', $5, $6)
+       ON CONFLICT (filename) DO UPDATE
+         SET algorithm_hash = EXCLUDED.algorithm_hash,
+             paper_boundary = EXCLUDED.paper_boundary,
+             rings          = EXCLUDED.rings,
+             arrows         = EXCLUDED.arrows,
+             width          = EXCLUDED.width,
+             height         = EXCLUDED.height,
+             updated_at     = NOW()`,
+      [filename, algHash, JSON.stringify(boundary), JSON.stringify(rings), width, height],
+    );
+  }
 }, 30 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
@@ -112,8 +144,10 @@ describe('findTarget', () => {
       [filename],
     );
     expect(rows.length).toBeGreaterThan(0);
-    const rings: SplineRing[] = rows[0].rings ?? [];
-    const paperBoundary: [number, number][] | null = rows[0].paper_boundary ?? null;
+    // DB stores rings as SplineRing[][] (one ring-set per target); take the first ring-set.
+    const rings: SplineRing[] = (rows[0].rings as SplineRing[][])?.[0] ?? [];
+    // DB stores paper_boundary as TargetBoundary[] ({points:[…]}[]); take the first target's points.
+    const paperBoundary: [number, number][] | null = rows[0].paper_boundary?.[0]?.points ?? null;
     const imgWidth: number | null  = rows[0].width  ?? null;
     const imgHeight: number | null = rows[0].height ?? null;
 

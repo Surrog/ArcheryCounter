@@ -236,11 +236,11 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
     const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
     expect(imageRes.status).toBe(200);
     const data = await imageRes.json() as {
-      detected: { targets: { paperBoundary: [number,number][]; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
+      generated: { targets: { paperBoundary: { points: [number,number][] }; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
     };
 
     // 4. Verify the response contains valid ring data (no null coordinates).
-    const rings = data.detected.targets?.[0]?.ringSets?.[0] ?? [];
+    const rings = data.generated.targets?.[0]?.ringSets?.[0] ?? [];
     expect(rings.length).toBeGreaterThan(0);
     for (const ring of rings) {
       for (const pt of ring.points) {
@@ -249,7 +249,7 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
         expect(typeof pt[0]).toBe('number');
       }
     }
-    expect(data.detected.targets?.[0]?.paperBoundary?.length).toBeGreaterThan(0);
+    expect(data.generated.targets?.[0]?.paperBoundary?.points?.length).toBeGreaterThan(0);
 
     // 5. Verify the DB generated row has been replaced with valid data.
     const db2 = new Pool(DB_CONFIG);
@@ -334,11 +334,11 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
     const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
     expect(imageRes.status).toBe(200);
     const data = await imageRes.json() as {
-      detected: { targets: { paperBoundary: [number,number][]; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
+      generated: { targets: { paperBoundary: { points: [number,number][] }; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
     };
 
     // After recompute, rings must be valid.
-    const rings = data.detected.targets?.[0]?.ringSets?.[0] ?? [];
+    const rings = data.generated.targets?.[0]?.ringSets?.[0] ?? [];
     expect(rings.length).toBeGreaterThan(0);
     for (const ring of rings) {
       for (const pt of ring.points) {
@@ -408,8 +408,8 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
   const currentHash = computeAlgorithmHash();
 
   // Inject a generated row with current hash but all-zero boundary.
-  const ZERO_BOUNDARY = JSON.stringify([[[0, 0], [0, 0], [0, 0], [0, 0]]]);
-  const ZERO_RINGS    = JSON.stringify([[[{ points: Array.from({ length: 8 }, () => [0, 0]) }]]]);
+  const ZERO_BOUNDARY = JSON.stringify([{ points: [[0, 0], [0, 0], [0, 0], [0, 0]] }]);
+  const ZERO_RINGS    = JSON.stringify([[{ points: Array.from({ length: 8 }, () => [0, 0]) }]]);
 
   const db = new Pool(DB_CONFIG);
   try {
@@ -440,11 +440,11 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
     const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
     expect(imageRes.status).toBe(200);
     const data = await imageRes.json() as {
-      detected: { targets: { paperBoundary: [number,number][]; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
+      generated: { targets: { paperBoundary: { points: [number,number][] }; ringSets: { points: [number,number][] }[][] }[]; arrows: unknown[] };
     };
 
     // After recompute, rings must have valid (non-zero) points.
-    const rings = data.detected.targets?.[0]?.ringSets?.[0] ?? [];
+    const rings = data.generated.targets?.[0]?.ringSets?.[0] ?? [];
     expect(rings.length).toBeGreaterThan(0);
     for (const ring of rings) {
       expect(ring.points.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);

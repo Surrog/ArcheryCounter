@@ -37,7 +37,8 @@ export async function getSession(modelPath: string): Promise<OnnxSession> {
   try {
     ort = await import('onnxruntime-node');
   } catch {
-    ort = await import('onnxruntime-react-native' as string) as typeof import('onnxruntime-node');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    ort = require('onnxruntime-react-native') as typeof import('onnxruntime-node');
   }
 
   const session = await ort.InferenceSession.create(modelPath);

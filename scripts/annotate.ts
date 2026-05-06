@@ -6,7 +6,7 @@ import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
 import { findTarget, findRingSetFromCenter } from '../src/targetDetection';
 import { detectArrowsNN } from '../src/arrowDetector';
-import { ImageData, generateddbToTargets, annotationToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
+import { ImageData, TargetData, generateddbToTargets, annotationToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
@@ -56,6 +56,10 @@ async function loadImage(imgPath: string, filename: string): Promise<ImageData> 
   }
 }
 
+function isValidDetected(targets: TargetData[]): boolean {
+  return targets.length > 0;
+}
+
 async function fetchGeneratedData(data: ImageData): Promise<[ImageData, boolean]>  {
   const { rows } = await db.query(
     'SELECT rings, paper_boundary, arrows FROM generated WHERE filename = $1',
@@ -66,10 +70,18 @@ async function fetchGeneratedData(data: ImageData): Promise<[ImageData, boolean]
   }
   if (rows.length > 1) {
     console.warn(`multiple rows for image : ${data.filename}`)
-  } 
+  }
 
   data.generated.targets = generateddbToTargets(rows[0].paper_boundary, rows[0].rings);
   data.generated.arrows = rows[0].arrows ?? [];
+
+  if (!isValidDetected(data.generated.targets)) {
+    logEvent('warn', 'invalid_generated', data.filename, 'empty or invalid target data — will recompute');
+    data.generated.targets = [];
+    data.generated.arrows = [];
+    return [data, false];
+  }
+
   console.log(`found generated data: ${JSON.stringify(data.generated, null, 2)}`) // I'm fine with this log being a bit noisy since generated data is the basis for annotation and we want to be sure it's loaded correctly
 
   return [data, true];
@@ -304,6 +316,10 @@ async function main(): Promise<void> {
         'Connection': 'keep-alive',
       });
       res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+      // Replay current generation status so late-joining clients don't miss events.
+      for (const [f, state] of generationStatus) {
+        res.write(`data: ${JSON.stringify({ type: 'status', filename: f, state })}\n\n`);
+      }
       sseClients.add(res);
       req.on('close', () => sseClients.delete(res));
 
@@ -336,6 +352,7 @@ async function main(): Promise<void> {
           }
   
           if (!isReady) {
+            logEvent('info', 'fallback_slow_path', filename, 'running full detection');
             imageData = await computeGeneratedData(filename, imgPath, imageData)
           }
 
@@ -471,7 +488,7 @@ async function main(): Promise<void> {
     console.log('Press Ctrl+C to stop.');
     if (!process.env.NO_BROWSER) require('child_process').exec(`open http://localhost:${PORT}`);
 
-    fs.watch(IMAGES_DIR, (event, name) => {
+    fs.watch(IMAGES_DIR, (_event, name) => {
       if (!name || !/\.(jpg|jpeg)$/i.test(name)) return;
       if (filenames.includes(name)) return;
       const fullPath = path.join(IMAGES_DIR, name);
@@ -483,6 +500,27 @@ async function main(): Promise<void> {
         broadcastSSE({ type: 'new_image', filename: name });
       }, 500);
     });
+
+    // Process stale images in the background so clients see generation progress via SSE.
+    const staleImages = filenames.filter(f => inGenerated.get(f) !== currentHash);
+    if (staleImages.length > 0) {
+      console.log(`Background queue: ${staleImages.length} stale image(s) to process`);
+      (async () => {
+        for (const filename of staleImages) {
+          if (inGenerated.get(filename) === currentHash) continue; // already processed by a request
+          const imgPath = path.join(IMAGES_DIR, filename);
+          if (!fs.existsSync(imgPath)) continue;
+          try {
+            const imageData = await loadImage(imgPath, filename);
+            await computeGeneratedData(filename, imgPath, imageData);
+          } catch (err) {
+            console.error(`Background processing failed for ${filename}:`, err);
+            logEvent('error', 'background_compute_failed', filename, String(err));
+            broadcastSSE({ type: 'status', filename, state: 'error' });
+          }
+        }
+      })();
+    }
   });
 }
 
