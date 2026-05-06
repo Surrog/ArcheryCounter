@@ -879,8 +879,14 @@ export function classifyPixelZone(
     let dh = Math.abs(h - rh);
     if (dh > 180) dh = 360 - dh;
     const avgS = (s + rs) / 2;
+    // For achromatic zones (both pixel and reference have low saturation), hue is
+    // physically undefined — a white-balance correction can rotate it by up to 180°
+    // while the actual zone colour hasn't changed.  Suppress the hue term so that
+    // black/white classification is driven purely by S and V, where the contrast
+    // between the zones is unambiguous.
+    const hueWeight = avgS > 0.15 ? (1 + avgS * 2) : 0;
     const dist = Math.sqrt(
-      ((dh / 180) * (1 + avgS * 2)) ** 2 +
+      ((dh / 180) * hueWeight) ** 2 +
       ((s - rs) * 1.2) ** 2 +
       (v - rv) ** 2,
     );
