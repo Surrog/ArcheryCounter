@@ -144,7 +144,7 @@ export async function detectArrowsNN(
   const { data, scale, padX, padY } = letterboxRgba(rgba, width, height);
 
   if (!sessionCache || sessionCache.currentModelPath !== modelPath) {
-    if (sessionCache && !sessionCache.isReleased) releaseSession(sessionCache);
+    if (sessionCache && !sessionCache.isReleased) releaseArrowSession();
     sessionCache = await getSession(modelPath);
   }
 

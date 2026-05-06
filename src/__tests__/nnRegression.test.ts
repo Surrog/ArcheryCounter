@@ -33,7 +33,7 @@ import { describe, expect, jest, beforeAll, it } from '@jest/globals';
 
 
 import { letterboxGray, extractPolygons, releaseBoundarySession } from '../boundaryDetector';
-import { letterboxRgba, releaseSession as releaseArrowSession } from '../arrowDetector';
+import { letterboxRgba, releaseArrowSession } from '../arrowDetector';
 
 // ── paths ──────────────────────────────────────────────────────────────────
 
@@ -423,7 +423,7 @@ describe('extractPolygons with empty/uniform logits', () => {
 describe('arrowDetector: throws descriptive error when ONNX output key is wrong', () => {
   it('throws an error mentioning "tip_hm" when model returns wrong output keys', async () => {
     let detectArrowsNN!: typeof import('../arrowDetector').detectArrowsNN;
-    let releaseSession!: typeof import('../arrowDetector').releaseSession;
+    let releaseArrowSession!: typeof import('../arrowDetector').releaseArrowSession;
 
     jest.isolateModules(() => {
       jest.doMock('onnxruntime-node', () => ({
@@ -439,12 +439,12 @@ describe('arrowDetector: throws descriptive error when ONNX output key is wrong'
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const mod = require('../arrowDetector');
       detectArrowsNN = mod.detectArrowsNN;
-      releaseSession  = mod.releaseSession;
+      releaseArrowSession  = mod.releaseArrowSession;
     });
 
     const rgba = new Uint8Array(4 * 4 * 4).fill(128);
     await expect(detectArrowsNN(rgba, 4, 4, '/fake/arrow.onnx')).rejects.toThrow(/tip_hm/);
-    releaseSession();
+    releaseArrowSession();
   });
 });
 
