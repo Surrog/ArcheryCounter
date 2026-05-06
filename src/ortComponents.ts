@@ -35,7 +35,8 @@ export interface OnnxSession {
 export async function getSession(modelPath: string): Promise<OnnxSession> {
   let ort: typeof import('onnxruntime-node');
   try {
-    ort = await import('onnxruntime-node');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    ort = require('onnxruntime-node') as typeof import('onnxruntime-node');
   } catch {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     ort = require('onnxruntime-react-native') as typeof import('onnxruntime-node');

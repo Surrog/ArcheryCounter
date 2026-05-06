@@ -261,7 +261,7 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
       expect(rows).toHaveLength(1);
       expect(rows[0].algorithm_hash).toBe(currentHash);
       expect(rows[0].rings.length).toBeGreaterThan(0);
-      expect(rows[0].rings[0][0][0].points[0][0]).not.toBeNull();
+      expect(rows[0].rings[0][0].points[0][0]).not.toBeNull();
     } finally {
       await db2.end();
     }
@@ -363,29 +363,32 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
 // annotate: all-zero paper_boundary in annotations is healed at read time
 // ---------------------------------------------------------------------------
 
-test('annotate: zero boundary in annotations is deleted (marked not-annotated) at read time', async () => {
+test('annotate: zero boundary in annotations is treated as unannotated at read time', async () => {
   const FILENAME = '20190321_211008.jpg';
   const currentHash = computeAlgorithmHash();
 
-  // 1. Put a valid boundary in generated and an all-zero boundary in annotations.
-  const VALID_BOUNDARY = JSON.stringify([[[100, 200], [500, 100], [600, 800], [50, 750]]]);
-  const ZERO_BOUNDARY  = JSON.stringify([[[0, 0], [0, 0], [0, 0], [0, 0]]]);
+  // 1. Put a valid boundary in generated (fast-path ready) and an all-zero
+  //    boundary in annotations (new TargetBoundary[] format with all-zero points).
+  const VALID_BOUNDARY = JSON.stringify([{ points: [[100, 200], [500, 100], [600, 800], [50, 750]] }]);
+  const ZERO_BOUNDARY  = JSON.stringify([{ points: [[0, 0], [0, 0], [0, 0], [0, 0]] }]);
 
   const db = new Pool(DB_CONFIG);
   try {
     await db.query(`
       INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
-      VALUES ($1, $2, $3, '[[[]]]', '[]')
+      VALUES ($1, $2, $3, '[]', '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash,
-            paper_boundary = EXCLUDED.paper_boundary
+            paper_boundary = EXCLUDED.paper_boundary,
+            rings          = '[]'
     `, [FILENAME, currentHash, VALID_BOUNDARY]);
 
     await db.query(`
       INSERT INTO annotations (filename, paper_boundary, rings, arrows)
-      VALUES ($1, $2, '[[[]]]', '[]')
+      VALUES ($1, $2, '[]', '[]')
       ON CONFLICT (filename) DO UPDATE
-        SET paper_boundary = EXCLUDED.paper_boundary
+        SET paper_boundary = EXCLUDED.paper_boundary,
+            rings          = '[]'
     `, [FILENAME, ZERO_BOUNDARY]);
   } finally {
     await db.end();
@@ -397,7 +400,35 @@ test('annotate: zero boundary in annotations is deleted (marked not-annotated) a
     env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-}, 60_000);
+
+  try {
+    await waitForAnnotateReady(proc, port, 30_000);
+
+    // 2. Request the image — the server reads the valid generated boundary
+    //    (fast path) and the all-zero annotation boundary.
+    const imageRes = await fetch(`http://localhost:${port}/api/image/${encodeURIComponent(FILENAME)}`);
+    expect(imageRes.status).toBe(200);
+    const data = await imageRes.json() as {
+      generated: { targets: unknown[] };
+      annotated:  { targets: unknown[] };
+    };
+
+    // Generated side: valid boundary → at least one target.
+    expect(data.generated.targets.length).toBeGreaterThan(0);
+    // Annotated side: all-zero boundary → annotationToTargets skips it → no targets.
+    expect(data.annotated.targets.length).toBe(0);
+  } finally {
+    try { proc.kill('SIGTERM'); } catch {}
+    // Remove the rows so subsequent tests don't inherit this test's state.
+    const db2 = new Pool(DB_CONFIG);
+    try {
+      await db2.query('DELETE FROM generated   WHERE filename = $1', [FILENAME]);
+      await db2.query('DELETE FROM annotations WHERE filename = $1', [FILENAME]);
+    } finally {
+      await db2.end();
+    }
+  }
+}, 300_000);
 
 // ---------------------------------------------------------------------------
 // annotate: all-zero boundary in generated triggers recompute (isValidDetected)

@@ -101,8 +101,7 @@ async function fetchAnnotationData(data: ImageData): Promise<[ImageData, boolean
 
   data.annotated.targets = annotationToTargets(rows[0].paper_boundary, rows[0].rings);
   data.annotated.arrows = rows[0].arrows ?? [];
-  console.log(`found annotation data: ${JSON.stringify(data.annotated, null, 2)}`) // I'm fine with this log being a bit noisy since annotation data is the main source of truth and we want to be sure it's loaded correctly
-
+  console.log(`found annotation data: ${JSON.stringify(data.annotated, null, 2)}`); // I'm fine with this log being a bit noisy since annotation data is the main source of truth and we want to be sure it's loaded correctly
   return [data, true];
 }
 
