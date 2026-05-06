@@ -986,13 +986,19 @@ function detectRingDistancesOnRay(
   //      Real zones are ~1w wide; shafts/reflections are typically < 0.3w.
   const SEQUENCE: ZoneName[] = ['gold', 'red', 'blue', 'black', 'white'];
   const TRANSITION_EXPECTED_W = [2, 4, 6, 8];
-  const MIN_STREAK     = 10;
+  // Inner transitions (gold→red, red→blue) are highly saturated → easy to classify,
+  // keep a strict streak.  Outer transitions (blue→black, black→white) are low-
+  // saturation zones where the classifier is more uncertain: a shorter streak reduces
+  // missed detections at the cost of very slightly higher false-positive risk (still
+  // guarded by MIN_ZONE_WIDTH below).
+  const MIN_STREAK_PER_TRANSITION = [10, 10, 6, 6];
   const MIN_ZONE_WIDTH = Math.round(w * 0.4);
   const transitionDist: (number | null)[] = Array(4).fill(null);
 
   for (let ti = 0; ti < 4; ti++) {
     const fromZone = SEQUENCE[ti], toZone = SEQUENCE[ti + 1];
     const minD = TRANSITION_EXPECTED_W[ti] * w * 0.5;
+    const minStreak = MIN_STREAK_PER_TRANSITION[ti];
     let sawFrom = false, streakTo = 0, streakStart = -1;
     for (let i = 0; i < smooth.length; i++) {
       const z = smooth[i];
@@ -1000,7 +1006,7 @@ function detectRingDistancesOnRay(
       else if (sawFrom && z === toZone) {
         if (streakTo === 0) streakStart = i;
         streakTo++;
-        if (streakTo >= MIN_STREAK) {
+        if (streakTo >= minStreak) {
           const transD = dArr[streakStart];
           if (transD >= minD) {
             let zoneWidth = streakTo;
@@ -1493,8 +1499,12 @@ function runDetectionPipeline(
   // Decide whether outer zones (black/white) were genuinely detected.
   // Must be captured BEFORE the R2 clamp below, which can synthetically rebuild
   // transitionPoints[7] from ring[5], masking the real detection count.
-  // Threshold: ≥ 25 % of rays (8/32) must have seen the black→white transition.
-  const outerZoneDetected = transitionPoints[7].length >= Math.ceil(N_RINGS / 4);
+  // Threshold: ≥ ~19 % of rays (6/32).  The R2 clamp fills the remaining angles
+  // by scaling ring[5] outward by the expected 8/6 ratio, so a sparse but consistent
+  // set of detections is sufficient evidence that the outer zones are present.
+  // (Was Math.ceil(N_RINGS / 4) = 8; lowered to handle photos with uneven or dim
+  // outdoor lighting where the low-saturation outer zones are hard to classify.)
+  const outerZoneDetected = transitionPoints[7].length >= Math.ceil(N_RINGS * 3 / 16);
 
   // Fix R2: ratio-based sanity clamp for ring[7].
   // Expected r7/r5 ≈ 8/6 ≈ 1.333 (WA zone boundaries at 8w and 6w respectively).
