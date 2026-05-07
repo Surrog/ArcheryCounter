@@ -210,10 +210,11 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
   const db = new Pool(DB_CONFIG);
   try {
     await db.query(`
-      INSERT INTO generated (filename, algorithm_hash, rings, arrows)
-      VALUES ($1, $2, $3, '[]')
+      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      VALUES ($1, $2, NULL, $3, '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash,
+            paper_boundary = EXCLUDED.paper_boundary,
             rings          = EXCLUDED.rings
     `, [FILENAME, currentHash, CORRUPT_RINGS]);
   } finally {
@@ -310,10 +311,11 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
   const db = new Pool(DB_CONFIG);
   try {
     await db.query(`
-      INSERT INTO generated (filename, algorithm_hash, rings, arrows)
-      VALUES ($1, $2, $3, '[]')
+      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      VALUES ($1, $2, NULL, $3, '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash,
+            paper_boundary = EXCLUDED.paper_boundary,
             rings          = EXCLUDED.rings
     `, [FILENAME, currentHash, OLD_FORMAT_RINGS]);
   } finally {

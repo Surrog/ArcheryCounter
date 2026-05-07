@@ -127,7 +127,8 @@ beforeAll(async () => {
              arrows         = EXCLUDED.arrows,
              width          = EXCLUDED.width,
              height         = EXCLUDED.height,
-             updated_at     = NOW()`,
+             updated_at     = NOW()
+         WHERE generated.algorithm_hash <> EXCLUDED.algorithm_hash`,
       [filename, algHash, JSON.stringify(boundary), JSON.stringify(rings), width, height],
     );
   }
