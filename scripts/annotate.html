@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>ArcheryCounter — Annotation Tool</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1a1a; color: #e0e0e0; font-family: system-ui, sans-serif; display: flex; height: 100vh; overflow: hidden; }
+
+    #sidebar {
+      width: 280px; min-width: 220px; max-width: 340px;
+      background: #232323; border-right: 1px solid #333;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    #sidebar-header { padding: 12px 14px 8px; border-bottom: 1px solid #333; }
+    #sidebar-header h1 { font-size: 1rem; color: #ccc; margin-bottom: 8px; }
+    #controls { display: flex; flex-direction: column; gap: 6px; }
+    #controls button { background: #2e6b3e; color: #fff; border: none; border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 0.8rem; text-align: left; }
+    #controls button:hover { background: #3a8a50; }
+    #controls button.danger { background: #7a2222; }
+    #controls button.danger:hover { background: #9a3232; }
+    #controls button.active-mode { background: #8a5a00; }
+    #controls button.active-mode:hover { background: #aa7200; }
+    #controls button.save-disabled { background: #1e4428; color: #666; cursor: default; }
+    #controls button.save-disabled:hover { background: #1e4428; }
+    #controls button.secondary { background: #2a3a5a; }
+    #controls button.secondary:hover { background: #3a4a7a; }
+    #status-msg { font-size: 0.75rem; color: #e07070; padding: 4px 0 0; display: none; line-height: 1.4; }
+    #status-msg.ok { color: #70e070; }
+    #status-msg.fail { color: #e07070; }
+    #controls .divider { border: none; border-top: 1px solid #333; margin: 2px 0; }
+
+    #toolbar { padding: 8px 14px; border-bottom: 1px solid #333; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+    #toolbar label { font-size: 0.78rem; color: #aaa; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    #legend { font-size: 0.7rem; color: #666; width: 100%; margin-top: 2px; }
+
+    #view-toggle { display: flex; gap: 0; border: 1px solid #444; border-radius: 4px; overflow: hidden; width: 100%; margin-bottom: 2px; }
+    #view-toggle button {
+      flex: 1; padding: 4px 8px; font-size: 0.78rem; border: none; cursor: pointer;
+      background: #2a2a2a; color: #888; transition: background 0.15s, color 0.15s;
+    }
+    #view-toggle button:not(:last-child) { border-right: 1px solid #444; }
+    #view-toggle button.active { background: #1a3a5c; color: #4a9eff; font-weight: 600; }
+    #view-toggle button:hover:not(.active) { background: #333; color: #ccc; }
+    #view-generated-badge {
+      display: none; font-size: 0.68rem; color: #4a9eff; padding: 2px 6px;
+      background: #0d2035; border-radius: 3px; width: 100%; text-align: center;
+    }
+
+    #score-picker {
+      display: none; position: fixed; z-index: 200;
+      gap: 4px; align-items: center; flex-wrap: nowrap;
+      background: #1c1c1c; border: 1px solid #555; border-radius: 6px;
+      padding: 7px 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+      pointer-events: auto;
+    }
+    #score-picker .sp-label { font-size: 0.78rem; color: #FF8C00; white-space: nowrap; margin-right: 2px; }
+    #score-picker button { padding: 3px 7px; font-size: 0.78rem; border: 1px solid #555; border-radius: 3px; background: #2a2a2a; color: #ddd; cursor: pointer; white-space: nowrap; }
+    #score-picker button:hover { background: #3a3a3a; }
+    #score-picker button.gold { background: #5a4a00; color: #FFD700; border-color: #FFD700; font-weight: bold; }
+    #score-picker button.gold:hover { background: #7a6400; }
+    #score-picker button.miss { background: #3a2a2a; color: #999; }
+    #score-picker button.miss:hover { background: #4a3a3a; }
+
+    #img-filter { display: flex; gap: 0; border: 1px solid #333; border-radius: 4px; overflow: hidden; margin: 6px 14px 0; flex-shrink: 0; }
+    #img-filter button { flex: 1; padding: 4px 6px; font-size: 0.72rem; border: none; cursor: pointer; background: #2a2a2a; color: #666; }
+    #img-filter button:not(:last-child) { border-right: 1px solid #333; }
+    #img-filter button.active { background: #1a3a5c; color: #4a9eff; font-weight: 600; }
+    #img-filter button:hover:not(.active) { background: #333; color: #aaa; }
+    #img-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .img-btn {
+      width: 100%; text-align: left; background: none; border: none; color: #ccc;
+      padding: 7px 14px; font-size: 0.78rem; cursor: pointer; display: flex; align-items: center; gap: 6px;
+      border-left: 3px solid transparent;
+    }
+    .img-btn:hover { background: #2a2a2a; }
+    .img-btn.active { background: #1a3a5c; border-left-color: #4a9eff; color: #fff; }
+    .img-btn.modified { color: #f0a030; }
+    .img-btn .mod-dot { width: 6px; height: 6px; border-radius: 50%; background: #f0a030; flex-shrink: 0; }
+    .img-btn .spacer  { width: 6px; flex-shrink: 0; }
+    /* AW-5: generation status dot */
+    .gen-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; margin-left: auto; }
+    .gen-dot.ready    { background: #4a9eff; }
+    .gen-dot.annotated{ background: #2ecc71; }
+    .gen-dot.computing{ background: #f0a030; animation: gen-pulse 1s ease-in-out infinite; }
+    .gen-dot.queued   { background: #555; }
+    .gen-dot.error    { background: #e74c3c; }
+    @keyframes gen-pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    /* AW-3: collapsible data panel */
+    #data-panel { border-top: 1px solid #333; font-size: 0.72rem; flex-shrink: 0; }
+    #data-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 14px 6px; cursor: pointer; user-select: none;
+    }
+    #data-panel-header h3 { color: #888; font-size: 0.75rem; font-weight: 600; margin: 0; }
+    #btn-collapse-data { background: none; border: none; color: #555; cursor: pointer; font-size: 0.75rem; padding: 0 2px; }
+    #btn-collapse-data:hover { color: #aaa; }
+    #data-table-wrap { padding: 0 14px 10px; overflow-y: auto; max-height: 220px; }
+    #data-panel.collapsed #data-table-wrap { display: none; }
+    #data-panel table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+    #data-panel th { color: #666; font-weight: 600; padding: 2px 4px; text-align: left; }
+    #data-panel td { color: #aaa; font-family: monospace; padding: 2px 4px; border-top: 1px solid #2a2a2a; }
+    #data-panel td.score-cell { cursor: pointer; color: #FF8C00; }
+    #data-panel td.score-cell:hover { text-decoration: underline; }
+    #data-table .target-header:hover { color: #4a9eff !important; }
+    #data-table .rs-row:hover td { color: #ccc !important; cursor: pointer; }
+
+    /* AW-4: suggested score highlight */
+    #score-picker button.suggested { outline: 2px solid #4a9eff; outline-offset: 1px; }
+
+    #main { flex: 1; display: flex; align-items: flex-start; justify-content: center; overflow: auto; background: #111; padding: 16px; position: relative; }
+    #svg-container { position: relative; margin: auto; }
+    .img-wrap { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+    .img-wrap img { display: block; max-width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
+    .img-wrap svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: visible; cursor: default; }
+    .img-wrap svg.dragging { cursor: grabbing; }
+    .img-wrap svg.add-arrow-mode { cursor: crosshair; }
+    .handle { cursor: grab; }
+    .handle:active { cursor: grabbing; }
+
+    .loading-wrap {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 12px; color: #888; font-size: 0.85rem; min-width: 300px; min-height: 200px;
+    }
+    .loading-bar-track {
+      width: 260px; height: 4px; background: #2a2a2a; border-radius: 2px; overflow: hidden;
+    }
+    .loading-bar-fill {
+      height: 100%; width: 40%; background: #4a9eff; border-radius: 2px;
+      animation: loading-slide 1.2s ease-in-out infinite;
+    }
+    @keyframes loading-slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(750%); }
+    }
+  </style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>Annotation Tool</h1>
+    <div id="controls">
+      <button id="btn-save">Save</button>
+      <div id="status-msg"></div>
+      <button id="btn-add-arrow">Add arrow (A)</button>
+      <button id="btn-add-ringset">Add ring set (R)</button>
+      <button id="btn-remove-ringset" class="secondary">Remove ring set</button>
+      <hr class="divider"/>
+      <button id="btn-reset-boundaries" class="secondary">Reset boundaries</button>
+      <button id="btn-reset-rings" class="secondary">Reset rings</button>
+      <button id="btn-reset-arrows" class="secondary">Reset arrows</button>
+      <button id="btn-reset">Reset all</button>
+      <button id="btn-delete" class="danger">Delete image</button>
+    </div>
+  </div>
+  <div id="toolbar">
+    <div id="view-toggle">
+      <button id="btn-view-annotated" class="active">Annotated</button>
+      <button id="btn-view-generated">Generated</button>
+    </div>
+    <div id="view-generated-badge">read-only · algorithm output</div>
+    <label><input type="checkbox" id="chk-rings" checked/> Rings</label>
+    <label><input type="checkbox" id="chk-boundary" checked/> Boundary</label>
+    <label><input type="checkbox" id="chk-arrows" checked/> Arrows</label>
+    <div id="legend">
+      Ctrl+click boundary: add vertex · Alt+click ring: add point · Shift+click vertex/ring pt/arrow: remove · A: add arrow · R: add ring set
+    </div>
+  </div>
+  <div id="img-filter">
+    <button id="filter-all" class="active">All</button>
+    <button id="filter-annotated">Annotated</button>
+    <button id="filter-unannotated">Unannotated</button>
+  </div>
+  <div id="img-list"></div>
+  <div id="data-panel">
+    <div id="data-panel-header">
+      <h3>Current annotation</h3>
+      <button id="btn-collapse-data" title="Toggle panel">▼</button>
+    </div>
+    <div id="data-table-wrap"><div id="data-table"></div></div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="svg-container"></div>
+  <div id="score-picker">
+    <span class="sp-label" id="score-prompt">Score:</span>
+    <button class="gold" data-score="X">X</button>
+    <button class="gold" data-score="10">10</button>
+    <button data-score="9">9</button>
+    <button data-score="8">8</button>
+    <button data-score="7">7</button>
+    <button data-score="6">6</button>
+    <button data-score="5">5</button>
+    <button data-score="4">4</button>
+    <button data-score="3">3</button>
+    <button data-score="2">2</button>
+    <button data-score="1">1</button>
+    <button class="miss" data-score="0">M</button>
+    <button class="miss" id="score-skip">?</button>
+  </div>
+</div>
+
+<script>
+const IMAGES = JSON.parse('{{IMAGES_TAG}}');
+const RING_COLORS = JSON.parse('{{RING_COLORS_TAG}}');
+
+// ---- Catmull-Rom spline (browser-side) ----
+function evalCatmullRom(p0, p1, p2, p3, t) {
+  const t2 = t * t, t3 = t2 * t;
+  return [
+    0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+    0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3),
+  ];
+}
+
+function sampleClosedSpline(pts, nSamples) {
+  const K = pts.length;
+  if (K < 2) return pts.map(p => [...p]);
+  const out = [];
+  const sps = Math.ceil(nSamples / K);
+  for (let k = 0; k < K; k++) {
+    const p0 = pts[(k-1+K)%K], p1 = pts[k], p2 = pts[(k+1)%K], p3 = pts[(k+2)%K];
+    for (let s = 0; s < sps; s++) out.push(evalCatmullRom(p0, p1, p2, p3, s/sps));
+  }
+  return out;
+}
+
+function splineToPath(pts) {
+  const sampled = sampleClosedSpline(pts, 120);
+  return sampled.map((p, i) => `${i===0?'M':'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ') + ' Z';
+}
+
+// ---- Geometry helpers (AW-4) ----
+function ptInPoly(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+
+// tipX: arrow tip x-coordinate, tipY: arrow tip y-coordinate, rings: array of ring objects with points, boundary: array of boundary points
+function deduceScore(tipX, tipY, rings, boundary) {
+  for (let i = 0; i < rings.length; i++) {
+    if (!rings[i] || !rings[i].points || rings[i].points.length < 3) continue;
+    if (rings[i].points.some(p => p[0] == null)) continue;
+    const poly = sampleClosedSpline(rings[i].points, 64);
+    if (ptInPoly(tipX, tipY, poly)) return 10 - i;
+  }
+  if (boundary && boundary.points.length >= 3 && ptInPoly(tipX, tipY, boundary.points)) return 1;
+  return 0;
+}
+
+// ---- State ----
+let store = { modified: [] };
+let staleImages = new Set(); // filenames with stale/missing detections
+let generationStatus = {}; // filename → 'ready'|'queued'|'computing'
+let currentIdx = 0;
+let currentTargetIdx = 0;
+let currentRingSetIdx = 0;
+let drag = null;
+let addArrowMode = 'idle';   // 'idle' | 'place-tip' | 'score-input'
+let addRingSetMode = 'idle'; // 'idle' | 'place-center'
+let pendingTip = null;
+let pickerContext = null; // { type: 'new' } | { type: 'edit', ai: number } | null
+let imageDataCache = {}; // filename -> { base64, width, height, detected }
+let viewMode = 'annotated'; // 'annotated' | 'generated'
+let imageFilter = 'all'; // 'all' | 'annotated' | 'unannotated'
+
+// ---- Overlay toggles ----
+function showRings()    { return document.getElementById('chk-rings').checked; }
+function showBoundary() { return document.getElementById('chk-boundary').checked; }
+function showArrows()   { return document.getElementById('chk-arrows').checked; }
+
+// ---- Annotation helpers ----
+/* 
+return interface ImageData {
+  filename: string;
+  base64: string;
+  width: number;
+  height: number;
+  generated: {
+    targets: TargetData[];
+    arrows: ArrowData[];
+  };
+  annotated: {
+    targets: TargetData[];
+    arrows: ArrowData[];
+  };
+}
+*/
+function getImageData(idx) {
+  return imageDataCache[IMAGES[idx]];
+}
+
+function markModified(idx) {
+  const filename = IMAGES[idx];
+  if (!store.modified.includes(filename)) store.modified.push(filename);
+}
+
+// ---- SVG coordinate helper ----
+function svgPt(svg, e) {
+  const pt = svg.createSVGPoint();
+  pt.x = e.clientX; pt.y = e.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+// ---- Boundary edge insertion ----
+function nearestBoundaryEdge(boundary, x, y) {
+  let bestEdge = -1, bestDist = Infinity, bestPt = null;
+  const n = boundary.length;
+  for (let i = 0; i < n; i++) {
+    const a = boundary[i], b = boundary[(i+1)%n];
+    const dx = b[0]-a[0], dy = b[1]-a[1];
+    const len2 = dx*dx + dy*dy;
+    if (len2 < 1) continue;
+    const t = Math.max(0, Math.min(1, ((x-a[0])*dx + (y-a[1])*dy) / len2));
+    const px = a[0]+t*dx, py = a[1]+t*dy;
+    const dist = Math.hypot(x-px, y-py);
+    if (dist < bestDist) { bestDist = dist; bestEdge = i; bestPt = [px, py]; }
+  }
+  return { edge: bestEdge, dist: bestDist, pt: bestPt };
+}
+
+// ---- Ring segment insertion ----
+function nearestRingSegment(rings, x, y) {
+  let bestRi = -1, bestSeg = -1, bestDist = Infinity;
+  rings.forEach((ring, ri) => {
+    if (!ring.points || ring.points.length < 3) return;
+    const K = ring.points.length;
+    const sps = Math.ceil(120 / K);
+    const samples = sampleClosedSpline(ring.points, 120);
+    samples.forEach((s, k) => {
+      const nx = samples[(k + 1) % samples.length];
+      const dx = nx[0] - s[0], dy = nx[1] - s[1];
+      const len2 = dx * dx + dy * dy;
+      let dist;
+      if (len2 < 1) {
+        dist = Math.hypot(x - s[0], y - s[1]);
+      } else {
+        const t = Math.max(0, Math.min(1, ((x - s[0]) * dx + (y - s[1]) * dy) / len2));
+        dist = Math.hypot(x - (s[0] + t * dx), y - (s[1] + t * dy));
+      }
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestRi = ri;
+        bestSeg = Math.floor(k / sps) % K;
+      }
+    });
+  });
+  return { ri: bestRi, seg: bestSeg, dist: bestDist };
+}
+
+// ---- Score picker (AW-4: suggested score) ----
+function showScorePicker(label, suggested, clientX, clientY) {
+  const picker = document.getElementById('score-picker');
+  document.getElementById('score-prompt').textContent = label || 'Score:';
+  picker.querySelectorAll('button[data-score]').forEach(btn => {
+    const raw = btn.getAttribute('data-score');
+    const val = raw === 'X' ? 'X' : parseInt(raw, 10);
+    btn.classList.toggle('suggested', suggested !== undefined && val === suggested);
+  });
+  picker.style.display = 'flex';
+  if (clientX !== undefined && clientY !== undefined) {
+    const pw = picker.offsetWidth, ph = picker.offsetHeight;
+    const px = Math.max(4, Math.min(clientX - pw / 2, window.innerWidth - pw - 4));
+    const idealPy = clientY - ph - 8;
+    const py = Math.max(4, Math.min(window.innerHeight - ph - 4,
+               Math.min(clientY + 50, Math.max(clientY - ph - 50, idealPy))));
+    picker.style.left = px + 'px';
+    picker.style.top  = py + 'px';
+  }
+}
+
+function hideScorePicker() {
+  document.getElementById('score-picker').style.display = 'none';
+  pickerContext = null;
+}
+
+function onScoreSelect(score) {
+  if (!pickerContext) return;
+  const data = getImageData(currentIdx);
+  if (pickerContext.type === 'new') {
+    data.annotated.arrows.push({
+      tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
+      nock: null,
+      score,
+    });
+    pendingTip = null;
+    addArrowMode = 'idle';
+    document.getElementById('btn-add-arrow').classList.remove('active-mode');
+    hideScorePicker();
+    markModified(currentIdx);
+    updateImageList();
+    render();
+  } else if (pickerContext.type === 'edit') {
+    data.annotated.arrows[pickerContext.ai].score = score;
+    hideScorePicker();
+    markModified(currentIdx);
+    updateImageList();
+    render();
+  }
+}
+
+// ---- View mode toggle ----
+function setViewMode(mode) {
+  viewMode = mode;
+  document.getElementById('btn-view-annotated').classList.toggle('active', mode === 'annotated');
+  document.getElementById('btn-view-generated').classList.toggle('active', mode === 'generated');
+  document.getElementById('view-generated-badge').style.display = mode === 'generated' ? 'block' : 'none';
+  if (mode === 'generated' && addArrowMode !== 'idle') {
+    pendingTip = null;
+    addArrowMode = 'idle';
+    hideScorePicker();
+    document.getElementById('btn-add-arrow').classList.remove('active-mode');
+  }
+  if (mode === 'generated' && addRingSetMode !== 'idle') {
+    addRingSetMode = 'idle';
+    document.getElementById('btn-add-ringset').classList.remove('active-mode');
+  }
+  render();
+}
+
+// ---- Loading indicator ----
+function renderLoading(message) {
+  const container = document.getElementById('svg-container');
+  container.innerHTML = `<div class="loading-wrap">
+    <div class="loading-bar-track"><div class="loading-bar-fill"></div></div>
+    <div id="loading-msg">${message || 'Loading\u2026'}</div>
+  </div>`;
+}
+
+function updateLoadingMessage(message) {
+  const el = document.getElementById('loading-msg');
+  if (el) el.textContent = message;
+}
+
+// ---- Select image (with lazy load) ----
+async function selectImage(idx) {
+  currentIdx = idx;
+  currentTargetIdx = 0;
+  currentRingSetIdx = 0;
+  updateImageList();
+  const filename = IMAGES[idx];
+  console.log('[selectImage] clicked:', filename, 'cached:', !!imageDataCache[filename], 'stale:', staleImages.has(filename));
+  if (imageDataCache[filename]) {
+    render();
+    return;
+  }
+
+  let computing = staleImages.has(filename);
+  renderLoading(computing ? 'Computing rings\u2026 0s' : 'Loading\u2026');
+
+  try {
+    console.log('[selectImage] fetching status…');
+    const r = await fetch('/api/image-status/' + encodeURIComponent(filename));
+    const { state } = await r.json();
+    computing = state === 'stale' || state === 'new';
+    console.log('[selectImage] status:', state, 'computing:', computing);
+    updateLoadingMessage(computing ? 'Computing rings\u2026 0s' : 'Loading\u2026');
+  } catch (e) { console.warn('[selectImage] status fetch failed:', e); }
+
+  let elapsed = 0;
+  const timer = computing ? setInterval(() => {
+    elapsed++;
+    updateLoadingMessage(`Computing rings\u2026 ${elapsed}s`);
+  }, 1000) : null;
+
+  let loadError = null;
+  try {
+    console.log('[selectImage] fetching image data…');
+    const t0 = Date.now();
+    const res = await fetch('/api/image/' + encodeURIComponent(filename));
+    console.log('[selectImage] response received in', ((Date.now()-t0)/1000).toFixed(1)+'s  status:', res.status);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || 'HTTP ' + res.status);
+    }
+    console.log('[selectImage] parsing JSON…');
+    imageDataCache[filename] = await res.json();
+    const det = imageDataCache[filename]?.generated;
+    console.log('[selectImage] done, targets:', det?.targets?.length, 'arrows:', det?.arrows?.length);
+    staleImages.delete(filename);
+  } catch (e) {
+    console.error('[selectImage] failed:', filename, e);
+    loadError = String(e);
+  } finally {
+    if (timer) clearInterval(timer);
+  }
+  if (loadError) {
+    renderLoading('\u26a0 ' + loadError);
+    return;
+  }
+  updateDataPanel();
+  render();
+}
+
+// ---- Render ----
+function render() {
+  const container = document.getElementById('svg-container');
+  const filename = IMAGES[currentIdx];
+  const data = imageDataCache[filename];
+  if (!data) return;
+
+  const isGenerated = viewMode === 'generated';
+  const targets = isGenerated ? (data.generated.targets || []) : data.annotated.targets;
+  const arrows  = isGenerated ? (data.generated.arrows  || []) : data.annotated.arrows;
+
+  const W = data.width, H = data.height;
+  const showR = showRings(), showB = showBoundary(), showA = showArrows();
+
+  let svgContent = '';
+
+  console.log('[render] image data:', filename, 'cached:', !!imageDataCache[filename], 
+    'data: width:', imageDataCache[filename].width, 'height:', imageDataCache[filename].height, 
+    'targets:', targets, 'arrows:', arrows); // I'm ok with this log being a bit noisy since it helps catch data issues
+
+  targets.forEach((target, ti) => {
+    const isActiveTarget = ti === currentTargetIdx;
+    const boundary = target.paperBoundary;
+    const ringSets = target.ringSets || [];
+
+    // Boundary polygon
+    if (showB && boundary.points.length >= 3 && boundary.points.every(p => p[0] != null && p[1] != null)) {
+      const opacity = isActiveTarget ? 0.85 : 0.3;
+      const pts = boundary.points.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+      svgContent += `<polygon points="${pts}" fill="none" stroke="#00FF88" stroke-width="3" stroke-dasharray="12 6" opacity="${opacity}"/>`;
+    }
+
+    // Boundary vertex handles (active target, annotated mode only)
+    if (showB && isActiveTarget && !isGenerated && boundary.points.length > 0) {
+      for (let i = 0; i < boundary.points.length; i++) {
+        const p = boundary.points[i];
+        svgContent += `<circle class="handle" data-handle="boundary" data-ti="${ti}" data-idx="${i}" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="10" fill="#00FF88" stroke="#000" stroke-width="2" opacity="0.9"/>`;
+        svgContent += `<text x="${p[0].toFixed(1)}" y="${(p[1]-14).toFixed(1)}" text-anchor="middle" fill="#00FF88" font-size="11" font-family="monospace" pointer-events="none">${i}</text>`;        
+      }
+
+    }
+
+    // Ring sets
+    ringSets.forEach((rings, si) => {
+      const isActiveRS = isActiveTarget && si === currentRingSetIdx;
+      const ringOpacity = isActiveRS ? 1.0 : 0.3;
+
+      if (showR && rings.length > 0) {
+        // Draw outermost first
+        for (let i = rings.length - 1; i >= 0; i--) {
+          const ring = rings[i];
+          if (!ring.points || ring.points.length < 3) continue;
+          if (ring.points.some(p => p[0] == null || p[1] == null)) continue;
+          const color = RING_COLORS[i] || '#FFFFFF';
+          const d = splineToPath(ring.points);
+          if (i >= 8) {
+            svgContent += `<path d="${d}" fill="none" stroke="#000" stroke-width="4" opacity="${ringOpacity}"/>`;
+            svgContent += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" opacity="${ringOpacity}"/>`;
+          } else if (i >= 6) {
+            svgContent += `<path d="${d}" fill="none" stroke="#888" stroke-width="4" opacity="${ringOpacity}"/>`;
+            svgContent += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" opacity="${ringOpacity}"/>`;
+          } else {
+            svgContent += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" opacity="${ringOpacity}"/>`;
+          }
+        }
+
+        // Badge T{ti+1}.{si+1} on outermost ring
+        const outerRing = rings[rings.length - 1];
+        if (outerRing?.points?.length > 0) {
+          const bcx = (outerRing.points.reduce((s, p) => s + p[0], 0) / outerRing.points.length).toFixed(1);
+          const bcy = (outerRing.points.reduce((s, p) => s + p[1], 0) / outerRing.points.length).toFixed(1);
+          const badgeLabel = `T${ti+1}.${si+1}`;
+          const badgeColor = isActiveRS ? '#4a9eff' : '#888';
+          svgContent += `<text x="${bcx}" y="${bcy}" text-anchor="middle" dominant-baseline="middle" fill="${badgeColor}" font-size="14" font-weight="bold" font-family="monospace" pointer-events="none" opacity="${isActiveRS ? 1 : 0.5}">${badgeLabel}</text>`;
+        }
+
+        // Control point handles (active ring set, annotated mode only)
+        if (isActiveRS && !isGenerated) {
+          rings.forEach((ring, ri) => {
+            if (!ring.points) return;
+            const color = RING_COLORS[ri] || '#FFFFFF';
+            const labelFill = (ri === 6 || ri === 7) ? '#fff' : (ri >= 8 ? '#222' : '#111');
+            ring.points.forEach((p, pi) => {
+              svgContent += `<circle class="handle" data-handle="ring_pt" data-ti="${ti}" data-si="${si}" data-ri="${ri}" data-pi="${pi}" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="4" fill="${color}" stroke="#000" stroke-width="1" opacity="0.85"/>`;
+              if (pi === 0) {
+                svgContent += `<text x="${p[0].toFixed(1)}" y="${(p[1]+3.5).toFixed(1)}" text-anchor="middle" dominant-baseline="middle" fill="${labelFill}" font-size="8" font-weight="bold" font-family="monospace" pointer-events="none">${ri}</text>`;
+              }
+            });
+          });
+        }
+      }
+    });
+  });
+
+  // Detected arrows (generated mode only)
+  if (showA && isGenerated && arrows) {
+    arrows.forEach((arrow, ai) => {
+      const { tip, nock } = arrow;
+      svgContent += `<line x1="${tip[0].toFixed(1)}" y1="${tip[1].toFixed(1)}" x2="${(nock ? nock[0] : tip[0]).toFixed(1)}" y2="${(nock ? nock[1] : tip[1]).toFixed(1)}" stroke="#00CFCF" stroke-width="2" stroke-dasharray="8 4"/>`;
+      svgContent += `<circle cx="${tip[0].toFixed(1)}" cy="${tip[1].toFixed(1)}" r="5" fill="#00CFCF" stroke="#000" stroke-width="1"/>`;
+      if (nock) {
+        svgContent += `<circle cx="${nock[0].toFixed(1)}" cy="${nock[1].toFixed(1)}" r="4" fill="#00FFFF" stroke="#000" stroke-width="1" opacity="0.7"/>`;
+      }
+      const mx = ((tip[0] + (nock ? nock[0] : tip[0])) / 2).toFixed(1);
+      const my = ((tip[1] + (nock ? nock[1] : tip[1])) / 2 - 14).toFixed(1);
+      svgContent += `<text x="${mx}" y="${my}" text-anchor="middle" fill="#00CFCF" font-size="10" font-weight="bold" font-family="monospace" pointer-events="none">${ai}</text>`;
+    });
+  }
+
+  // Annotated arrows
+  if (showA && !isGenerated) {
+    data.annotated.arrows.forEach((arrow, ai) => {
+      const { tip, score } = arrow;
+      const isMiss = score === 0;
+      const isIncomplete = score === null || score === undefined;
+      const dotColor = isMiss ? '#888888' : isIncomplete ? '#aaaaaa' : '#FF4500';
+      const labelText = score === 0 ? 'M' : isIncomplete ? '?' : String(score);
+      const mx = tip[0].toFixed(1);
+      const my = (tip[1] - 14).toFixed(1);
+      const tipDash = isIncomplete ? 'stroke-dasharray="3 2"' : '';
+      svgContent += `<circle class="handle" data-handle="arrow_tip" data-ai="${ai}" cx="${tip[0].toFixed(1)}" cy="${tip[1].toFixed(1)}" r="6" fill="${dotColor}" stroke="#000" stroke-width="1.5" ${tipDash}/>`;
+      svgContent += `<text x="${mx}" y="${my}" text-anchor="middle" fill="white" font-size="10" font-weight="bold" font-family="monospace" pointer-events="none">${labelText}</text>`;
+    });
+
+    if (addArrowMode === 'score-input' && pendingTip) {
+      svgContent += `<circle cx="${pendingTip[0].toFixed(1)}" cy="${pendingTip[1].toFixed(1)}" r="6" fill="#FF8C00" opacity="0.5" pointer-events="none"/>`;
+    }
+  }
+
+  const inCrosshairMode = addArrowMode === 'place-tip' || addRingSetMode === 'place-center';
+  const svgClass = inCrosshairMode ? 'class="add-arrow-mode"' : '';
+  const wrapEl = `<div class="img-wrap">
+  <img src="${data.base64}" alt="${filename}" draggable="false"/>
+  <svg id="main-svg" viewBox="0 0 ${W} ${H}" ${svgClass} xmlns="http://www.w3.org/2000/svg">
+    ${svgContent}
+  </svg>
+</div>`;
+
+  container.innerHTML = wrapEl;
+  attachSvgListeners();
+}
+
+// ---- Add ring set (detect-ringset flow) ----
+async function detectAndAddRingSet(filename, cx, cy) {
+  // Capture idx before any await so we always modify the correct image's annotation
+  const savedIdx = currentIdx;
+  console.log(`[detect-ringset] start — ${filename} idx=${savedIdx} seed=(${Math.round(cx)},${Math.round(cy)})`);
+  showStatusMsg('Detecting ring set\u2026');
+  try {
+    const t0 = Date.now();
+    const res = await fetch('/api/detect-ringset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename, cx, cy }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const msg = body.error || 'HTTP ' + res.status;
+      console.error(`[detect-ringset] FAILED: ${msg}`);
+      showStatusMsg('\u26a0 Detection failed: ' + msg, false, 5000);
+      return;
+    }
+    // rings: SplineRing[], paperBoundary: TargetBoundary
+    const { rings, paperBoundary } = await res.json();
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    if (!rings || rings.length === 0) {
+      console.warn(`[detect-ringset] no rings returned (${elapsed}s)`);
+      showStatusMsg('\u26a0 No rings detected at that location.', false, 5000);
+      return;
+    }
+    console.log(`[detect-ringset] got ${rings.length} rings, boundary ${paperBoundary?.points.length ?? 0} pts (${elapsed}s)`);
+
+    // Use savedIdx (captured before await) to avoid stale-currentIdx race
+    const data = getImageData(savedIdx);
+    console.log(`[detect-ringset] annotation targets before: ${data.annotated.targets.length}`);
+
+    // Check if centroid falls inside any existing target boundary
+    let targetIdx = -1;
+    for (let t = 0; t < data.annotated.targets.length; t++) {
+      const pb = data.annotated.targets[t].paperBoundary.points;
+      console.log(`[detect-ringset]   checking target ${t}: boundary ${pb.length} pts → ${pb.length >= 3 ? ptInPoly(cx, cy, pb) : 'too few pts'}`);
+      if (pb.length >= 3 && ptInPoly(cx, cy, pb)) { targetIdx = t; break; }
+    }
+
+    let statusMsg;
+    if (targetIdx >= 0) {
+      data.annotated.targets[targetIdx].ringSets.push(rings);
+      currentTargetIdx = targetIdx;
+      currentRingSetIdx = data.annotated.targets[targetIdx].ringSets.length - 1;
+      statusMsg = `Ring set RS${currentRingSetIdx + 1} added to target T${currentTargetIdx + 1}`;
+    } else {
+      data.annotated.targets.push({ paperBoundary: paperBoundary, ringSets: [rings] });
+      currentTargetIdx = data.annotated.targets.length - 1;
+      currentRingSetIdx = 0;
+      statusMsg = `New target T${currentTargetIdx + 1} created with ${paperBoundary?.points.length ?? 0}-pt boundary`;
+    }
+    console.log(`[detect-ringset] ${statusMsg} — targets after: ${data.annotated.targets.length}, ringSets: ${data.annotated.targets.map(t => t.ringSets.length).join(',')}`);
+
+    showStatusMsg(statusMsg, true, 4000);
+
+    // If the user navigated to a different image during detection, switch back
+    if (currentIdx !== savedIdx) {
+      console.warn(`[detect-ringset] currentIdx changed (${savedIdx}→${currentIdx}) during detection; result saved to annotation, not switching back`);
+    }
+    markModified(savedIdx);
+    updateImageList();
+    render();
+  } catch (e) {
+    console.error('[detect-ringset] error:', e);
+    showStatusMsg('\u26a0 Detection error: ' + e, false, 5000);
+  }
+}
+
+function removeActiveRingSet() {
+  const data = getImageData(currentIdx);
+  if (currentTargetIdx >= data.annotated.targets.length) return;
+  const target = data.annotated.targets[currentTargetIdx];
+  target.ringSets.splice(currentRingSetIdx, 1);
+  if (target.ringSets.length === 0) {
+    data.annotated.targets.splice(currentTargetIdx, 1);
+    currentTargetIdx = Math.max(0, currentTargetIdx - 1);
+    currentRingSetIdx = 0;
+  } else {
+    currentRingSetIdx = Math.min(currentRingSetIdx, target.ringSets.length - 1);
+  }
+  markModified(currentIdx);
+  updateImageList();
+  render();
+}
+
+// ---- Drag & click handling ----
+function attachSvgListeners() {
+  const svg = document.getElementById('main-svg');
+  if (!svg) return;
+
+  svg.addEventListener('click', async (e) => {
+    if (viewMode === 'generated') return;
+
+    // Add ring set mode — place center
+    if (addRingSetMode === 'place-center') {
+      addRingSetMode = 'idle';
+      document.getElementById('btn-add-ringset').classList.remove('active-mode');
+      const mpt = svgPt(svg, e);
+      render(); // remove crosshair cursor
+      await detectAndAddRingSet(IMAGES[currentIdx], mpt.x, mpt.y);
+      return;
+    }
+
+    if (e.ctrlKey || e.metaKey) {
+      const data = getImageData(currentIdx);
+      const target = data.annotated.targets[currentTargetIdx];
+      if (!target || target.paperBoundary.points.length < 3) return;
+      const mpt = svgPt(svg, e);
+      const { edge, pt } = nearestBoundaryEdge(target.paperBoundary.points, mpt.x, mpt.y);
+      if (edge >= 0) {
+        const imgData = imageDataCache[IMAGES[currentIdx]];
+        const w = imgData?.width ?? 0, h = imgData?.height ?? 0;
+        target.paperBoundary.points.splice(edge + 1, 0, [
+          Math.round(Math.max(0, Math.min(w - 1, pt[0]))),
+          Math.round(Math.max(0, Math.min(h - 1, pt[1]))),
+        ]);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      }
+      return;
+    }
+
+    if (e.altKey) {
+      const data = getImageData(currentIdx);
+      const target = data.annotated.targets[currentTargetIdx];
+      const rings = target?.ringSets[currentRingSetIdx];
+      if (!rings || rings.length === 0) return;
+      const mpt = svgPt(svg, e);
+      const { ri, seg } = nearestRingSegment(rings, mpt.x, mpt.y);
+      if (ri >= 0) {
+        rings[ri].points.splice(seg + 1, 0, [mpt.x, mpt.y]);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      }
+      return;
+    }
+
+    if (e.target.closest && e.target.closest('.handle')) return;
+
+    if (addArrowMode === 'place-tip') {
+      const mpt = svgPt(svg, e);
+      pendingTip = [mpt.x, mpt.y];
+      addArrowMode = 'score-input';
+      pickerContext = { type: 'new' };
+      const data = getImageData(currentIdx);
+      const target = data.annotated.targets[currentTargetIdx];
+      const rings  = target?.ringSets[currentRingSetIdx] ?? [];
+      const boundary = target?.paperBoundary ?? null;
+      const suggested = deduceScore(pendingTip[0], pendingTip[1], rings, boundary);
+      showScorePicker('Score:', suggested === 0 ? 0 : suggested || undefined, e.clientX, e.clientY);
+      updateDataPanel();
+      render();
+    }
+  });
+
+  svg.querySelectorAll('.handle').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (viewMode === 'generated') return;
+      if (!e.shiftKey) return;
+      e.preventDefault(); e.stopPropagation();
+      const handleType = el.getAttribute('data-handle');
+      const data = getImageData(currentIdx);
+      if (handleType === 'boundary') {
+        const ti  = parseInt(el.getAttribute('data-ti'),  10);
+        const idx = parseInt(el.getAttribute('data-idx'), 10);
+        const target = data.annotated.targets[ti];
+        if (!target || target.paperBoundary.points.length <= 3) return;
+        target.paperBoundary.points.splice(idx, 1);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      } else if (handleType === 'ring_pt') {
+        const ti = parseInt(el.getAttribute('data-ti'), 10);
+        const si = parseInt(el.getAttribute('data-si'), 10);
+        const ri = parseInt(el.getAttribute('data-ri'), 10);
+        const pi = parseInt(el.getAttribute('data-pi'), 10);
+        const ring = data.annotated.targets[ti]?.ringSets[si]?.[ri];
+        if (ring && ring.points.length > 3) {
+          ring.points.splice(pi, 1);
+          markModified(currentIdx);
+          updateImageList();
+          render();
+        }
+      } else if (handleType === 'arrow_tip') {
+        const ai = parseInt(el.getAttribute('data-ai'), 10);
+        data.annotated.arrows.splice(ai, 1);
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      }
+    });
+
+    el.addEventListener('mousedown', (e) => {
+      if (viewMode === 'generated') return;
+      if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+      if (addArrowMode !== 'idle' || addRingSetMode !== 'idle') return;
+      e.preventDefault(); e.stopPropagation();
+      const handleType = el.getAttribute('data-handle');
+
+      if (handleType === 'ring_pt') {
+        const ti = parseInt(el.getAttribute('data-ti'), 10);
+        const si = parseInt(el.getAttribute('data-si'), 10);
+        if (ti !== currentTargetIdx || si !== currentRingSetIdx) {
+          currentTargetIdx = ti; currentRingSetIdx = si; render();
+        }
+        drag = { type: 'ring_pt', ti, si, ri: parseInt(el.getAttribute('data-ri'), 10), pi: parseInt(el.getAttribute('data-pi'), 10) };
+      } else if (handleType === 'boundary') {
+        const ti = parseInt(el.getAttribute('data-ti'), 10);
+        if (ti !== currentTargetIdx) { currentTargetIdx = ti; render(); }
+        drag = { type: 'boundary', ti, idx: parseInt(el.getAttribute('data-idx'), 10) };
+      } else if (handleType === 'arrow_tip') {
+        drag = { type: 'arrow_tip', ai: parseInt(el.getAttribute('data-ai'), 10) };
+      }
+
+      const svgEl0 = document.getElementById('main-svg');
+      if (svgEl0) svgEl0.classList.add('dragging');
+
+      const onMove = (me) => {
+        if (!drag) return;
+        const liveSvg = document.getElementById('main-svg');
+        if (!liveSvg) return;
+        const mpt = svgPt(liveSvg, me);
+        const data = getImageData(currentIdx);
+
+        if (drag.type === 'ring_pt') {
+          const ring = data.annotated.targets[drag.ti]?.ringSets[drag.si]?.[drag.ri];
+          if (ring) ring.points[drag.pi] = [mpt.x, mpt.y];
+        } else if (drag.type === 'boundary') {
+          const target = data.annotated.targets[drag.ti];
+          if (target) {
+            const w = data.width ?? 0, h = data.height ?? 0;
+            target.paperBoundary.points[drag.idx] = [
+              Math.round(Math.max(0, Math.min(w - 1, mpt.x))),
+              Math.round(Math.max(0, Math.min(h - 1, mpt.y))),
+            ];
+          }
+        } else if (drag.type === 'arrow_tip') {
+          data.annotated.arrows[drag.ai].tip = [mpt.x, mpt.y];
+        }
+        render();
+      };
+
+      const onUp = () => {
+        drag = null;
+        const svgElUp = document.getElementById('main-svg');
+        if (svgElUp) svgElUp.classList.remove('dragging');
+        markModified(currentIdx);
+        updateImageList();
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+}
+
+// ---- Image list ----
+function isAnnotated(filename) {
+  const data = imageDataCache[filename];
+  if (!data) return false;
+  return data.annotated.targets.length > 0 || data.annotated.arrows.length > 0; 
+}
+
+function updateImageList() {
+  const list = document.getElementById('img-list');
+  list.innerHTML = '';
+  IMAGES.forEach((filename, i) => {
+    const annotated = isAnnotated(filename);
+    if (imageFilter === 'annotated'   && !annotated) return;
+    if (imageFilter === 'unannotated' &&  annotated) return;
+
+    const isModified = store.modified.includes(filename);
+    const isActive   = i === currentIdx;
+    const genState   = generationStatus[filename] || (staleImages.has(filename) ? 'queued' : 'ready');
+    const btn = document.createElement('button');
+    btn.className = 'img-btn' + (isActive ? ' active' : '') + (isModified ? ' modified' : '');
+    const modDot = isModified ? '<span class="mod-dot"></span>' : '<span class="spacer"></span>';
+    const dotClass = annotated ? 'annotated' : genState;
+    const dotTitle = annotated ? 'has annotation' : genState === 'ready' ? 'detected' : genState === 'computing' ? 'computing…' : genState === 'error' ? 'detection failed' : 'queued';
+    const genDot = `<span class="gen-dot ${dotClass}" title="${dotTitle}"></span>`;
+    btn.innerHTML = modDot + '<span style="flex:1">' + filename + '</span>' + genDot;
+    btn.addEventListener('click', () => selectImage(i));
+    list.appendChild(btn);
+  });
+  updateDataPanel();
+}
+
+// ---- Data panel ----
+function updateDataPanel() {
+  const data = getImageData(currentIdx);
+  if (!data) return;
+  let html = '';
+
+  data.annotated.targets.forEach((target, ti) => {
+    const isActiveTarget = ti === currentTargetIdx;
+    const headerStyle = isActiveTarget ? 'color:#4a9eff;font-weight:bold' : 'color:#888;cursor:pointer';
+    html += `<div class="target-header" data-ti="${ti}" style="${headerStyle};font-size:0.72rem;padding:2px 0">Target ${ti+1} · ${target.paperBoundary.points.length} boundary pts</div>`;
+    html += '<table><thead><tr><th>Ring set</th><th>Ring</th><th>pts</th><th>cx</th><th>cy</th></tr></thead><tbody>';
+    target.ringSets.forEach((rings, si) => {
+      const isActiveRS = isActiveTarget && si === currentRingSetIdx;
+      rings.forEach((ring, ri) => {
+        if (!ring.points) return;
+        const cx = (ring.points.reduce((s, p) => s + p[0], 0) / ring.points.length).toFixed(0);
+        const cy = (ring.points.reduce((s, p) => s + p[1], 0) / ring.points.length).toFixed(0);
+        const rsLabel = ri === 0 ? `RS${si+1}` : '';
+        const rowStyle = isActiveRS ? 'color:#ccc' : 'color:#666;cursor:pointer';
+        html += `<tr class="rs-row" data-ti="${ti}" data-si="${si}" style="${rowStyle}"><td>${rsLabel}</td><td>R${ri}</td><td>${ring.points.length}</td><td>${cx}</td><td>${cy}</td></tr>`;
+      });
+    });
+    html += '</tbody></table>';
+  });
+
+  if (data.annotated.arrows.length > 0) {
+    html += `<table><thead><tr><th>Arrow</th><th>tip</th><th>score</th></tr></thead><tbody>`;
+    data.annotated.arrows.forEach((arrow, ai) => {
+      const s = arrow.score;
+      const scoreLabel = s === 0 ? 'M' : (s === null || s === undefined) ? '?' : String(s);
+      html += `<tr>
+        <td>A${ai}</td>
+        <td>(${Math.round(arrow.tip[0])},${Math.round(arrow.tip[1])})</td>
+        <td class="score-cell" data-ai="${ai}">${scoreLabel}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+  } else {
+    html += `<div style="color:#555;font-size:0.72rem;margin-top:4px">No arrows annotated</div>`;
+  }
+
+  document.getElementById('data-table').innerHTML = html;
+
+  document.querySelectorAll('#data-table .score-cell').forEach(cell => {
+    cell.addEventListener('click', () => {
+      const ai = parseInt(cell.getAttribute('data-ai'), 10);
+      pickerContext = { type: 'edit', ai };
+      const handle = document.querySelector('[data-handle="arrow_tip"][data-ai="' + ai + '"]');
+      let cx, cy;
+      if (handle) { const r = handle.getBoundingClientRect(); cx = (r.left + r.right) / 2; cy = (r.top + r.bottom) / 2; }
+      showScorePicker(`Edit A${ai} score:`, undefined, cx, cy);
+    });
+  });
+
+  document.querySelectorAll('#data-table .target-header').forEach(el => {
+    el.addEventListener('click', () => {
+      const ti = parseInt(el.getAttribute('data-ti'), 10);
+      if (ti !== currentTargetIdx) { currentTargetIdx = ti; currentRingSetIdx = 0; render(); }
+    });
+  });
+
+  document.querySelectorAll('#data-table .rs-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const ti = parseInt(row.getAttribute('data-ti'), 10);
+      const si = parseInt(row.getAttribute('data-si'), 10);
+      if (ti !== currentTargetIdx || si !== currentRingSetIdx) {
+        currentTargetIdx = ti; currentRingSetIdx = si; render();
+      }
+    });
+  });
+}
+
+// ---- Save to DB ----
+
+// ms=0 → persistent until next call; ms>0 → auto-hide after ms
+function showStatusMsg(text, ok, ms = 0) {
+  const el = document.getElementById('status-msg');
+  el.textContent = text;
+  el.classList.remove('ok', 'fail');
+  el.classList.add(ok ? 'ok' : 'fail');
+  el.style.display = 'block';
+  clearTimeout(el._hideTimer);
+  if (ms > 0) el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
+}
+
+async function save() {
+  if (store.modified.length === 0) {
+    showStatusMsg('No changes to save.', true, 2000);
+    return true;
+  }
+  
+  console.log(`[save] clicked — modified: [${store.modified.join(', ') || 'none'}]`);
+  const out = {};
+  for (const filename of store.modified) {
+    const ann = imageDataCache[filename].annotated;
+    out[filename] = structuredClone(ann);
+    console.log(`[save] ${filename}: targets=${ann.targets?.length ?? 0} arrows=${ann.arrows.length}`);
+  }
+  const total = Object.keys(out).length;
+  console.log(`[save] sending ${total} annotation(s)`);
+  try {
+    const res = await fetch('/api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(out),
+    });
+    console.log(`[save] response HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    console.log(`[save] server response:`, body);
+    showStatusMsg(`Saved ${total} annotation${total !== 1 ? 's' : ''} successfully.`, true, 2000);
+  } catch (e) {
+    console.error('[save] failed:', e);
+    alert('Save failed: ' + e);
+    return false;
+  }
+  store.modified = [];
+  updateImageList();
+  return true;
+}
+
+// ---- Reset functions ----
+function resetBoundaries() {
+  const dt = getImageData(currentIdx);
+  dt.annotated = structuredClone(dt.generated);
+  markModified(currentIdx);
+  updateImageList();
+  render();
+}
+
+function resetRings() {
+  const data = getImageData(currentIdx);
+  data.generated.targets.forEach((dt, t) => {
+    if (data.annotated.targets[t]) {
+      data.annotated.targets[t].ringSets = structuredClone(dt.ringSets);
+    }
+  });
+
+  markModified(currentIdx);
+  updateImageList();
+  render();
+}
+
+function resetArrows() {
+  const data = getImageData(currentIdx);
+  data.annotated.arrows = structuredClone(data.generated.arrows);
+  markModified(currentIdx);
+  updateImageList();
+  render();
+}
+
+function resetCurrent() {
+  const filename = IMAGES[currentIdx];
+  delete imageDataCache[filename];
+  store.modified = store.modified.filter(f => f !== filename);
+  currentTargetIdx = 0;
+  currentRingSetIdx = 0;
+  addArrowMode = 'idle';
+  addRingSetMode = 'idle';
+  pendingTip = null;
+  hideScorePicker();
+  document.getElementById('btn-add-arrow').classList.remove('active-mode');
+  document.getElementById('btn-add-ringset').classList.remove('active-mode');
+  updateImageList();
+  renderLoading('Recomputing\u2026');
+  fetch('/api/recompute/' + encodeURIComponent(filename), { method: 'POST' }).catch(() => {});
+}
+
+// ---- Delete image (AW-7) ----
+async function deleteCurrentImage() {
+  const filename = IMAGES[currentIdx];
+  if (!confirm(`Delete "${filename}" and all its annotation data? This cannot be undone.`)) return;
+  try {
+    const res = await fetch('/api/image/' + encodeURIComponent(filename), { method: 'DELETE' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || 'HTTP ' + res.status);
+    }
+  } catch (e) {
+    alert('Delete failed: ' + e);
+    return;
+  }
+  IMAGES.splice(currentIdx, 1);
+  delete imageDataCache[filename];
+  store.modified = store.modified.filter(f => f !== filename);
+  delete generationStatus[filename];
+  if (IMAGES.length === 0) {
+    currentIdx = 0;
+    document.getElementById('svg-container').innerHTML =
+      '<div class="loading-wrap"><div style="color:#666">No images remaining.</div></div>';
+    document.getElementById('data-table').innerHTML = '';
+    updateImageList();
+    return;
+  }
+  currentIdx = Math.min(currentIdx, IMAGES.length - 1);
+  updateImageList();
+  selectImage(currentIdx);
+}
+
+// ---- Keyboard handler ----
+document.addEventListener('keydown', async (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    setViewMode(viewMode === 'annotated' ? 'generated' : 'annotated');
+    return;
+  }
+
+  if (e.key === 'Escape') {
+    if (addRingSetMode === 'place-center') {
+      addRingSetMode = 'idle';
+      document.getElementById('btn-add-ringset').classList.remove('active-mode');
+      render();
+      return;
+    }
+    if (addArrowMode === 'score-input' && pickerContext) {
+      if (pickerContext.type === 'new') {
+        const data = getImageData(currentIdx);
+        data.annotated.arrows.push({
+          tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
+          score: null,
+        });
+        pendingTip = null;
+        addArrowMode = 'idle';
+        document.getElementById('btn-add-arrow').classList.remove('active-mode');
+        hideScorePicker();
+        markModified(currentIdx);
+        updateImageList();
+        render();
+      } else {
+        hideScorePicker();
+        addArrowMode = 'idle';
+      }
+    } else if (addArrowMode === 'place-tip') {
+      pendingTip = null;
+      addArrowMode = 'idle';
+      document.getElementById('btn-add-arrow').classList.remove('active-mode');
+      render();
+    }
+    return;
+  }
+
+  if (addArrowMode === 'score-input') {
+    let score = undefined;
+    if (e.key === 'x' || e.key === 'X') score = 'X';
+    else if (e.key === 'm' || e.key === 'M') score = 0;
+    else if (e.key >= '1' && e.key <= '9') score = parseInt(e.key, 10);
+    if (score !== undefined) { onScoreSelect(score); return; }
+  }
+
+  // AW-6: keyboard navigation with 'b' and 'n'
+  // Note: we should always save even if at the first or last image, because the user may have made changes that need to be saved
+  // We block user going to the next image if save fails, to avoid losing unsaved changes
+  if (e.key === 'b' || e.key === 'B') {
+    if (await save() && currentIdx > 0) { selectImage(currentIdx - 1); }
+    return;
+  }
+  if (e.key === 'n' || e.key === 'N') {
+    if (await save() && currentIdx < IMAGES.length - 1) { selectImage(currentIdx + 1); } 
+    return;
+  }
+
+  if ((e.key === 'a' || e.key === 'A') && addArrowMode !== 'score-input' && viewMode === 'annotated') {
+    if (addArrowMode === 'idle') {
+      addArrowMode = 'place-tip';
+      document.getElementById('btn-add-arrow').classList.add('active-mode');
+      render();
+    } else if (addArrowMode === 'place-tip') {
+      addArrowMode = 'idle';
+      document.getElementById('btn-add-arrow').classList.remove('active-mode');
+      render();
+    }
+    return;
+  }
+
+  if ((e.key === 'r' || e.key === 'R') && viewMode === 'annotated') {
+    if (addRingSetMode === 'idle') {
+      addRingSetMode = 'place-center';
+      document.getElementById('btn-add-ringset').classList.add('active-mode');
+      render();
+    } else if (addRingSetMode === 'place-center') {
+      addRingSetMode = 'idle';
+      document.getElementById('btn-add-ringset').classList.remove('active-mode');
+      render();
+    }
+    return;
+  }
+});
+
+// ---- Wire up ----
+document.getElementById('btn-save').addEventListener('click', save);
+document.getElementById('btn-reset').addEventListener('click', resetCurrent);
+document.getElementById('btn-reset-boundaries').addEventListener('click', resetBoundaries);
+document.getElementById('btn-reset-rings').addEventListener('click', resetRings);
+document.getElementById('btn-reset-arrows').addEventListener('click', resetArrows);
+document.getElementById('btn-remove-ringset').addEventListener('click', removeActiveRingSet);
+document.getElementById('btn-delete').addEventListener('click', deleteCurrentImage);
+document.getElementById('chk-rings').addEventListener('change', render);
+document.getElementById('chk-boundary').addEventListener('change', render);
+document.getElementById('chk-arrows').addEventListener('change', render);
+document.getElementById('btn-view-annotated').addEventListener('click', () => setViewMode('annotated'));
+document.getElementById('btn-view-generated').addEventListener('click', () => setViewMode('generated'));
+
+['all', 'annotated', 'unannotated'].forEach(f => {
+  document.getElementById('filter-' + f).addEventListener('click', () => {
+    imageFilter = f;
+    document.querySelectorAll('#img-filter button').forEach(b => b.classList.remove('active'));
+    document.getElementById('filter-' + f).classList.add('active');
+    updateImageList();
+  });
+});
+
+document.getElementById('btn-add-arrow').addEventListener('click', () => {
+  if (viewMode === 'generated') return;
+  if (addArrowMode === 'idle') {
+    addArrowMode = 'place-tip';
+    document.getElementById('btn-add-arrow').classList.add('active-mode');
+    render();
+  } else if (addArrowMode === 'place-tip') {
+    pendingTip = null;
+    addArrowMode = 'idle';
+    document.getElementById('btn-add-arrow').classList.remove('active-mode');
+    render();
+  }
+});
+
+document.getElementById('btn-add-ringset').addEventListener('click', () => {
+  if (viewMode === 'generated') return;
+  if (addRingSetMode === 'idle') {
+    addRingSetMode = 'place-center';
+    document.getElementById('btn-add-ringset').classList.add('active-mode');
+    render();
+  } else if (addRingSetMode === 'place-center') {
+    addRingSetMode = 'idle';
+    document.getElementById('btn-add-ringset').classList.remove('active-mode');
+    render();
+  }
+});
+
+document.querySelectorAll('#score-picker button[data-score]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const raw = btn.getAttribute('data-score');
+    if (raw === null) return;
+    const score = raw === 'X' ? 'X' : parseInt(raw, 10);
+    if (typeof score === 'number' && isNaN(score)) return;
+    onScoreSelect(score);
+  });
+});
+document.getElementById('score-skip').addEventListener('click', () => onScoreSelect(null));
+document.getElementById('score-picker').addEventListener('mousedown', (e) => e.stopPropagation());
+
+// ---- Collapsible data panel (AW-3) ----
+(function() {
+  const panel = document.getElementById('data-panel');
+  const btn   = document.getElementById('btn-collapse-data');
+  function setCollapsed(v) {
+    panel.classList.toggle('collapsed', v);
+    btn.textContent = v ? '▶' : '▼';
+    try { localStorage.setItem('dataPanelCollapsed', v ? '1' : ''); } catch {}
+  }
+  const saved = (() => { try { return localStorage.getItem('dataPanelCollapsed'); } catch { return null; } })();
+  if (saved === '1') setCollapsed(true);
+  btn.addEventListener('click', () => setCollapsed(!panel.classList.contains('collapsed')));
+  document.getElementById('data-panel-header').addEventListener('click', (e) => {
+    if (e.target === btn) return;
+    setCollapsed(!panel.classList.contains('collapsed'));
+  });
+})();
+
+// ---- SSE subscription (AW-5) ----
+(function() {
+  const es = new EventSource('/api/events');
+  es.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'status' && msg.filename) {
+        generationStatus[msg.filename] = msg.state;
+        const idx = IMAGES.indexOf(msg.filename);
+        if (idx >= 0) updateImageList();
+        if (msg.state === 'ready' && idx === currentIdx && !imageDataCache[msg.filename]) {
+          selectImage(idx);
+        }
+      } else if (msg.type === 'new_image' && msg.filename) {
+        if (!IMAGES.includes(msg.filename)) {
+          IMAGES.push(msg.filename);
+          generationStatus[msg.filename] = 'queued';
+          updateImageList();
+        }
+      } else if (msg.type === 'removed' && msg.filename) {
+        const idx = IMAGES.indexOf(msg.filename);
+        if (idx >= 0) {
+          IMAGES.splice(idx, 1);
+          delete imageDataCache[msg.filename];
+          store.modified = store.modified.filter(f => f !== msg.filename);
+          delete generationStatus[msg.filename];
+          if (IMAGES.length === 0) {
+            currentIdx = 0;
+            document.getElementById('svg-container').innerHTML =
+              '<div class="loading-wrap"><div style="color:#666">No images remaining.</div></div>';
+            document.getElementById('data-table').innerHTML = '';
+            updateImageList();
+          } else if (currentIdx === idx) {
+            currentIdx = Math.min(idx, IMAGES.length - 1);
+            updateImageList();
+            selectImage(currentIdx);
+          } else {
+            if (currentIdx > idx) currentIdx--;
+            updateImageList();
+          }
+        }
+      }
+    } catch {}
+  };
+  es.onerror = () => {
+    console.warn('[SSE] Connection error — will reconnect automatically.');
+  };
+})();
+
+// ---- Init ----
+fetch('/api/generation-status')
+  .then(r => r.json())
+  .then(data => { generationStatus = data; })
+  .catch(() => {})
+  .finally(() => {
+        fetch('/api/stale-images')
+          .then(r => r.json())
+          .then(({ stale }) => { staleImages = new Set(stale); })
+          .catch(() => {})
+          .finally(() => { updateImageList(); selectImage(0); });
+      });
+</script>
+</body>
+</html>

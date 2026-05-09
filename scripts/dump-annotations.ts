@@ -1,6 +1,7 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import { Pool } from 'pg';
-import { parquetWriteFile } from 'hyparquet-writer';
+import { parquetWriteBuffer } from 'hyparquet-writer';
 
 const OUT_PATH = path.resolve(import.meta.dirname, '../data/annotations.parquet');
 
@@ -17,8 +18,7 @@ async function main() {
     'SELECT filename, paper_boundary, rings, arrows FROM annotations ORDER BY filename',
   );
 
-  parquetWriteFile({
-    filename: OUT_PATH,
+  const buffer = parquetWriteBuffer({
     columnData: [
       { name: 'filename',       data: rows.map((r: Record<string, unknown>) => r.filename as string) },
       { name: 'paper_boundary', data: rows.map((r: Record<string, unknown>) => JSON.stringify(r.paper_boundary ?? null)) },
@@ -26,6 +26,8 @@ async function main() {
       { name: 'arrows',         data: rows.map((r: Record<string, unknown>) => JSON.stringify(r.arrows ?? [])) },
     ],
   });
+  fs.mkdirSync(path.dirname(OUT_PATH), { recursive: true });
+  fs.writeFileSync(OUT_PATH, Buffer.from(buffer));
   console.log(`Wrote ${rows.length} rows → ${OUT_PATH}`);
 }
 

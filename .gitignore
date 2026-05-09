@@ -58,5 +58,5 @@ yarn-error.log
 
 # ── Generated artefacts ───────────────────────────────────────
 report.html
-
+scripts/nn/__pycache__/
 postgres/

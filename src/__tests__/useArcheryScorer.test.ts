@@ -1,23 +1,27 @@
+import { expect, describe, it, jest, beforeEach } from '@jest/globals';
 import { act, renderHook } from '@testing-library/react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import ArcheryCounter from '../ArcheryCounter';
 import { useArcheryScorer } from '../useArcheryScorer';
 
 jest.mock('react-native-image-picker', () => ({
-  launchImageLibrary: jest.fn(),
+  launchImageLibrary: jest.fn<any>().mockReturnValue(Promise.resolve({ didCancel: true })),
 }));
 
 jest.mock('../ArcheryCounter', () => ({
   __esModule: true,
   default: {
-    processImage: jest.fn().mockResolvedValue({
-      rings: Array(10).fill({ points: Array.from({ length: 8 }, () => [500, 400] as [number, number]) }),
-      paperBoundary: null,
+    processImage: jest.fn<any>().mockResolvedValue({
+      targets: [{
+        rings: Array(10).fill({ points: Array.from({ length: 8 }, () => [500, 400]) }),
+        paperBoundary: [],
+      }],
+      arrows: [],
     }),
   },
 }));
 
-const mockLaunch = launchImageLibrary as jest.Mock;
+const mockLaunch = launchImageLibrary as jest.Mock<any>;
 
 describe('useArcheryScorer', () => {
   beforeEach(() => {
@@ -27,7 +31,7 @@ describe('useArcheryScorer', () => {
   it('starts with empty state', () => {
     const { result } = renderHook(() => useArcheryScorer());
     expect(result.current.imageUri).toBeNull();
-    expect(result.current.rings).toBeNull();
+    expect(result.current.targets).toBeNull();
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
   });
@@ -56,7 +60,8 @@ describe('useArcheryScorer', () => {
     });
 
     expect(result.current.imageUri).toBe('file:///test.jpg');
-    expect(result.current.rings).toHaveLength(10);
+    expect(result.current.targets).toHaveLength(1);
+    expect(result.current.targets![0].rings).toHaveLength(10);
     expect(result.current.imageWidth).toBe(1000);
     expect(result.current.imageHeight).toBe(800);
     expect(result.current.loading).toBe(false);
@@ -70,7 +75,7 @@ describe('useArcheryScorer', () => {
     });
 
     // Override mock for this test only
-    (ArcheryCounter.processImage as jest.Mock).mockRejectedValueOnce(new Error('CV error'));
+    (ArcheryCounter.processImage as jest.Mock<any>).mockRejectedValueOnce(new Error('CV error'));
 
     const { result } = renderHook(() => useArcheryScorer());
 
@@ -79,7 +84,20 @@ describe('useArcheryScorer', () => {
     });
 
     expect(result.current.error).toBe('CV error');
-    expect(result.current.rings).toBeNull();
+    expect(result.current.targets).toBeNull();
+  });
+
+  it('sets error state when processImage rejects with a non-Error value', async () => {
+    mockLaunch.mockResolvedValue({
+      didCancel: false,
+      assets: [{ uri: 'file:///bad.jpg', width: 100, height: 100 }],
+    });
+    (ArcheryCounter.processImage as jest.Mock<any>).mockRejectedValueOnce('plain string error');
+
+    const { result } = renderHook(() => useArcheryScorer());
+    await act(async () => { await result.current.pickAndProcess(); });
+
+    expect(result.current.error).toBe('plain string error');
   });
 
   it('reset clears state', async () => {
@@ -99,6 +117,6 @@ describe('useArcheryScorer', () => {
     });
 
     expect(result.current.imageUri).toBeNull();
-    expect(result.current.rings).toBeNull();
+    expect(result.current.targets).toBeNull();
   });
 });
