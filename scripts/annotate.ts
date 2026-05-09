@@ -18,8 +18,7 @@ const db = new Pool({
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
-  // Route all unqualified table references to the test-specific schema.
-  options:  `-c search_path=${DB_SCHEMA},public`,
+  // search_path is set via PGOPTIONS env var when running under tests.
 });
 
 const RING_COLORS = [

@@ -93,22 +93,24 @@ test('visualize: exits 0 and writes a valid report.html', () => {
 
 const DB_SCHEMA  = 'test_scripts';
 const ANNOTATE_LOG = path.join(ROOT, 'logs/annotate-scripts.log');
-
-/** DB connection config — mirrors defaults in annotate.ts, pinned to test_scripts schema. */
+/** DB connection config — no search_path override; queries use fully-qualified table names. */
 const DB_CONFIG = {
   host:     process.env.DB_HOST     || 'localhost',
   port:     parseInt(process.env.DB_PORT || '5432'),
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
-  options:  `-c search_path=${DB_SCHEMA},public`,
 };
 
-/** Environment additions passed to every annotate subprocess. */
+/** Environment additions passed to every annotate subprocess.
+ *  PGOPTIONS is read by libpq before any connection is made, guaranteeing
+ *  search_path applies to every query the server issues.
+ */
 const ANNOTATE_ENV = {
   NO_BROWSER:   '1',
   DB_SCHEMA,
   ANNOTATE_LOG,
+  PGOPTIONS:    `-c search_path=${DB_SCHEMA},public`,
 };
 
 /** Compute the same algorithm hash the server uses. */
@@ -225,7 +227,7 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
   const db = new Pool(DB_CONFIG);
   try {
     await db.query(`
-      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      INSERT INTO "test_scripts".generated (filename, algorithm_hash, paper_boundary, rings, arrows)
       VALUES ($1, $2, NULL, $3, '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash,
@@ -271,7 +273,7 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
     const db2 = new Pool(DB_CONFIG);
     try {
       const { rows } = await db2.query(
-        'SELECT rings, algorithm_hash FROM generated WHERE filename = $1',
+        'SELECT rings, algorithm_hash FROM "test_scripts".generated WHERE filename = $1',
         [FILENAME],
       );
       expect(rows).toHaveLength(1);
@@ -328,7 +330,7 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
   const db = new Pool(DB_CONFIG);
   try {
     await db.query(`
-      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      INSERT INTO "test_scripts".generated (filename, algorithm_hash, paper_boundary, rings, arrows)
       VALUES ($1, $2, NULL, $3, '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash,
@@ -393,7 +395,7 @@ test('annotate: zero boundary in annotations is treated as unannotated at read t
   const db = new Pool(DB_CONFIG);
   try {
     await db.query(`
-      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      INSERT INTO "test_scripts".generated (filename, algorithm_hash, paper_boundary, rings, arrows)
       VALUES ($1, $2, $3, '[]', '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash,
@@ -402,7 +404,7 @@ test('annotate: zero boundary in annotations is treated as unannotated at read t
     `, [FILENAME, currentHash, VALID_BOUNDARY]);
 
     await db.query(`
-      INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+      INSERT INTO "test_scripts".annotations (filename, paper_boundary, rings, arrows)
       VALUES ($1, $2, '[]', '[]')
       ON CONFLICT (filename) DO UPDATE
         SET paper_boundary = EXCLUDED.paper_boundary,
@@ -440,8 +442,8 @@ test('annotate: zero boundary in annotations is treated as unannotated at read t
     // Remove the rows so subsequent tests don't inherit this test's state.
     const db2 = new Pool(DB_CONFIG);
     try {
-      await db2.query('DELETE FROM generated   WHERE filename = $1', [FILENAME]);
-      await db2.query('DELETE FROM annotations WHERE filename = $1', [FILENAME]);
+      await db2.query('DELETE FROM "test_scripts".generated WHERE filename = $1', [FILENAME]);
+      await db2.query('DELETE FROM "test_scripts".annotations WHERE filename = $1', [FILENAME]);
     } finally {
       await db2.end();
     }
@@ -466,7 +468,7 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
   const db = new Pool(DB_CONFIG);
   try {
     await db.query(`
-      INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows)
+      INSERT INTO "test_scripts".generated (filename, algorithm_hash, paper_boundary, rings, arrows)
       VALUES ($1, $2, $3, $4, '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash,
@@ -527,8 +529,8 @@ test('annotate: detection with all-zero boundary stores empty boundary in genera
 
   const db = new Pool(DB_CONFIG);
   try {
-    await db.query('DELETE FROM generated WHERE filename = $1', [FILENAME]);
-    await db.query('DELETE FROM annotations WHERE filename = $1', [FILENAME]);
+    await db.query('DELETE FROM "test_scripts".generated WHERE filename = $1', [FILENAME]);
+    await db.query('DELETE FROM "test_scripts".annotations WHERE filename = $1', [FILENAME]);
   } finally {
     await db.end();
   }
@@ -551,7 +553,7 @@ test('annotate: detection with all-zero boundary stores empty boundary in genera
     const db2 = new Pool(DB_CONFIG);
     try {
       const { rows } = await db2.query(
-        'SELECT algorithm_hash, paper_boundary FROM generated WHERE filename = $1',
+        'SELECT algorithm_hash, paper_boundary FROM "test_scripts".generated WHERE filename = $1',
         [FILENAME],
       );
       expect(rows).toHaveLength(1);
@@ -582,9 +584,9 @@ test('annotate: generation status transitions from queued to ready, SSE event re
   //    so the background queue has exactly one image to process (deterministic timing).
   const db = new Pool(DB_CONFIG);
   try {
-    await db.query('DELETE FROM generated');
+    await db.query('DELETE FROM "test_scripts".generated');
     await db.query(
-      `INSERT INTO generated (filename, algorithm_hash, rings, arrows) VALUES ($1, 'stale_for_test', '[]', '[]')`,
+      `INSERT INTO "test_scripts".generated (filename, algorithm_hash, rings, arrows) VALUES ($1, 'stale_for_test', '[]', '[]')`,
       [FILENAME],
     );
   } finally {
@@ -659,7 +661,7 @@ test('annotate: generation status transitions from queued to ready, SSE event re
     const db2 = new Pool(DB_CONFIG);
     try {
       const { rows } = await db2.query(
-        'SELECT algorithm_hash, rings FROM generated WHERE filename = $1',
+        'SELECT algorithm_hash, rings FROM "test_scripts".generated WHERE filename = $1',
         [FILENAME],
       );
       expect(rows).toHaveLength(1);
@@ -723,7 +725,7 @@ test('annotate: concurrent /api/image/ requests for same cached file both return
   try {
     // Ensure a valid generated row exists with the current hash.
     await db.query(`
-      INSERT INTO generated (filename, algorithm_hash, rings, arrows)
+      INSERT INTO "test_scripts".generated (filename, algorithm_hash, rings, arrows)
       VALUES ($1, $2, '[[]]', '[]')
       ON CONFLICT (filename) DO UPDATE
         SET algorithm_hash = EXCLUDED.algorithm_hash

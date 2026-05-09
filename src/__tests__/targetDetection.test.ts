@@ -20,14 +20,13 @@ import { expect, describe, afterAll, beforeAll, test } from '@jest/globals';
 
 const IMAGES_DIR = path.resolve(__dirname, '../../images');
 
-const DB_SCHEMA = 'test_td';
+const GEN = '"test_td".generated';
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
   port:     parseInt(process.env.DB_PORT || '5432'),
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
-  options:  `-c search_path=${DB_SCHEMA},public`,
 });
 
 afterAll(() => db.end());
@@ -94,7 +93,7 @@ beforeAll(async () => {
     .slice(0, 16);
 
   const { rows: genRows } = await db.query(
-    'SELECT filename, algorithm_hash FROM generated WHERE filename = ANY($1)',
+    `SELECT filename, algorithm_hash FROM ${GEN} WHERE filename = ANY($1)`,
     [imageFiles],
   );
   const inGenerated = new Map<string, string>(genRows.map((r: any) => [r.filename as string, r.algorithm_hash as string]));
@@ -109,7 +108,7 @@ beforeAll(async () => {
     const boundary = result.success ? result.targets.map(t => t.paperBoundary) : [];
     const rings    = result.success ? result.targets.map(t => t.rings) : [];
     await db.query(
-      `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+      `INSERT INTO ${GEN} (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
        VALUES ($1, $2, $3, $4, '[]', $5, $6)
        ON CONFLICT (filename) DO UPDATE
          SET algorithm_hash = EXCLUDED.algorithm_hash,
@@ -132,7 +131,7 @@ beforeAll(async () => {
 describe('findTarget', () => {
   test.each(imageFiles)('%s — detects 10 concentric rings', async (filename) => {
     const { rows } = await db.query(
-      'SELECT rings, paper_boundary, width, height FROM generated WHERE filename = $1',
+      `SELECT rings, paper_boundary, width, height FROM ${GEN} WHERE filename = $1`,
       [filename],
     );
     expect(rows.length).toBeGreaterThan(0);

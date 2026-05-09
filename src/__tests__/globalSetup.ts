@@ -43,11 +43,14 @@ export default async function globalSetup(): Promise<void> {
   };
 
   for (const schema of ['test_td', 'test_scripts']) {
-    const db = new Pool({ ...baseConfig, options: `-c search_path=${schema},public` });
+    const db = new Pool(baseConfig);
     try {
       await db.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
-      await db.query(GENERATED_DDL);
-      if (schema === 'test_scripts') await db.query(ANNOTATIONS_DDL);
+      // Use fully-qualified names so we don't depend on search_path.
+      await db.query(GENERATED_DDL.replace(/\bgenerated\b/g, `"${schema}".generated`));
+      if (schema === 'test_scripts') {
+        await db.query(ANNOTATIONS_DDL.replace(/\bannotations\b/g, `"${schema}".annotations`));
+      }
     } finally {
       await db.end();
     }
