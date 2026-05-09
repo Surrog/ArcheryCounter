@@ -10,6 +10,7 @@ import { ImageData, TargetData, generateddbToTargets, annotationToTargets, logEv
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
+const DB_SCHEMA = process.env.DB_SCHEMA ?? 'public';
 
 const db = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
@@ -17,6 +18,8 @@ const db = new Pool({
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
+  // Route all unqualified table references to the test-specific schema.
+  options:  `-c search_path=${DB_SCHEMA},public`,
 });
 
 const RING_COLORS = [
@@ -185,8 +188,11 @@ async function main(): Promise<void> {
   const currentHash = computeAlgorithmHash();
 
   // --- DB setup (AW-1) ---
+  if (DB_SCHEMA !== 'public') {
+    await db.query(`CREATE SCHEMA IF NOT EXISTS "${DB_SCHEMA}"`);
+  }
   await db.query(`
-    CREATE TABLE IF NOT EXISTS public.annotations (
+    CREATE TABLE IF NOT EXISTS annotations (
       filename text NOT NULL,
       paper_boundary jsonb NULL,
       rings jsonb DEFAULT '[]'::jsonb NOT NULL,
@@ -196,7 +202,7 @@ async function main(): Promise<void> {
     )
   `);
   await db.query(`
-    CREATE TABLE IF NOT EXISTS public."generated" (
+    CREATE TABLE IF NOT EXISTS "generated" (
       filename text NOT NULL,
       algorithm_hash text NOT NULL,
       paper_boundary jsonb NULL,

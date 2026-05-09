@@ -3,7 +3,7 @@ import { isSplineRing, RingSet, splineCentroid, isRingSet } from '../src/spline'
 import * as fs from 'fs';
 import * as path from 'path';
 
-export const LOG_PATH = path.resolve(__dirname, '../logs/annotate.log');
+export const LOG_PATH = process.env.ANNOTATE_LOG ?? path.resolve(__dirname, '../logs/annotate.log');
 
 export function logEvent(level: 'info' | 'warn' | 'error', event: string, filename: string, detail = '') {
   const line = JSON.stringify({ ts: new Date().toISOString(), level, event, filename, detail });
