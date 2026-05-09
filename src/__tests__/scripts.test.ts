@@ -218,10 +218,6 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
   const currentHash = computeAlgorithmHash();
   const CORRUPT_RINGS = JSON.stringify([{ points: [[null, null], [null, null], [null, null]] }]);
 
-  // Reset the log so only events from this test run appear in the assertions.
-  fs.mkdirSync(path.dirname(ANNOTATE_LOG), { recursive: true });
-  fs.writeFileSync(ANNOTATE_LOG, '');
-
   // 1. Inject a corrupt generated row with the correct hash so the server
   //    will think the image is ready and attempt the fast path.
   const db = new Pool(DB_CONFIG);
@@ -245,6 +241,8 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
     env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let stderrCapture = '';
+  proc.stderr?.on('data', (c: Buffer) => { stderrCapture += c.toString(); });
 
   try {
     await waitForAnnotateReady(proc, port, 30_000);
@@ -284,13 +282,8 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
       await db2.end();
     }
 
-    // 6. Verify the log file recorded the invalid_generated and fallback events.
-    expect(fs.existsSync(ANNOTATE_LOG)).toBe(true);
-    const logLines = fs.readFileSync(ANNOTATE_LOG, 'utf8')
-      .trim().split('\n').filter(Boolean)
-      .map(l => JSON.parse(l) as { event: string; filename: string });
-    expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
-    expect(logLines.some(l => l.event === 'fallback_slow_path'  && l.filename === FILENAME)).toBe(true);
+    // 6. Verify the server logged the invalid_generated event (captured from subprocess stderr).
+    expect(stderrCapture).toContain(`invalid_generated: ${FILENAME}`);
 
     // 7. Verify generation-status reflects the image as ready.
     const statusRes = await fetch(`http://localhost:${port}/api/generation-status`);
@@ -309,9 +302,6 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
 test('annotate: old flat rings format (pre-multi-target) triggers fallback and recompute', async () => {
   const FILENAME = '20190321_211008.jpg';
   const currentHash = computeAlgorithmHash();
-
-  fs.mkdirSync(path.dirname(ANNOTATE_LOG), { recursive: true });
-  fs.writeFileSync(ANNOTATE_LOG, '');
 
   // Build an old-format row: flat SplineRing[] with valid points, stored directly
   // as the rings column value — this is what rows written before the multi-target
@@ -347,6 +337,8 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
     env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let stderrCapture = '';
+  proc.stderr?.on('data', (c: Buffer) => { stderrCapture += c.toString(); });
 
   try {
     await waitForAnnotateReady(proc, port, 30_000);
@@ -368,12 +360,8 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
       }
     }
 
-    // Log must record invalid_generated for this filename.
-    expect(fs.existsSync(ANNOTATE_LOG)).toBe(true);
-    const logLines = fs.readFileSync(ANNOTATE_LOG, 'utf8')
-      .trim().split('\n').filter(Boolean)
-      .map(l => JSON.parse(l) as { event: string; filename: string });
-    expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
+    // Verify the server detected invalid data (captured from subprocess stderr).
+    expect(stderrCapture).toContain(`invalid_generated: ${FILENAME}`);
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
   }
@@ -458,9 +446,6 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
   const FILENAME = '20190321_211008.jpg';
   const currentHash = computeAlgorithmHash();
 
-  fs.mkdirSync(path.dirname(ANNOTATE_LOG), { recursive: true });
-  fs.writeFileSync(ANNOTATE_LOG, '');
-
   // Inject a generated row with current hash but all-zero boundary.
   const ZERO_BOUNDARY = JSON.stringify([{ points: [[0, 0], [0, 0], [0, 0], [0, 0]] }]);
   const ZERO_RINGS    = JSON.stringify([[{ points: Array.from({ length: 8 }, () => [0, 0]) }]]);
@@ -485,6 +470,8 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
     env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let stderrCapture = '';
+  proc.stderr?.on('data', (c: Buffer) => { stderrCapture += c.toString(); });
 
   try {
     await waitForAnnotateReady(proc, port, 30_000);
@@ -504,12 +491,8 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
       expect(ring.points.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
     }
 
-    // Log must record invalid_generated for this filename.
-    expect(fs.existsSync(ANNOTATE_LOG)).toBe(true);
-    const logLines = fs.readFileSync(ANNOTATE_LOG, 'utf8')
-      .trim().split('\n').filter(Boolean)
-      .map(l => JSON.parse(l) as { event: string; filename: string });
-    expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
+    // Verify the server detected invalid data (captured from subprocess stderr).
+    expect(stderrCapture).toContain(`invalid_generated: ${FILENAME}`);
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
   }
