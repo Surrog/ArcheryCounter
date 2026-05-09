@@ -91,13 +91,24 @@ test('visualize: exits 0 and writes a valid report.html', () => {
 // annotate (long-running HTTP server)
 // ---------------------------------------------------------------------------
 
-/** DB connection config — mirrors defaults in annotate.ts */
+const DB_SCHEMA  = 'test_scripts';
+const ANNOTATE_LOG = path.join(ROOT, 'logs/annotate-scripts.log');
+
+/** DB connection config — mirrors defaults in annotate.ts, pinned to test_scripts schema. */
 const DB_CONFIG = {
   host:     process.env.DB_HOST     || 'localhost',
   port:     parseInt(process.env.DB_PORT || '5432'),
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
+  options:  `-c search_path=${DB_SCHEMA},public`,
+};
+
+/** Environment additions passed to every annotate subprocess. */
+const ANNOTATE_ENV = {
+  NO_BROWSER:   '1',
+  DB_SCHEMA,
+  ANNOTATE_LOG,
 };
 
 /** Compute the same algorithm hash the server uses. */
@@ -152,7 +163,7 @@ test('annotate: server starts, listens, and serves GET /', async () => {
   return new Promise<void>((resolve, reject) => {
     const proc = spawn('npm', ['run', 'annotate'], {
       cwd: ROOT,
-      env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+      env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -205,6 +216,10 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
   const currentHash = computeAlgorithmHash();
   const CORRUPT_RINGS = JSON.stringify([{ points: [[null, null], [null, null], [null, null]] }]);
 
+  // Reset the log so only events from this test run appear in the assertions.
+  fs.mkdirSync(path.dirname(ANNOTATE_LOG), { recursive: true });
+  fs.writeFileSync(ANNOTATE_LOG, '');
+
   // 1. Inject a corrupt generated row with the correct hash so the server
   //    will think the image is ready and attempt the fast path.
   const db = new Pool(DB_CONFIG);
@@ -225,7 +240,7 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -268,9 +283,8 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
     }
 
     // 6. Verify the log file recorded the invalid_generated and fallback events.
-    const logPath = path.join(ROOT, 'logs/annotate.log');
-    expect(fs.existsSync(logPath)).toBe(true);
-    const logLines = fs.readFileSync(logPath, 'utf8')
+    expect(fs.existsSync(ANNOTATE_LOG)).toBe(true);
+    const logLines = fs.readFileSync(ANNOTATE_LOG, 'utf8')
       .trim().split('\n').filter(Boolean)
       .map(l => JSON.parse(l) as { event: string; filename: string });
     expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
@@ -293,6 +307,9 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
 test('annotate: old flat rings format (pre-multi-target) triggers fallback and recompute', async () => {
   const FILENAME = '20190321_211008.jpg';
   const currentHash = computeAlgorithmHash();
+
+  fs.mkdirSync(path.dirname(ANNOTATE_LOG), { recursive: true });
+  fs.writeFileSync(ANNOTATE_LOG, '');
 
   // Build an old-format row: flat SplineRing[] with valid points, stored directly
   // as the rings column value — this is what rows written before the multi-target
@@ -325,7 +342,7 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -350,9 +367,8 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
     }
 
     // Log must record invalid_generated for this filename.
-    const logPath = path.join(ROOT, 'logs/annotate.log');
-    expect(fs.existsSync(logPath)).toBe(true);
-    const logLines = fs.readFileSync(logPath, 'utf8')
+    expect(fs.existsSync(ANNOTATE_LOG)).toBe(true);
+    const logLines = fs.readFileSync(ANNOTATE_LOG, 'utf8')
       .trim().split('\n').filter(Boolean)
       .map(l => JSON.parse(l) as { event: string; filename: string });
     expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
@@ -399,7 +415,7 @@ test('annotate: zero boundary in annotations is treated as unannotated at read t
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -440,6 +456,9 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
   const FILENAME = '20190321_211008.jpg';
   const currentHash = computeAlgorithmHash();
 
+  fs.mkdirSync(path.dirname(ANNOTATE_LOG), { recursive: true });
+  fs.writeFileSync(ANNOTATE_LOG, '');
+
   // Inject a generated row with current hash but all-zero boundary.
   const ZERO_BOUNDARY = JSON.stringify([{ points: [[0, 0], [0, 0], [0, 0], [0, 0]] }]);
   const ZERO_RINGS    = JSON.stringify([[{ points: Array.from({ length: 8 }, () => [0, 0]) }]]);
@@ -461,7 +480,7 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -484,11 +503,10 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
     }
 
     // Log must record invalid_generated for this filename.
-    const logPath = path.join(ROOT, 'logs/annotate.log');
-    const logLines = fs.existsSync(logPath)
-      ? fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean)
-          .map(l => JSON.parse(l) as { event: string; filename: string })
-      : [];
+    expect(fs.existsSync(ANNOTATE_LOG)).toBe(true);
+    const logLines = fs.readFileSync(ANNOTATE_LOG, 'utf8')
+      .trim().split('\n').filter(Boolean)
+      .map(l => JSON.parse(l) as { event: string; filename: string });
     expect(logLines.some(l => l.event === 'invalid_generated' && l.filename === FILENAME)).toBe(true);
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
@@ -518,7 +536,7 @@ test('annotate: detection with all-zero boundary stores empty boundary in genera
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -576,7 +594,7 @@ test('annotate: generation status transitions from queued to ready, SSE event re
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -666,7 +684,7 @@ test('annotate: /api/save returns valid JSON with error key on malformed body', 
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -717,7 +735,7 @@ test('annotate: concurrent /api/image/ requests for same cached file both return
   const port = await getFreePort();
   const proc = spawn('npm', ['run', 'annotate'], {
     cwd: ROOT,
-    env: { ...process.env, NO_BROWSER: '1', ANNOTATE_PORT: String(port) },
+    env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
