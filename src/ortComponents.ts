@@ -37,9 +37,17 @@ export async function getSession(modelPath: string): Promise<OnnxSession> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     ort = require('onnxruntime-node') as typeof import('onnxruntime-node');
-  } catch {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    ort = require('onnxruntime-react-native') as typeof import('onnxruntime-node');
+  } catch (nodeErr) {
+    // In React Native / Metro, onnxruntime-node is not available, so fall back to the
+    // React Native runtime.  In a plain Node.js process, onnxruntime-react-native will
+    // also fail (its entry point contains TypeScript syntax that Node.js cannot parse),
+    // so we re-throw the original onnxruntime-node error to give a clear diagnosis.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      ort = require('onnxruntime-react-native') as typeof import('onnxruntime-node');
+    } catch {
+      throw nodeErr;
+    }
   }
 
   const session = await ort.InferenceSession.create(modelPath);

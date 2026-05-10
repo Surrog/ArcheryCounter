@@ -17,7 +17,7 @@ import * as path from 'path';
 import * as jpegJs from 'jpeg-js';
 
 import { detectBoundaries, releaseBoundarySession } from '../src/boundaryDetector';
-import { detectArrowsNN, releaseSession }            from '../src/arrowDetector';
+import { detectArrowsNN, releaseArrowSession }            from '../src/arrowDetector';
 
 const IMAGES_DIR     = path.resolve(__dirname, '../images');
 const SCRIPTS_DIR    = path.resolve(__dirname);
@@ -75,7 +75,7 @@ async function run(): Promise<Result> {
   }
 
   releaseBoundarySession();
-  releaseSession();
+  releaseArrowSession();
 
   return { boundary, arrows, errors };
 }

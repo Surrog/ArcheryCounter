@@ -2,13 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { launchImageLibrary } from 'react-native-image-picker';
 import ArcheryCounter, { ScoredArrow } from './ArcheryCounter';
 import type { TargetResult } from './ArcheryCounter';
-import type { Pixel } from './targetDetection';
 
 export interface ScorerState {
   imageUri: string | null;
   targets: TargetResult[] | null;
   arrows: ScoredArrow[] | null;
-  ringPoints: Pixel[][] | null;
   /** Original pixel dimensions of the image, as reported by the image picker */
   imageWidth: number | null;
   imageHeight: number | null;
@@ -20,7 +18,6 @@ const initialState: ScorerState = {
   imageUri: null,
   targets: null,
   arrows: null,
-  ringPoints: null,
   imageWidth: null,
   imageHeight: null,
   loading: false,
@@ -50,9 +47,9 @@ export function useArcheryScorer() {
     setState({ ...initialState, loading: true });
 
     try {
-      const { targets, arrows, ringPoints = null } = await ArcheryCounter.processImage(uri, asset.base64!);
+      const { targets, arrows } = await ArcheryCounter.processImage(asset.base64!);
       if (mountedRef.current) {
-        setState({ imageUri: uri, targets, arrows, ringPoints, imageWidth, imageHeight, loading: false, error: null });
+        setState({ imageUri: uri, targets, arrows, imageWidth, imageHeight, loading: false, error: null });
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);

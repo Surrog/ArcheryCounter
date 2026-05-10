@@ -120,7 +120,12 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
     const rings    = scaleRings(row.rings ?? [], sx, sy);
     const boundary = scaleBoundary(row.paper_boundary, sx, sy);
     const arrows   = scaleArrows(row.arrows ?? [], sx, sy);
-    const result: ArcheryResult = { success: rings.length > 0, targets: [] };
+    const result: ArcheryResult = {
+      success: rings.length > 0,
+      targets: rings.length > 0 && boundary
+        ? [{ rings, paperBoundary: boundary, ringPoints: [] }]
+        : [],
+    };
     // Load raw JPEG (no EXIF rotation) so orientation matches what the model was trained on.
     // Skipped when VISUALIZE_NO_NN=1 (used by tests to avoid slow NN inference).
     let nnBoundaries: Awaited<ReturnType<typeof detectBoundaries>> | undefined;
@@ -151,8 +156,8 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
        height         = EXCLUDED.height`,
     [
       filename, currentHash,
-      result.paperBoundary ? JSON.stringify(result.paperBoundary) : null,
-      JSON.stringify(result.rings ?? []),
+      result.targets[0]?.paperBoundary ? JSON.stringify(result.targets[0].paperBoundary) : null,
+      JSON.stringify(result.targets[0]?.rings ?? []),
       JSON.stringify(arrowsFull),
       width, height,
     ],
@@ -167,8 +172,7 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
   }
 
   const displayResult: ArcheryResult = {
-    success: result.success, targets: result.targets ?? [], rings: result.rings ?? [],
-    paperBoundary: result.paperBoundary, error: result.error,
+    success: result.success, targets: result.targets ?? [], error: result.error,
   };
   return { filename, base64, width, height, result: displayResult, arrows: arrowsFull, nnBoundaries: nnBoundaries2 };
 }
@@ -432,22 +436,23 @@ const HTML_HEAD = `<!DOCTYPE html>
 
 function renderSection(entry: ImageEntry): string {
   const { filename, base64, width, height, result, arrows, nnBoundaries } = entry;
+  const t0 = result.targets[0];
   const statusClass = result.success ? 'success' : 'error';
   const statusText = result.success
-    ? `&#10003; ${result.rings.length} rings &nbsp;&middot;&nbsp; ${arrows.length} arrow${arrows.length !== 1 ? 's' : ''} detected &nbsp;(${width}&times;${height} px)`
+    ? `&#10003; ${t0?.rings.length ?? 0} rings &nbsp;&middot;&nbsp; ${arrows.length} arrow${arrows.length !== 1 ? 's' : ''} detected &nbsp;(${width}&times;${height} px)`
     : `&#10007; Detection failed: ${result.error ?? 'unknown error'}`;
 
-  const content = result.success
-    ? renderSvg(base64, width, height, result.rings, arrows, result.paperBoundary, result.ringPoints, result.rayDebug, nnBoundaries)
+  const content = result.success && t0
+    ? renderSvg(base64, width, height, t0.rings, arrows, t0.paperBoundary, t0.ringPoints, t0.rayDebug, nnBoundaries)
     : base64
       ? `<img src="${base64}" style="max-width:100%;border-radius:6px" alt="${filename}"/>`
       : `<p style="color:#888;padding:12px">Image could not be loaded.</p>`;
 
-  const calibTable = result.success && result.calibration
-    ? `<details><summary>Colour calibration</summary>${renderCalibrationTable(result.calibration)}</details>`
+  const calibTable = result.success && t0?.calibration
+    ? `<details><summary>Colour calibration</summary>${renderCalibrationTable(t0.calibration)}</details>`
     : '';
-  const ringTable = result.success
-    ? `<details><summary>Ring data</summary>${renderRingTable(result.rings, result.paperBoundary)}</details>`
+  const ringTable = result.success && t0
+    ? `<details><summary>Ring data</summary>${renderRingTable(t0.rings, t0.paperBoundary)}</details>`
     : '';
   const arrowTable = result.success
     ? `<details open><summary>Arrows (${arrows.length})</summary>${renderArrowTable(arrows)}</details>`

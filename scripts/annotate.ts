@@ -18,7 +18,10 @@ const db = new Pool({
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME     || 'postgres',
-  // search_path is set via PGOPTIONS env var when running under tests.
+  // Route all unqualified table references to the correct schema.
+  // This is a PostgreSQL startup option sent by node-postgres at connection time.
+  // (PGOPTIONS env var is NOT read by node-postgres — it is pure JS, not libpq.)
+  ...(DB_SCHEMA !== 'public' && { options: `-c search_path=${DB_SCHEMA},public` }),
 });
 
 const RING_COLORS = [
