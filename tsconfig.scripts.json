@@ -3,6 +3,8 @@
     "target": "es2022",
     "module": "commonjs",
     "moduleResolution": "bundler",
+    "rootDir": ".",
+    "types": ["node"],
     "esModuleInterop": true,
     "strict": false,
     "skipLibCheck": true,
