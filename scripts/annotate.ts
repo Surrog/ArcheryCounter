@@ -121,11 +121,14 @@ function computeAlgorithmHash(): string {
 }
 
 async function loadImageBase64(imgPath: string): Promise<{ base64: string; width: number; height: number }> {
-  const { Jimp } = require('jimp');
-  const img = await Jimp.read(imgPath);
-  img.scaleToFit({ w: 1200, h: 1200 });
-  const base64 = await img.getBase64('image/jpeg');
-  return { base64, width: img.width, height: img.height };
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const sharp = require('sharp') as typeof import('sharp');
+  const { data: jpegBuf, info } = await sharp(imgPath)
+    .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+    .jpeg()
+    .toBuffer({ resolveWithObject: true });
+  const base64 = `data:image/jpeg;base64,${jpegBuf.toString('base64')}`;
+  return { base64, width: info.width, height: info.height };
 }
 
 async function processImage(imgPath: string, imgData: ImageData): Promise<ImageData> {

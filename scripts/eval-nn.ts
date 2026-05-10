@@ -12,7 +12,7 @@
 import * as path from 'path';
 import * as fs   from 'fs';
 import { Pool }  from 'pg';
-import { Jimp }  from 'jimp';
+import sharp from 'sharp';
 import { detectArrowsNN } from '../src/arrowDetector';
 
 const IMAGES_DIR    = path.resolve(__dirname, '../images');
@@ -98,13 +98,16 @@ async function main(): Promise<void> {
     if (!fs.existsSync(imgPath)) continue;
 
     // Load image (≤1200px, matching training pre-processing)
-    const img  = await Jimp.read(imgPath);
-    img.scaleToFit({ w: 1200, h: 1200 });
-    const rgba = new Uint8Array(img.bitmap.data.buffer);
-    const { width, height } = img.bitmap;
+    const { data: rawBuf, info } = await sharp(imgPath)
+      .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const rgba = new Uint8Array(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength);
+    const { width, height } = info;
 
     // Ground-truth tips (in ≤1200px coords)
-    const origW = img.bitmap.width;   // same — we scaled in place
+    const origW = width;   // same — we scaled in place
     const arrows: any[] = typeof row.arrows === 'string' ? JSON.parse(row.arrows) : row.arrows;
     const gtTips: [number, number][] = arrows
       .filter(a => a.tip != null)
