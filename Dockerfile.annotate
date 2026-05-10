@@ -2,14 +2,19 @@ FROM node:24-slim
 
 WORKDIR /app
 
-# Install dependencies first (layer cache)
+# Install dependencies (layer cache).
+# The postinstall script runs patch-gradle-plugin.js so it must be present.
 COPY package*.json ./
+COPY scripts/patch-gradle-plugin.js ./scripts/
 RUN npm ci
 
-# Copy source needed by the annotate script
+# Copy remaining source needed by the annotate script
 COPY tsconfig.scripts.json ./
 COPY scripts/ ./scripts/
 COPY src/ ./src/
+RUN mkdir -p models && chmod 777 models
+COPY scripts/nn/arrow_detector.onnx /app/models/
+COPY scripts/nn/boundary_detector.onnx /app/models/
 
 # images/ is mounted at runtime as a volume
 EXPOSE 3737
