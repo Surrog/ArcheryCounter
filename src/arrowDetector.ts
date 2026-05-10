@@ -10,7 +10,8 @@
  *   - Node.js scripts   → onnxruntime-node           (loaded from the filesystem)
  */
 
-import { getSession, OnnxSession, releaseSession } from './ortComponents';
+import { getSession, releaseSession } from './ortComponents';
+import type { OnnxSession } from './ortComponents';
 import type { ScoredArrow } from './scoring';
 
 // ── constants (must match training) ──────────────────────────────────────────

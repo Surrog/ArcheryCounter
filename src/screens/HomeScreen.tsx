@@ -21,7 +21,7 @@ const TOGGLE_LABELS: { key: VisKey; label: string }[] = [
 ];
 
 export function HomeScreen() {
-  const { imageUri, targets, arrows, ringPoints, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
+  const { imageUri, targets, arrows, imageWidth, imageHeight, loading, error, pickAndProcess, reset } =
     useArcheryScorer();
   const [visibility, setVisibility] = useState<OverlayVisibility>(DEFAULT_VISIBILITY);
   const [selectedTargetIdx, setSelectedTargetIdx] = useState<number | null>(null);
@@ -54,7 +54,6 @@ export function HomeScreen() {
               targets={targets}
               selectedTargetIdx={selectedTargetIdx}
               arrows={visibleArrows}
-              ringPoints={ringPoints}
               imageNaturalWidth={imageWidth}
               imageNaturalHeight={imageHeight}
               visibility={visibility}
