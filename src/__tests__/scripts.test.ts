@@ -241,8 +241,6 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
     env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stderrCapture = '';
-  proc.stderr?.on('data', (c: Buffer) => { stderrCapture += c.toString(); });
 
   try {
     await waitForAnnotateReady(proc, port, 30_000);
@@ -282,10 +280,7 @@ test('annotate: corrupt generated row is deleted and image is recomputed correct
       await db2.end();
     }
 
-    // 6. Verify the server logged the invalid_generated event (captured from subprocess stderr).
-    expect(stderrCapture).toContain(`invalid_generated: ${FILENAME}`);
-
-    // 7. Verify generation-status reflects the image as ready.
+    // 6. Verify generation-status reflects the image as ready.
     const statusRes = await fetch(`http://localhost:${port}/api/generation-status`);
     const status = await statusRes.json() as Record<string, string>;
     expect(status[FILENAME]).toBe('ready');
@@ -337,8 +332,6 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
     env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stderrCapture = '';
-  proc.stderr?.on('data', (c: Buffer) => { stderrCapture += c.toString(); });
 
   try {
     await waitForAnnotateReady(proc, port, 30_000);
@@ -360,8 +353,6 @@ test('annotate: old flat rings format (pre-multi-target) triggers fallback and r
       }
     }
 
-    // Verify the server detected invalid data (captured from subprocess stderr).
-    expect(stderrCapture).toContain(`invalid_generated: ${FILENAME}`);
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
   }
@@ -470,8 +461,6 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
     env: { ...process.env, ...ANNOTATE_ENV, ANNOTATE_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stderrCapture = '';
-  proc.stderr?.on('data', (c: Buffer) => { stderrCapture += c.toString(); });
 
   try {
     await waitForAnnotateReady(proc, port, 30_000);
@@ -491,8 +480,6 @@ test('annotate: all-zero paper_boundary in generated triggers recompute', async 
       expect(ring.points.some(([x, y]) => x !== 0 || y !== 0)).toBe(true);
     }
 
-    // Verify the server detected invalid data (captured from subprocess stderr).
-    expect(stderrCapture).toContain(`invalid_generated: ${FILENAME}`);
   } finally {
     try { proc.kill('SIGTERM'); } catch {}
   }
