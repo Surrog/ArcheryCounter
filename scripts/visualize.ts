@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { Jimp } from 'jimp';
+import sharp from 'sharp';
 import * as jpegJs from 'jpeg-js';
 import { Pool } from 'pg';
 import { findTarget, ArcheryResult, TargetBoundary, ColourCalibration, Pixel, RayDebugEntry } from '../src/targetDetection';
@@ -100,10 +100,11 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
 
   // Scale to ≤1200px — matches loadImageNode() used by detect-worker/globalSetup,
   // so cached DB coordinates are already in the same space as the display image.
-  const img = await Jimp.read(imgPath);
-  img.scaleToFit({ w: 1200, h: 1200 });
-  const { width, height } = img.bitmap;
-  const base64 = await img.getBase64('image/jpeg');
+  const { data: jpegBuf, info: { width, height } } = await sharp(imgPath)
+    .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+    .jpeg()
+    .toBuffer({ resolveWithObject: true });
+  const base64 = `data:image/jpeg;base64,${jpegBuf.toString('base64')}`;
 
   // ── cache check ──────────────────────────────────────────────────────────
   const cached = await db.query(
@@ -137,7 +138,12 @@ async function processImage(imgPath: string, currentHash: string): Promise<Image
   }
 
   // ── cache miss: run detection on the same ≤1200px image ──────────────────
-  const rgba = new Uint8Array(img.bitmap.data.buffer);
+  const { data: rgbaBuf } = await sharp(imgPath)
+    .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const rgba = new Uint8Array(rgbaBuf.buffer, rgbaBuf.byteOffset, rgbaBuf.byteLength);
   const result = findTarget(rgba, width, height);
   const arrowsFull = result.success && !process.env.VISUALIZE_NO_NN
     ? await detectArrowsNN(rgba, width, height, MODEL_PATH)

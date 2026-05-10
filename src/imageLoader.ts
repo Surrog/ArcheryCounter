@@ -21,18 +21,20 @@ export function decodeBase64Jpeg(base64: string): ImageBuffer {
 
 /**
  * Load a JPEG from the filesystem for Node.js / Jest tests.
- * NOT imported in the React Native bundle (jimp is a devDependency).
+ * NOT imported in the React Native bundle (sharp is a devDependency, Node-only).
  * Resizes to max 1200px on the longest side to keep test runtime manageable.
  */
 export async function loadImageNode(filePath: string): Promise<ImageBuffer> {
-  // Use require for CJS/Jest compatibility (jimp is a devDependency, Node-only)
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { Jimp } = require('jimp') as typeof import('jimp');
-  const img = await Jimp.read(filePath);
-  img.scaleToFit({ w: 1200, h: 1200 });
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const sharp = require('sharp') as typeof import('sharp');
+  const { data, info } = await sharp(filePath)
+    .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
   return {
-    rgba: new Uint8Array(img.bitmap.data.buffer),
-    width: img.bitmap.width,
-    height: img.bitmap.height,
+    rgba: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+    width: info.width,
+    height: info.height,
   };
 }
