@@ -103,14 +103,14 @@ const DB_CONFIG = {
 };
 
 /** Environment additions passed to every annotate subprocess.
- *  PGOPTIONS is read by libpq before any connection is made, guaranteeing
- *  search_path applies to every query the server issues.
+ *  DB_SCHEMA is read by annotate.ts which injects it as a Pool `options`
+ *  startup parameter — the correct way to set search_path for node-postgres
+ *  (pure JS, does not read libpq env vars like PGOPTIONS).
  */
 const ANNOTATE_ENV = {
   NO_BROWSER:   '1',
   DB_SCHEMA,
   ANNOTATE_LOG,
-  PGOPTIONS:    `-c search_path=${DB_SCHEMA},public`,
 };
 
 /** Compute the same algorithm hash the server uses. */
