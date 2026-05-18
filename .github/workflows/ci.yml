@@ -136,7 +136,7 @@ jobs:
 
   # ── iOS: build for simulator ─────────────────────────────────────────────────
   ios:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
