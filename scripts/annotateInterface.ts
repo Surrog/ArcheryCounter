@@ -197,7 +197,7 @@ export function targetsToDB(
   return {
     boundary: targets.map(t => t.paperBoundary ?? ({ points: [] } as TargetBoundary)),
     rings:    targets.map(t => t.ringSets ?? []).flat(),
-    arrows,
+    arrows: arrows.map(({ tip, score }) => ({ tip, score })),
   };
 }
 

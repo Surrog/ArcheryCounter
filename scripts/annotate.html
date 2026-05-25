@@ -389,7 +389,6 @@ function onScoreSelect(score) {
   if (pickerContext.type === 'new') {
     data.annotated.arrows.push({
       tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
-      nock: null,
       score,
     });
     pendingTip = null;
