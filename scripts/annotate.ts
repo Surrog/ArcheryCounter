@@ -6,7 +6,7 @@ import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
 import { findTarget, findRingSetFromCenter } from '../src/targetDetection';
 import { detectArrowsNN } from '../src/arrowDetector';
-import { ImageData, TargetData, generateddbToTargets, annotationToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
+import { ImageData, TargetData, dbToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
@@ -77,7 +77,7 @@ async function fetchGeneratedData(data: ImageData): Promise<[ImageData, boolean]
     console.warn(`multiple rows for image : ${data.filename}`)
   }
 
-  data.generated.targets = generateddbToTargets(rows[0].paper_boundary, rows[0].rings);
+  data.generated.targets = dbToTargets(rows[0].paper_boundary, rows[0].rings);
   data.generated.arrows = rows[0].arrows ?? [];
 
   if (!isValidDetected(data.generated.targets)) {
@@ -104,7 +104,7 @@ async function fetchAnnotationData(data: ImageData): Promise<[ImageData, boolean
     console.warn(`multiple rows for image : ${data.filename}`)
   } 
 
-  data.annotated.targets = annotationToTargets(rows[0].paper_boundary, rows[0].rings);
+  data.annotated.targets = dbToTargets(rows[0].paper_boundary, rows[0].rings);
   data.annotated.arrows = rows[0].arrows ?? [];
   console.log(`found annotation data: ${JSON.stringify(data.annotated, null, 2)}`); // I'm fine with this log being a bit noisy since annotation data is the main source of truth and we want to be sure it's loaded correctly
   return [data, true];
