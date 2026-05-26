@@ -23,7 +23,7 @@ import albumentations as A
 import cv2
 import numpy as np
 import psycopg2
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 from torch.utils.data import Dataset
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -212,7 +212,7 @@ class BoundaryDataset(Dataset):
 
         # Load image → RGB → grayscale (0.299R+0.587G+0.114B, matching TypeScript
         # letterboxGray's lum() formula) → letterbox to INPUT_SIZE
-        img_rgb = Image.open(os.path.join(self.images_dir, fname)).convert('RGB')
+        img_rgb = ImageOps.exif_transpose(Image.open(os.path.join(self.images_dir, fname))).convert('RGB')
         orig_w, orig_h = img_rgb.size
         arr_rgb = np.array(img_rgb, dtype=np.float32)
         arr_gray = (0.299 * arr_rgb[:, :, 0] +

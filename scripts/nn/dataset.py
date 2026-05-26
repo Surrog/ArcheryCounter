@@ -17,7 +17,7 @@ from functools import lru_cache
 import hashlib
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import psycopg2
 import torch
 from torch.utils.data import Dataset
@@ -67,7 +67,7 @@ def _load_letterboxed(path: str) -> tuple:
     Returns (img_np uint8, scale, pad_x, pad_y, orig_w, orig_h).
     """
     MAX_SIDE = 1200
-    img = Image.open(path).convert('RGB')
+    img = ImageOps.exif_transpose(Image.open(path)).convert('RGB')
     if max(img.size) > MAX_SIDE:
         pre_scale = MAX_SIDE / max(img.size)
         img = img.resize(

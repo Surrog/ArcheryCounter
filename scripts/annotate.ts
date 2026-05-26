@@ -124,6 +124,7 @@ async function loadImageBase64(imgPath: string): Promise<{ base64: string; width
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const sharp = require('sharp') as typeof import('sharp');
   const { data: jpegBuf, info } = await sharp(imgPath)
+    .rotate()
     .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
     .jpeg()
     .toBuffer({ resolveWithObject: true });
@@ -431,6 +432,10 @@ async function main(): Promise<void> {
                      updated_at     = NOW()`,
               [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings), JSON.stringify(dbArrows)],
             );
+            if (imgMeta) {
+              imgMeta.annotated.targets = targets;
+              imgMeta.annotated.arrows = dbArrows;
+            }
             console.log(`[save]   OK ${filename}: targets=${targets.length}, arrows=${dbArrows.length}`);
             logEvent('info', 'save-ok', filename, `targets=${targets.length} arrows=${dbArrows.length}`);
             saved++;

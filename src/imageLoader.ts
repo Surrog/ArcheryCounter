@@ -28,6 +28,7 @@ export async function loadImageNode(filePath: string): Promise<ImageBuffer> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const sharp = require('sharp') as typeof import('sharp');
   const { data, info } = await sharp(filePath)
+    .rotate()
     .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
     .ensureAlpha()
     .raw()
