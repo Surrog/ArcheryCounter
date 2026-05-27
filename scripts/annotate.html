@@ -1060,7 +1060,7 @@ async function save() {
 // ---- Reset functions ----
 function resetBoundaries() {
   const dt = getImageData(currentIdx);
-  dt.annotated = structuredClone(dt.generated);
+  dt.annotated.targets = structuredClone(dt.generated.targets);
   markModified(currentIdx);
   updateImageList();
   render();
