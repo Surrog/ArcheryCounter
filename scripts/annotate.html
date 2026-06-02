@@ -893,7 +893,11 @@ function attachSvgListeners() {
             ];
           }
         } else if (drag.type === 'arrow_tip') {
-          data.annotated.arrows[drag.ai].tip = [mpt.x, mpt.y];
+          const w = data.width ?? 0, h = data.height ?? 0;
+          data.annotated.arrows[drag.ai].tip = [
+            Math.round(Math.max(0, Math.min(w - 1, mpt.x))),
+            Math.round(Math.max(0, Math.min(h - 1, mpt.y))),
+          ];
         }
         render();
       };
