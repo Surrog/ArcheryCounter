@@ -481,7 +481,10 @@ async function main(): Promise<void> {
         inGenerated.delete(filename);
         inAnnotations.delete(filename);
         generationStatus.delete(filename);
-        filenames.splice(filenames.indexOf(filename), 1);
+        const idx = filenames.indexOf(filename);
+        if (idx !== -1) {
+          filenames.splice(idx, 1);
+        }
         logEvent('info', 'delete', filename, 'image and all data removed');
         broadcastSSE({ type: 'removed', filename });
         respond(200, '{"ok":true}');
@@ -489,6 +492,18 @@ async function main(): Promise<void> {
         console.error('Delete error:', err);
         respond(500, JSON.stringify({ error: String(err) }));
       }
+
+    } else if (req.method === 'POST' && req.url === '/api/refresh-images') {
+      const added = fs
+        .readdirSync(IMAGES_DIR)
+        .filter(f => /\.(jpg|jpeg)$/i.test(f))
+        .filter(f => !filenames.includes(f));
+      for (const name of added) {
+        filenames.push(name);
+        generationStatus.set(name, 'queued');
+        broadcastSSE({ type: 'new_image', filename: name });
+      }
+      respond(200, JSON.stringify({ added }));
 
     } else {
       respond(404, '');
@@ -499,19 +514,6 @@ async function main(): Promise<void> {
     console.log(`Annotation tool: http://localhost:${PORT}`);
     console.log('Press Ctrl+C to stop.');
     if (!process.env.NO_BROWSER) require('child_process').exec(`open http://localhost:${PORT}`);
-
-    fs.watch(IMAGES_DIR, (_event, name) => {
-      if (!name || !/\.(jpg|jpeg)$/i.test(name)) return;
-      if (filenames.includes(name)) return;
-      const fullPath = path.join(IMAGES_DIR, name);
-      setTimeout(() => {
-        if (!fs.existsSync(fullPath)) return;
-        console.log(`New image detected: ${name}`);
-        filenames.push(name);
-        generationStatus.set(name, 'queued');
-        broadcastSSE({ type: 'new_image', filename: name });
-      }, 500);
-    });
 
     // Process stale images in the background so clients see generation progress via SSE.
     const staleImages = filenames.filter(f => inGenerated.get(f) !== currentHash);

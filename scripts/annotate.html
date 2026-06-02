@@ -154,6 +154,7 @@
       <button id="btn-reset-arrows" class="secondary">Reset arrows</button>
       <button id="btn-reset">Reset all</button>
       <button id="btn-delete" class="danger">Delete image</button>
+      <button id="btn-refresh-images" class="secondary">Refresh image list</button>
     </div>
   </div>
   <div id="toolbar">
@@ -1231,6 +1232,12 @@ document.getElementById('btn-reset-rings').addEventListener('click', resetRings)
 document.getElementById('btn-reset-arrows').addEventListener('click', resetArrows);
 document.getElementById('btn-remove-ringset').addEventListener('click', removeActiveRingSet);
 document.getElementById('btn-delete').addEventListener('click', deleteCurrentImage);
+document.getElementById('btn-refresh-images').addEventListener('click', async () => {
+  const res = await fetch('/api/refresh-images', { method: 'POST' });
+  const { added } = await res.json();
+  if (added.length === 0) showStatusMsg('No new images found.', true, 2000);
+  else showStatusMsg(`Found ${added.length} new image${added.length !== 1 ? 's' : ''}.`, true, 2000);
+});
 document.getElementById('chk-rings').addEventListener('change', render);
 document.getElementById('chk-boundary').addEventListener('change', render);
 document.getElementById('chk-arrows').addEventListener('change', render);
