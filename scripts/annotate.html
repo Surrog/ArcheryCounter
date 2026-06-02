@@ -385,6 +385,14 @@ function hideScorePicker() {
 
 function onScoreSelect(score) {
   if (!pickerContext) return;
+  if (score === null) {
+    pendingTip = null;
+    addArrowMode = 'idle';
+    document.getElementById('btn-add-arrow').classList.remove('active-mode');
+    hideScorePicker();
+    render();
+    return;
+  }
   const data = getImageData(currentIdx);
   if (pickerContext.type === 'new') {
     data.annotated.arrows.push({
@@ -1154,23 +1162,11 @@ document.addEventListener('keydown', async (e) => {
       return;
     }
     if (addArrowMode === 'score-input' && pickerContext) {
-      if (pickerContext.type === 'new') {
-        const data = getImageData(currentIdx);
-        data.annotated.arrows.push({
-          tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
-          score: null,
-        });
-        pendingTip = null;
-        addArrowMode = 'idle';
-        document.getElementById('btn-add-arrow').classList.remove('active-mode');
-        hideScorePicker();
-        markModified(currentIdx);
-        updateImageList();
-        render();
-      } else {
-        hideScorePicker();
-        addArrowMode = 'idle';
-      }
+      pendingTip = null;
+      addArrowMode = 'idle';
+      document.getElementById('btn-add-arrow').classList.remove('active-mode');
+      hideScorePicker();
+      render();
     } else if (addArrowMode === 'place-tip') {
       pendingTip = null;
       addArrowMode = 'idle';

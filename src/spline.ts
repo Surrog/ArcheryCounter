@@ -74,6 +74,7 @@ export function pointInClosedSpline(
 /** Returns the mean of all control-point coordinates. */
 export function splineCentroid(ring: SplineRing): [number, number] {
   const n = ring.points.length;
+  if (n === 0) return [0, 0];
   return [
     ring.points.reduce((s, p) => s + p[0], 0) / n,
     ring.points.reduce((s, p) => s + p[1], 0) / n,

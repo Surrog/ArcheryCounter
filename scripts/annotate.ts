@@ -257,9 +257,6 @@ async function main(): Promise<void> {
   }
 
   const imageCache = new Map<string, ImageData>();
-  // Deduplicates concurrent /api/image/ requests for the same file so detection
-  // runs at most once.  Second caller awaits the first caller's promise.
-
   const html = generateHtml(filenames);
 
   async function computeGeneratedData(filename: string, imgPath: string, imageData: ImageData): Promise<ImageData> {
