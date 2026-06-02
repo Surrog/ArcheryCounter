@@ -263,36 +263,43 @@ async function main(): Promise<void> {
     broadcastSSE({ type: 'status', filename, state: 'computing' });
     imageData = await processImage(imgPath, imageData);
     const {boundary: dbBoundary, rings: dbRings, arrows: dbArrows} = targetsToDB(imageData.generated.targets, imageData.generated.arrows);
-    await db.query(
-      `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (filename) DO UPDATE
-          SET algorithm_hash = EXCLUDED.algorithm_hash,
-              paper_boundary = EXCLUDED.paper_boundary,
-              rings          = EXCLUDED.rings,
-              arrows         = EXCLUDED.arrows,
-              width          = EXCLUDED.width,
-              height         = EXCLUDED.height,
-              updated_at     = NOW()`,
-      [filename, currentHash,
-        JSON.stringify(dbBoundary), JSON.stringify(dbRings),
-        JSON.stringify(dbArrows), imageData.width, imageData.height],
-    );
-    inGenerated.set(filename, currentHash);
-    if (!inAnnotations.has(filename)) {
-      await db.query(`INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+    const seedAnnotations = !inAnnotations.has(filename);
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (filename) DO UPDATE
+            SET algorithm_hash = EXCLUDED.algorithm_hash,
+                paper_boundary = EXCLUDED.paper_boundary,
+                rings          = EXCLUDED.rings,
+                arrows         = EXCLUDED.arrows,
+                width          = EXCLUDED.width,
+                height         = EXCLUDED.height,
+                updated_at     = NOW()`,
+        [filename, currentHash,
+          JSON.stringify(dbBoundary), JSON.stringify(dbRings),
+          JSON.stringify(dbArrows), imageData.width, imageData.height],
+      );
+      if (seedAnnotations) {
+        await client.query(
+          `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
                VALUES ($1, $2, $3, $4)
-               ON CONFLICT (filename) DO UPDATE
-                 SET paper_boundary = EXCLUDED.paper_boundary,
-                     rings          = EXCLUDED.rings,
-                     arrows         = EXCLUDED.arrows,
-                     updated_at     = NOW()`, 
-        [filename, 
-          JSON.stringify(dbBoundary), 
-          JSON.stringify(dbRings), 
-          JSON.stringify(dbArrows)],);
-      inAnnotations.add(filename);
+               ON CONFLICT (filename) DO NOTHING`,
+          [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings), JSON.stringify(dbArrows)],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
     }
+
+    inGenerated.set(filename, currentHash);
+    if (seedAnnotations) inAnnotations.add(filename);
 
     broadcastSSE({ type: 'status', filename, state: 'ready' });
     return imageData;
@@ -379,11 +386,11 @@ async function main(): Promise<void> {
     } else if (req.method === 'POST' && req.url?.startsWith('/api/recompute/')) {
       const filename = decodeURIComponent(req.url.slice('/api/recompute/'.length));
       if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
+      await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
+      await db.query('DELETE FROM annotations WHERE filename = $1', [filename]);
       imageCache.delete(filename);
       inGenerated.delete(filename);
       inAnnotations.delete(filename);
-      await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
-      await db.query('DELETE FROM annotations WHERE filename = $1', [filename]);
       broadcastSSE({ type: 'status', filename, state: 'computing' });
       respond(202, '{"status":"computing"}');
       try {
