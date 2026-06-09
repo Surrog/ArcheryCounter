@@ -52,7 +52,7 @@
     "jest": "^30.4.2",
     "metro-config": "^0.84.2",
     "pg": "^8.20.0",
-    "prettier": "3.8.3",
+    "prettier": "3.8.4",
     "react-test-renderer": "19.2.7",
     "sharp": "^0.34.5",
     "ts-node": "^10.9.2",
