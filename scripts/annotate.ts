@@ -2,9 +2,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import { Worker } from 'worker_threads';
 import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
-import { findTarget, findRingSetFromCenter } from '../src/targetDetection';
+import { ArcheryResult, findRingSetFromCenter } from '../src/targetDetection';
 import { detectArrowsNN } from '../src/arrowDetector';
 import { ImageData, TargetData, dbToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
 
@@ -123,7 +124,7 @@ function computeAlgorithmHash(): string {
 async function loadImageBase64(imgPath: string): Promise<{ base64: string; width: number; height: number }> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const sharp = require('sharp') as typeof import('sharp');
-  const { data: jpegBuf, info } = await sharp(imgPath)
+  const { data: jpegBuf, info } = await sharp(imgPath, { failOn: 'none' })
     .rotate()
     .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
     .jpeg()
@@ -132,12 +133,26 @@ async function loadImageBase64(imgPath: string): Promise<{ base64: string; width
   return { base64, width: info.width, height: info.height };
 }
 
+/** Runs findTarget in a worker thread so the ~45s CPU-bound computation doesn't block the HTTP server. */
+function runFindTarget(rgba: Uint8Array, width: number, height: number): Promise<ArcheryResult> {
+  return new Promise((resolve, reject) => {
+    const buf = rgba.slice().buffer;
+    const worker = new Worker(path.resolve(__dirname, 'detectionWorker.cjs'), {
+      workerData: { rgba: buf, width, height },
+      transferList: [buf],
+    });
+    worker.once('message', (result: ArcheryResult) => resolve(result));
+    worker.once('error', reject);
+    worker.once('exit', () => worker.removeAllListeners());
+  });
+}
+
 async function processImage(imgPath: string, imgData: ImageData): Promise<ImageData> {
   const filename = path.basename(imgPath);
   console.log(`  [1/3] loadImageNode ${filename}…`);
   const { rgba, width, height } = await loadImageNode(imgPath);
   console.log(`  [2/3] findTarget ${filename}…`);
-  const result = findTarget(rgba, width, height);
+  const result = await runFindTarget(rgba, width, height);
   if (result.success) {
     console.log(`  findTarget success: ${filename}`);
     for (const t of result.targets) { 

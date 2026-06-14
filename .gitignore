@@ -60,3 +60,4 @@ yarn-error.log
 report.html
 scripts/nn/__pycache__/
 postgres/
+images/
