@@ -129,6 +129,11 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Install Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006"
+
       - name: Assemble debug APK
         run: |
           cd android
