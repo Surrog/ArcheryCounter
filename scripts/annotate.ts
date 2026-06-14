@@ -425,7 +425,7 @@ async function main(): Promise<void> {
       req.on('error', (err) => {
         console.error('Request error:', err);
         logEvent('error', 'save-request-error', '', String(err));
-        respond(500, JSON.stringify({ error: String(err) }));
+        respond(500, '{"error":"internal error"}');
       });
       req.on('end', async () => {
         try {
@@ -464,7 +464,7 @@ async function main(): Promise<void> {
         } catch (e) {
           console.error('Save error:', e);
           logEvent('error', 'save-error', '', String(e));
-          respond(500, JSON.stringify({ error: String(e) }));
+          respond(500, '{"error":"internal error"}');
         }
       });
 
@@ -474,7 +474,7 @@ async function main(): Promise<void> {
       req.on('error', (err) => {
         console.error('Request error:', err);
         logEvent('error', 'detect-ringset-request-error', '', String(err));
-        respond(500, JSON.stringify({ error: String(err) }));
+        respond(500, '{"error":"internal error"}');
       });
       req.on('end', async () => {
         try {
@@ -487,7 +487,7 @@ async function main(): Promise<void> {
           respond(200, JSON.stringify({ rings: t.rings, paperBoundary: t.paperBoundary }));
         } catch (e) {
           console.error('detect-ringset error:', e);
-          respond(500, JSON.stringify({ error: String(e) }));
+          respond(500, '{"error":"internal error"}');
         }
       });
 
@@ -512,7 +512,7 @@ async function main(): Promise<void> {
         respond(200, '{"ok":true}');
       } catch (err) {
         console.error('Delete error:', err);
-        respond(500, JSON.stringify({ error: String(err) }));
+        respond(500, '{"error":"internal error"}');
       }
 
     } else if (req.method === 'POST' && req.url === '/api/refresh-images') {
