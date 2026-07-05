@@ -12,7 +12,7 @@ public class ArcheryCounterPackage implements ReactPackage {
 
     @Override
     public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
-        return Collections.singletonList(new ArcheryCounterModule(reactContext));
+        return Collections.emptyList();
     }
 
     @Override

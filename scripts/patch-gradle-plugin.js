@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Patches node_modules to be compatible with Gradle 9.4.0+:
-// 1. @react-native/gradle-plugin: bumps Kotlin compiler 2.1.x → 2.3.0 and apiVersion 1.8 → 1.9.
+// 1. @react-native/gradle-plugin: bumps Kotlin compiler 2.1.x → 2.3.0 and apiVersion 1.8 → 2.0.
 // 2. onnxruntime-react-native: replaces VersionNumber (removed in Gradle 8) with plain Groovy comparison.
 const fs = require('fs');
 const path = require('path');
@@ -28,9 +28,9 @@ patch('gradle/libs.versions.toml', [
   [/^kotlin = "2\.\d+\.\d+"/m, 'kotlin = "2.3.0"'],
 ]);
 
-const api18to19 = [[/KotlinVersion\.KOTLIN_1_8/g, 'KotlinVersion.KOTLIN_1_9']];
+const apiPatch = [[/KotlinVersion\.KOTLIN_1_[89]/g, 'KotlinVersion.KOTLIN_2_0']];
 for (const sub of ['shared', 'shared-testutil', 'settings-plugin', 'react-native-gradle-plugin']) {
-  patch(`${sub}/build.gradle.kts`, api18to19);
+  patch(`${sub}/build.gradle.kts`, apiPatch);
 }
 
 // onnxruntime-react-native uses VersionNumber (internal Gradle API removed in Gradle 8+).
