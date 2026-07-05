@@ -154,6 +154,7 @@
       <button id="btn-reset-arrows" class="secondary">Reset arrows</button>
       <button id="btn-reset">Reset all</button>
       <button id="btn-delete" class="danger">Delete image</button>
+      <button id="btn-refresh-images" class="secondary">Refresh image list</button>
     </div>
   </div>
   <div id="toolbar">
@@ -385,11 +386,18 @@ function hideScorePicker() {
 
 function onScoreSelect(score) {
   if (!pickerContext) return;
+  if (score === null) {
+    pendingTip = null;
+    addArrowMode = 'idle';
+    document.getElementById('btn-add-arrow').classList.remove('active-mode');
+    hideScorePicker();
+    render();
+    return;
+  }
   const data = getImageData(currentIdx);
   if (pickerContext.type === 'new') {
     data.annotated.arrows.push({
       tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
-      nock: null,
       score,
     });
     pendingTip = null;
@@ -885,7 +893,11 @@ function attachSvgListeners() {
             ];
           }
         } else if (drag.type === 'arrow_tip') {
-          data.annotated.arrows[drag.ai].tip = [mpt.x, mpt.y];
+          const w = data.width ?? 0, h = data.height ?? 0;
+          data.annotated.arrows[drag.ai].tip = [
+            Math.round(Math.max(0, Math.min(w - 1, mpt.x))),
+            Math.round(Math.max(0, Math.min(h - 1, mpt.y))),
+          ];
         }
         render();
       };
@@ -1061,7 +1073,7 @@ async function save() {
 // ---- Reset functions ----
 function resetBoundaries() {
   const dt = getImageData(currentIdx);
-  dt.annotated = structuredClone(dt.generated);
+  dt.annotated.targets = structuredClone(dt.generated.targets);
   markModified(currentIdx);
   updateImageList();
   render();
@@ -1155,23 +1167,11 @@ document.addEventListener('keydown', async (e) => {
       return;
     }
     if (addArrowMode === 'score-input' && pickerContext) {
-      if (pickerContext.type === 'new') {
-        const data = getImageData(currentIdx);
-        data.annotated.arrows.push({
-          tip:  [Math.round(pendingTip[0]),  Math.round(pendingTip[1])],
-          score: null,
-        });
-        pendingTip = null;
-        addArrowMode = 'idle';
-        document.getElementById('btn-add-arrow').classList.remove('active-mode');
-        hideScorePicker();
-        markModified(currentIdx);
-        updateImageList();
-        render();
-      } else {
-        hideScorePicker();
-        addArrowMode = 'idle';
-      }
+      pendingTip = null;
+      addArrowMode = 'idle';
+      document.getElementById('btn-add-arrow').classList.remove('active-mode');
+      hideScorePicker();
+      render();
     } else if (addArrowMode === 'place-tip') {
       pendingTip = null;
       addArrowMode = 'idle';
@@ -1236,6 +1236,12 @@ document.getElementById('btn-reset-rings').addEventListener('click', resetRings)
 document.getElementById('btn-reset-arrows').addEventListener('click', resetArrows);
 document.getElementById('btn-remove-ringset').addEventListener('click', removeActiveRingSet);
 document.getElementById('btn-delete').addEventListener('click', deleteCurrentImage);
+document.getElementById('btn-refresh-images').addEventListener('click', async () => {
+  const res = await fetch('/api/refresh-images', { method: 'POST' });
+  const { added } = await res.json();
+  if (added.length === 0) showStatusMsg('No new images found.', true, 2000);
+  else showStatusMsg(`Found ${added.length} new image${added.length !== 1 ? 's' : ''}.`, true, 2000);
+});
 document.getElementById('chk-rings').addEventListener('change', render);
 document.getElementById('chk-boundary').addEventListener('change', render);
 document.getElementById('chk-arrows').addEventListener('change', render);

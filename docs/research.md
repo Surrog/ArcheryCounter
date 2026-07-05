@@ -64,7 +64,7 @@ Score = 10 − i, where i is the index of the innermost ring containing the tip 
 | black | 4, 3 |
 | white | 2, 1 |
 
-Output type: `ScoredArrow { tip, nock, score: number | 'X', lowConfidence? }`. `ProcessImageResult.arrows` is `ScoredArrow[]`.
+Output type: `ScoredArrow { tip, score: number | 'X', lowConfidence? }`. `ProcessImageResult.arrows` is `ScoredArrow[]`.
 
 ---
 

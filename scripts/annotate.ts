@@ -2,11 +2,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import { Worker } from 'worker_threads';
 import { Pool } from 'pg';
 import { loadImageNode } from '../src/imageLoader';
-import { findTarget, findRingSetFromCenter } from '../src/targetDetection';
+import { ArcheryResult, findRingSetFromCenter } from '../src/targetDetection';
 import { detectArrowsNN } from '../src/arrowDetector';
-import { ImageData, TargetData, generateddbToTargets, annotationToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
+import { ImageData, TargetData, dbToTargets, logEvent, LOG_PATH, clampBoundary, targetsToDB } from './annotateInterface';
 
 const IMAGES_DIR = path.resolve(__dirname, '../images');
 const PORT = parseInt(process.env.ANNOTATE_PORT || '3737', 10);
@@ -77,7 +78,7 @@ async function fetchGeneratedData(data: ImageData): Promise<[ImageData, boolean]
     console.warn(`multiple rows for image : ${data.filename}`)
   }
 
-  data.generated.targets = generateddbToTargets(rows[0].paper_boundary, rows[0].rings);
+  data.generated.targets = dbToTargets(rows[0].paper_boundary, rows[0].rings);
   data.generated.arrows = rows[0].arrows ?? [];
 
   if (!isValidDetected(data.generated.targets)) {
@@ -104,7 +105,7 @@ async function fetchAnnotationData(data: ImageData): Promise<[ImageData, boolean
     console.warn(`multiple rows for image : ${data.filename}`)
   } 
 
-  data.annotated.targets = annotationToTargets(rows[0].paper_boundary, rows[0].rings);
+  data.annotated.targets = dbToTargets(rows[0].paper_boundary, rows[0].rings);
   data.annotated.arrows = rows[0].arrows ?? [];
   console.log(`found annotation data: ${JSON.stringify(data.annotated, null, 2)}`); // I'm fine with this log being a bit noisy since annotation data is the main source of truth and we want to be sure it's loaded correctly
   return [data, true];
@@ -123,7 +124,8 @@ function computeAlgorithmHash(): string {
 async function loadImageBase64(imgPath: string): Promise<{ base64: string; width: number; height: number }> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const sharp = require('sharp') as typeof import('sharp');
-  const { data: jpegBuf, info } = await sharp(imgPath)
+  const { data: jpegBuf, info } = await sharp(imgPath, { failOn: 'none' })
+    .rotate()
     .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
     .jpeg()
     .toBuffer({ resolveWithObject: true });
@@ -131,12 +133,26 @@ async function loadImageBase64(imgPath: string): Promise<{ base64: string; width
   return { base64, width: info.width, height: info.height };
 }
 
+/** Runs findTarget in a worker thread so the ~45s CPU-bound computation doesn't block the HTTP server. */
+function runFindTarget(rgba: Uint8Array, width: number, height: number): Promise<ArcheryResult> {
+  return new Promise((resolve, reject) => {
+    const buf = rgba.slice().buffer;
+    const worker = new Worker(path.resolve(__dirname, 'detectionWorker.cjs'), {
+      workerData: { rgba: buf, width, height },
+      transferList: [buf],
+    });
+    worker.once('message', (result: ArcheryResult) => resolve(result));
+    worker.once('error', reject);
+    worker.once('exit', () => worker.removeAllListeners());
+  });
+}
+
 async function processImage(imgPath: string, imgData: ImageData): Promise<ImageData> {
   const filename = path.basename(imgPath);
   console.log(`  [1/3] loadImageNode ${filename}…`);
   const { rgba, width, height } = await loadImageNode(imgPath);
   console.log(`  [2/3] findTarget ${filename}…`);
-  const result = findTarget(rgba, width, height);
+  const result = await runFindTarget(rgba, width, height);
   if (result.success) {
     console.log(`  findTarget success: ${filename}`);
     for (const t of result.targets) { 
@@ -256,45 +272,49 @@ async function main(): Promise<void> {
   }
 
   const imageCache = new Map<string, ImageData>();
-  // Deduplicates concurrent /api/image/ requests for the same file so detection
-  // runs at most once.  Second caller awaits the first caller's promise.
-
   const html = generateHtml(filenames);
 
   async function computeGeneratedData(filename: string, imgPath: string, imageData: ImageData): Promise<ImageData> {
     broadcastSSE({ type: 'status', filename, state: 'computing' });
     imageData = await processImage(imgPath, imageData);
     const {boundary: dbBoundary, rings: dbRings, arrows: dbArrows} = targetsToDB(imageData.generated.targets, imageData.generated.arrows);
-    await db.query(
-      `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (filename) DO UPDATE
-          SET algorithm_hash = EXCLUDED.algorithm_hash,
-              paper_boundary = EXCLUDED.paper_boundary,
-              rings          = EXCLUDED.rings,
-              arrows         = EXCLUDED.arrows,
-              width          = EXCLUDED.width,
-              height         = EXCLUDED.height,
-              updated_at     = NOW()`,
-      [filename, currentHash,
-        JSON.stringify(dbBoundary), JSON.stringify(dbRings),
-        JSON.stringify(dbArrows), imageData.width, imageData.height],
-    );
-    inGenerated.set(filename, currentHash);
-    if (!inAnnotations.has(filename)) {
-      await db.query(`INSERT INTO annotations (filename, paper_boundary, rings, arrows)
+    const seedAnnotations = !inAnnotations.has(filename);
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO generated (filename, algorithm_hash, paper_boundary, rings, arrows, width, height)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (filename) DO UPDATE
+            SET algorithm_hash = EXCLUDED.algorithm_hash,
+                paper_boundary = EXCLUDED.paper_boundary,
+                rings          = EXCLUDED.rings,
+                arrows         = EXCLUDED.arrows,
+                width          = EXCLUDED.width,
+                height         = EXCLUDED.height,
+                updated_at     = NOW()`,
+        [filename, currentHash,
+          JSON.stringify(dbBoundary), JSON.stringify(dbRings),
+          JSON.stringify(dbArrows), imageData.width, imageData.height],
+      );
+      if (seedAnnotations) {
+        await client.query(
+          `INSERT INTO annotations (filename, paper_boundary, rings, arrows)
                VALUES ($1, $2, $3, $4)
-               ON CONFLICT (filename) DO UPDATE
-                 SET paper_boundary = EXCLUDED.paper_boundary,
-                     rings          = EXCLUDED.rings,
-                     arrows         = EXCLUDED.arrows,
-                     updated_at     = NOW()`, 
-        [filename, 
-          JSON.stringify(dbBoundary), 
-          JSON.stringify(dbRings), 
-          JSON.stringify(dbArrows)],);
-      inAnnotations.add(filename);
+               ON CONFLICT (filename) DO NOTHING`,
+          [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings), JSON.stringify(dbArrows)],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
     }
+
+    inGenerated.set(filename, currentHash);
+    if (seedAnnotations) inAnnotations.add(filename);
 
     broadcastSSE({ type: 'status', filename, state: 'ready' });
     return imageData;
@@ -381,11 +401,11 @@ async function main(): Promise<void> {
     } else if (req.method === 'POST' && req.url?.startsWith('/api/recompute/')) {
       const filename = decodeURIComponent(req.url.slice('/api/recompute/'.length));
       if (!filenames.includes(filename)) { respond(404, '{"error":"not found"}'); return; }
+      await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
+      await db.query('DELETE FROM annotations WHERE filename = $1', [filename]);
       imageCache.delete(filename);
       inGenerated.delete(filename);
       inAnnotations.delete(filename);
-      await db.query('DELETE FROM generated WHERE filename = $1', [filename]);
-      await db.query('DELETE FROM annotations WHERE filename = $1', [filename]);
       broadcastSSE({ type: 'status', filename, state: 'computing' });
       respond(202, '{"status":"computing"}');
       try {
@@ -431,6 +451,10 @@ async function main(): Promise<void> {
                      updated_at     = NOW()`,
               [filename, JSON.stringify(dbBoundary), JSON.stringify(dbRings), JSON.stringify(dbArrows)],
             );
+            if (imgMeta) {
+              imgMeta.annotated.targets = targets;
+              imgMeta.annotated.arrows = dbArrows;
+            }
             console.log(`[save]   OK ${filename}: targets=${targets.length}, arrows=${dbArrows.length}`);
             logEvent('info', 'save-ok', filename, `targets=${targets.length} arrows=${dbArrows.length}`);
             saved++;
@@ -479,7 +503,10 @@ async function main(): Promise<void> {
         inGenerated.delete(filename);
         inAnnotations.delete(filename);
         generationStatus.delete(filename);
-        filenames.splice(filenames.indexOf(filename), 1);
+        const idx = filenames.indexOf(filename);
+        if (idx !== -1) {
+          filenames.splice(idx, 1);
+        }
         logEvent('info', 'delete', filename, 'image and all data removed');
         broadcastSSE({ type: 'removed', filename });
         respond(200, '{"ok":true}');
@@ -487,6 +514,18 @@ async function main(): Promise<void> {
         console.error('Delete error:', err);
         respond(500, '{"error":"internal error"}');
       }
+
+    } else if (req.method === 'POST' && req.url === '/api/refresh-images') {
+      const added = fs
+        .readdirSync(IMAGES_DIR)
+        .filter(f => /\.(jpg|jpeg)$/i.test(f))
+        .filter(f => !filenames.includes(f));
+      for (const name of added) {
+        filenames.push(name);
+        generationStatus.set(name, 'queued');
+        broadcastSSE({ type: 'new_image', filename: name });
+      }
+      respond(200, JSON.stringify({ added }));
 
     } else {
       respond(404, '');
@@ -497,19 +536,6 @@ async function main(): Promise<void> {
     console.log(`Annotation tool: http://localhost:${PORT}`);
     console.log('Press Ctrl+C to stop.');
     if (!process.env.NO_BROWSER) require('child_process').exec(`open http://localhost:${PORT}`);
-
-    fs.watch(IMAGES_DIR, (_event, name) => {
-      if (!name || !/\.(jpg|jpeg)$/i.test(name)) return;
-      if (filenames.includes(name)) return;
-      const fullPath = path.join(IMAGES_DIR, name);
-      setTimeout(() => {
-        if (!fs.existsSync(fullPath)) return;
-        console.log(`New image detected: ${name}`);
-        filenames.push(name);
-        generationStatus.set(name, 'queued');
-        broadcastSSE({ type: 'new_image', filename: name });
-      }, 500);
-    });
 
     // Process stale images in the background so clients see generation progress via SSE.
     const staleImages = filenames.filter(f => inGenerated.get(f) !== currentHash);

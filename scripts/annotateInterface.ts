@@ -52,17 +52,35 @@ export function isBoundaryValid(pts: TargetBoundary): boolean {
     pts.points.some(p => p[0] !== 0 || p[1] !== 0);                   // at least one non-zero vertex
 }
 
-// Note: right now duplicates of annotation / generated format: here to handle case where we ever diverge the two formats in the future, and to keep the type guards simple 
-function isOldFormatBoundary(pts: any): boolean {
+// is format: [number, number][]
+function isSimpleFormatBoundary(pts: any): boolean {
   return Array.isArray(pts) && pts.length > 0 &&
   Array.isArray(pts[0]) && pts[0].length === 2 &&
   typeof pts[0]?.[0] === 'number' && typeof pts[0]?.[1] === 'number';
 }
 
-function isOldFormatRings(rings: any): boolean {
+// is format: [number, number][][]
+function isOldFormatBoundary(pts: any): boolean {
+  return Array.isArray(pts) && pts.length > 0 &&
+  Array.isArray(pts[0]) && pts[0].length > 0 &&
+  Array.isArray(pts[0][0]) && pts[0][0].length === 2 &&
+  typeof pts[0][0]?.[0] === 'number' && typeof pts[0][0]?.[1] === 'number';
+}
+
+
+function isSimpleFormatRings(rings: any): boolean {
   return Array.isArray(rings) && rings.length > 0 &&
     rings.every(r => isSplineRing(r));
 }
+
+export function isOldFormatRings(rings: any): boolean {
+  // Detects [[[SplineRing, ...]]] — targets × ring-sets × SplineRings (3-deep nesting)
+  return Array.isArray(rings) && rings.length > 0 &&
+    Array.isArray(rings[0]) && rings[0].length > 0 &&
+    Array.isArray(rings[0][0]) && rings[0][0].length > 0 &&
+    isSplineRing(rings[0][0][0]);
+}
+
 
 function isBoundaryRingsArrayPair(rawBoundary: any, rawRings: any): rawBoundary is any[] {
   return Array.isArray(rawBoundary) && Array.isArray(rawRings);
@@ -73,7 +91,7 @@ function isBoundaryRingsArrayPair(rawBoundary: any, rawRings: any): rawBoundary 
  * new format: rawBoundary: TargetBoundary[], rawRings: RingSet[]
  * → TargetData[] 
 */
-export function generateddbToTargets(rawBoundary: any, rawRings: any): TargetData[] {
+export function dbToTargets(rawBoundary: any, rawRings: any): TargetData[] {
   let result = [] as TargetData[];
   let targetsCentroid = [];
 
@@ -82,14 +100,24 @@ export function generateddbToTargets(rawBoundary: any, rawRings: any): TargetDat
     return result;
   }
 
-  if (isOldFormatBoundary(rawBoundary)) {
-    logEvent('warn', 'old_format_boundary', 'null', 'migrating old boundary format to new multi-target format');
+  if (isSimpleFormatBoundary(rawBoundary)) {
+    logEvent('warn', 'simple_format_boundary', 'null', 'migrating old boundary format to new multi-target format');
     let target = {
       paperBoundary: { points: rawBoundary as [number, number][] },
       ringSets: [] as RingSet[],
     } as TargetData;
     result.push(target);
     targetsCentroid.push(splineCentroid(target.paperBoundary));
+  } else if (isOldFormatBoundary(rawBoundary)) {
+    logEvent('warn', 'old_format_boundary', 'null', 'migrating old boundary format to new multi-target format');
+    for (const boundary of rawBoundary as [number, number][][]) {
+        let target = {
+          paperBoundary: { points: boundary as [number, number][] },
+          ringSets: [] as RingSet[],
+        } as TargetData;
+        result.push(target);
+        targetsCentroid.push(splineCentroid(target.paperBoundary));
+    }
   } else {
     for (const boundary of rawBoundary as TargetBoundary[]) {
       if (boundary.points.length === 0 || boundary.points.every(p => p[0] === 0 && p[1] === 0)) {
@@ -110,9 +138,20 @@ export function generateddbToTargets(rawBoundary: any, rawRings: any): TargetDat
     return result;
   }
 
-  if (isOldFormatRings(rawRings)) {
+  if (isSimpleFormatRings(rawRings)) {
     logEvent('warn', 'old_format_rings', 'null', 'migrating old rings format to new multi-target format');
     result[0].ringSets = [rawRings as RingSet];
+  } else if (isOldFormatRings(rawRings)) {
+    logEvent('warn', 'old_format_rings', 'null', 'migrating old rings format to new multi-target format');
+    for (const targetRingSets of rawRings as RingSet[][]) {
+      for (const rings of targetRingSets) {
+        if (rings.length === 0 || rings[0].points.length === 0) {
+          logEvent('warn', 'empty_ring_set', 'null', 'skipping empty ring set during migration');
+          continue;
+        }
+        result[0].ringSets.push(rings);
+      }
+    }
   } else {
     for (const rings of rawRings as RingSet[]) {
       let closest_target_idx = 0;
@@ -158,7 +197,7 @@ export function targetsToDB(
   return {
     boundary: targets.map(t => t.paperBoundary ?? ({ points: [] } as TargetBoundary)),
     rings:    targets.map(t => t.ringSets ?? []).flat(),
-    arrows,
+    arrows: arrows.map(({ tip, score }) => ({ tip, score })),
   };
 }
 

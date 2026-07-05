@@ -39,7 +39,7 @@ def export_onnx(checkpoint_path: str, out_path: str) -> None:
     torch.onnx.export(
         model, dummy, out_path,
         input_names  = ['image'],
-        output_names = ['tip_hm', 'score_map'],
+        output_names = ['tip_hm', 'score_map', 'offset_map'],
         dynamic_axes = {'image': {0: 'batch'}},
         opset_version = 18,
         do_constant_folding = True,

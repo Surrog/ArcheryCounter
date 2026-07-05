@@ -7,10 +7,10 @@ jest.mock('fs', () => ({
 }));
 
 import {
-  generateddbToTargets,
-  annotationToTargets,
+  dbToTargets,
   clampBoundary,
   targetsToDB,
+  isOldFormatRings,
   TargetData,
   ArrowData,
 } from '../../scripts/annotateInterface';
@@ -158,34 +158,34 @@ describe('targetsToDB', () => {
 describe('generateddbToTargets', () => {
 
   describe('null / undefined / non-array inputs', () => {
-    it('(null, null) → []', () => expect(generateddbToTargets(null, null)).toEqual([]));
-    it('(null, []) → []',   () => expect(generateddbToTargets(null, [])).toEqual([]));
-    it('([], null) → []',   () => expect(generateddbToTargets([], null)).toEqual([]));
-    it('(undefined, []) → []', () => expect(generateddbToTargets(undefined, [])).toEqual([]));
-    it('([], undefined) → []', () => expect(generateddbToTargets([], undefined)).toEqual([]));
-    it('(0, []) → []',         () => expect(generateddbToTargets(0, [])).toEqual([]));
-    it('("str", []) → []',     () => expect(generateddbToTargets('str', [])).toEqual([]));
-    it('({}, []) → []',        () => expect(generateddbToTargets({}, [])).toEqual([]));
-    it('([], false) → []',     () => expect(generateddbToTargets([], false)).toEqual([]));
+    it('(null, null) → []', () => expect(dbToTargets(null, null)).toEqual([]));
+    it('(null, []) → []',   () => expect(dbToTargets(null, [])).toEqual([]));
+    it('([], null) → []',   () => expect(dbToTargets([], null)).toEqual([]));
+    it('(undefined, []) → []', () => expect(dbToTargets(undefined, [])).toEqual([]));
+    it('([], undefined) → []', () => expect(dbToTargets([], undefined)).toEqual([]));
+    it('(0, []) → []',         () => expect(dbToTargets(0, [])).toEqual([]));
+    it('("str", []) → []',     () => expect(dbToTargets('str', [])).toEqual([]));
+    it('({}, []) → []',        () => expect(dbToTargets({}, [])).toEqual([]));
+    it('([], false) → []',     () => expect(dbToTargets([], false)).toEqual([]));
   });
 
   describe('new format — boundary edge cases', () => {
     it('[] (empty boundary array) → []', () => {
-      expect(generateddbToTargets([], [])).toEqual([]);
+      expect(dbToTargets([], [])).toEqual([]);
     });
 
     it('boundary with empty points array → skipped, returns []', () => {
-      expect(generateddbToTargets([{ points: [] }], [])).toEqual([]);
+      expect(dbToTargets([{ points: [] }], [])).toEqual([]);
     });
 
     it('boundary with all-zero points → skipped, returns []', () => {
       const zeroBoundary = [{ points: [[0,0],[0,0],[0,0],[0,0]] }];
-      expect(generateddbToTargets(zeroBoundary, [])).toEqual([]);
+      expect(dbToTargets(zeroBoundary, [])).toEqual([]);
     });
 
     it('boundary with at least one non-zero point → kept', () => {
       const almostZero = [{ points: [[0,0],[0,0],[0,0],[1,0]] }];
-      expect(generateddbToTargets(almostZero, [])).toHaveLength(1);
+      expect(dbToTargets(almostZero, [])).toHaveLength(1);
     });
 
     it('mix: first boundary all-zero, second valid → only second kept', () => {
@@ -193,7 +193,7 @@ describe('generateddbToTargets', () => {
         { points: [[0,0],[0,0],[0,0],[0,0]] },
         boundary(500, 50),
       ];
-      const result = generateddbToTargets(mixed, []);
+      const result = dbToTargets(mixed, []);
       expect(result).toHaveLength(1);
       expect(result[0].paperBoundary.points[0][0]).not.toBe(0);
     });
@@ -201,13 +201,13 @@ describe('generateddbToTargets', () => {
 
   describe('new format — rings assignment', () => {
     it('valid boundary + empty rings [] → 1 target with 0 ring sets', () => {
-      const result = generateddbToTargets([boundary(50, 50)], []);
+      const result = dbToTargets([boundary(50, 50)], []);
       expect(result).toHaveLength(1);
       expect(result[0].ringSets).toHaveLength(0);
     });
 
     it('1 boundary + 1 ring set → assigned to that target', () => {
-      const result = generateddbToTargets([boundary(50, 50)], [rs(50, 50)]);
+      const result = dbToTargets([boundary(50, 50)], [rs(50, 50)]);
       expect(result).toHaveLength(1);
       expect(result[0].ringSets).toHaveLength(1);
     });
@@ -215,7 +215,7 @@ describe('generateddbToTargets', () => {
     it('2 boundaries + 2 ring sets → each ring set goes to nearest target', () => {
       const boundaries = [boundary(50, 50), boundary(500, 50)];
       const rings = [rs(45, 45), rs(500, 50)];
-      const result = generateddbToTargets(boundaries, rings);
+      const result = dbToTargets(boundaries, rings);
       expect(result[0].ringSets).toHaveLength(1);
       expect(result[1].ringSets).toHaveLength(1);
       // first ring set is near (50,50), not (500,50)
@@ -226,25 +226,25 @@ describe('generateddbToTargets', () => {
     it('2 ring sets both near same target → both assigned to it', () => {
       const boundaries = [boundary(50, 50), boundary(500, 50)];
       const rings = [rs(40, 40), rs(60, 60)];
-      const result = generateddbToTargets(boundaries, rings);
+      const result = dbToTargets(boundaries, rings);
       expect(result[0].ringSets).toHaveLength(2);
       expect(result[1].ringSets).toHaveLength(0);
     });
 
     it('empty RingSet (rings=[]) → skipped, not pushed', () => {
-      const result = generateddbToTargets([boundary(50, 50)], [[]]);
+      const result = dbToTargets([boundary(50, 50)], [[]]);
       expect(result[0].ringSets).toHaveLength(0);
     });
 
     it('RingSet with first ring having empty points → skipped', () => {
       const emptyPointsRS = [{ points: [] as [number,number][] }];
-      const result = generateddbToTargets([boundary(50, 50)], [emptyPointsRS]);
+      const result = dbToTargets([boundary(50, 50)], [emptyPointsRS]);
       expect(result[0].ringSets).toHaveLength(0);
     });
 
     it('mix of valid and empty ring sets → only valid ones pushed', () => {
       const rings = [[], rs(50, 50), [{ points: [] as [number,number][] }], rs(60, 60)];
-      const result = generateddbToTargets([boundary(50, 50)], rings);
+      const result = dbToTargets([boundary(50, 50)], rings);
       expect(result[0].ringSets).toHaveLength(2);
     });
   });
@@ -252,7 +252,7 @@ describe('generateddbToTargets', () => {
   describe('old format — boundary migration', () => {
     it('old flat [x,y][] boundary + empty rings → 1 target, 0 ring sets', () => {
       const oldBoundary = [[0,0],[100,0],[100,100],[0,100]];
-      const result = generateddbToTargets(oldBoundary, []);
+      const result = dbToTargets(oldBoundary, []);
       expect(result).toHaveLength(1);
       expect(result[0].paperBoundary.points).toEqual(oldBoundary);
       expect(result[0].ringSets).toHaveLength(0);
@@ -261,7 +261,7 @@ describe('generateddbToTargets', () => {
     it('old flat boundary + old flat SplineRing[] → 1 target, 1 ring set with all rings', () => {
       const oldBoundary = [[0,0],[100,0],[100,100],[0,100]];
       const oldRings = [ring(45, 45), ring(50, 50)]; // flat SplineRing[]
-      const result = generateddbToTargets(oldBoundary, oldRings);
+      const result = dbToTargets(oldBoundary, oldRings);
       expect(result).toHaveLength(1);
       expect(result[0].ringSets).toHaveLength(1);
       expect(result[0].ringSets[0]).toHaveLength(2);
@@ -270,16 +270,40 @@ describe('generateddbToTargets', () => {
     it('old flat boundary + new RingSet[] → 1 target, ring set assigned', () => {
       const oldBoundary = [[0,0],[100,0],[100,100],[0,100]];
       const newRings = [rs(50, 50)];
-      const result = generateddbToTargets(oldBoundary, newRings);
+      const result = dbToTargets(oldBoundary, newRings);
       expect(result).toHaveLength(1);
       expect(result[0].ringSets).toHaveLength(1);
     });
   });
 
+  describe('old format — boundary migration 20190321_212022.jpg', () => {
+    it('old boundary + empty rings → 1 target, 0 ring sets', () => {
+      const oldBoundary = [[[537, 299], [534, 509], [524, 752], [309, 772], [81, 774], [70, 619], [55, 307], [280, 304]]];
+      const result = dbToTargets(oldBoundary, []);
+      // dump generated result for debugging if test fails, since this was a real-world edge case
+      console.log('generateddbToTargets output:', JSON.stringify(result, null, 2));
+      expect(result).toHaveLength(1);
+      expect(result[0].paperBoundary.points).toEqual(oldBoundary[0]);
+      expect(result[0].ringSets).toHaveLength(0);
+    });
+
+    it('old boundary + old ring → 1 target, 1 ring set with all rings', () => {
+      const oldBoundary = [[[537, 299], [534, 509], [524, 752], [309, 772], [81, 774], [70, 619], [55, 307], [280, 304]]];
+      const oldRings = [[[{"points": [[319.75, 561.9166870117188], [302.75, 568.2166748046875], [285.75, 559.2166748046875], [281.68388939644456, 540.6081073548487], [290.75, 528.9166870117188], [304.75, 523.9166870117188], [319.75, 531.5], [325.75, 546.5]]}, {"points": [[322.92582730418087, 581.8131844699905], [289.3227100829142, 584.4548110850145], [263.52553985011946, 562.418942659258], [261.75, 530.2166748046875], [283.75, 506.2166748046875], [315.75, 504.2166748046875], [339.75, 523.2166748046875], [344.65064118371436, 556.0414918585415]]}, {"points": [[334.7432145275989, 601.4692877092043], [280.75, 607.9166870117188], [243.75, 576.9166870117188], [239.43338090539368, 522.4978392393069], [273.75, 485.91668701171875], [319.75, 481.91668701171875], [359.9527647407154, 511.2297428621181], [365.863209335641, 562.1575446770947]]}, {"points": [[338.33635818984254, 624.3843651505729], [267.75, 625.5], [220.75, 579.5], [221.75, 509.2166748046875], [268.75, 464.2166748046875], [335.75, 462.2166748046875], [383.4441064994012, 507.1880025210357], [385.01483264172833, 575.5030093243266]]}, {"points": [[347.600350350042, 643.717363901502], [263.75, 647.2166748046875], [201.75, 589.2166748046875], [200.04725120237538, 502.0309195284556], [260.75, 441.91668701171875], [341.6775328765211, 439.23781524117055], [402.7960277136666, 497.9262621049075], [405.2493390386593, 582.624464387946]]}, {"points": [[379.75, 434.2166748046875], [432.75, 516.2166748046875], [410.75, 619.2166748046875], [324.75, 672.9166870117188], [225.61879280716008, 653.7941114983155], [170.18664738315226, 567.2484575038859], [191.75, 469.2166748046875], [279.75, 411.2166748046875]]}, {"points": [[393.75, 665.9166870117188], [273.75, 692.9166870117188], [176.75, 635.2166748046875], [149.48658971330514, 519.1754490635531], [207.75, 419.5], [327.75, 388.2166748046875], [425.8033829781032, 450.1785554039767], [455.8100005277295, 565.4799348528486]]}, {"points": [[421.0511927470803, 407.55424522495446], [479.97712315905795, 529.2638348180881], [432.75, 658.2166748046875], [311.75, 716.9166870117188], [184.2453974939544, 677.1011386914472], [125.3194670819767, 555.3915490983136], [167.75, 422.5], [292.75, 361.5]]}, {"points": [[434.75, 686.2166748046875], [294.75, 741.2166748046875], [151.75, 675.2166748046875], [100.75, 534.5], [165.99312529704744, 392.27366542147536], [316.75, 338.5], [452.75, 408.5], [499.75, 557.2166748046875]]}, {"points": [[444.75, 704.2166748046875], [293.75, 761.4000244140625], [136.75, 691.61669921875], [76.75, 531.2166748046875], [150.80653077319363, 375.5539462890472], [314.75, 313.5], [471.75, 391.70001220703125], [521.75, 556.2166748046875]]}]]]; // flat SplineRing[]
+      expect(isOldFormatRings(oldRings)).toBe(true);
+      const result = dbToTargets(oldBoundary, oldRings);
+      expect(result).toHaveLength(1);
+      expect(result[0].ringSets).toHaveLength(1);
+      expect(result[0].ringSets[0]).toHaveLength(10);
+      expect(result[0].paperBoundary.points).toEqual(oldBoundary[0]);
+    });
+  });
+
+
   describe('[RingSet] — single-element RingSet[] is valid new format', () => {
     it('[RingSet] processed correctly without unwanted flattening', () => {
       // A single-element RingSet[] must NOT be misidentified as double-nested.
-      const result = generateddbToTargets([boundary(50, 50)], [rs(50, 50)]);
+      const result = dbToTargets([boundary(50, 50)], [rs(50, 50)]);
       expect(result[0].ringSets).toHaveLength(1);
       expect(result[0].ringSets[0]).toHaveLength(1); // one SplineRing in the set
     });
@@ -292,7 +316,7 @@ describe('generateddbToTargets', () => {
         { paperBoundary: boundary(500, 50), ringSets: [rs(500, 50)] },
       ];
       const { boundary: dbBoundary, rings: dbRings } = targetsToDB(original, []);
-      const result = generateddbToTargets(dbBoundary, dbRings);
+      const result = dbToTargets(dbBoundary, dbRings);
       expect(result).toHaveLength(2);
       expect(result[0].ringSets).toHaveLength(2);
       expect(result[1].ringSets).toHaveLength(1);
@@ -300,33 +324,33 @@ describe('generateddbToTargets', () => {
   });
 });
 
-// ---- annotationToTargets -----------------------------------------------------
+// ---- dbToTargets -----------------------------------------------------
 
-describe('annotationToTargets', () => {
+describe('dbToTargets', () => {
 
   describe('null / undefined / non-array inputs', () => {
-    it('(null, null) → []', () => expect(annotationToTargets(null, null)).toEqual([]));
-    it('(null, []) → []',   () => expect(annotationToTargets(null, [])).toEqual([]));
-    it('([], null) → []',   () => expect(annotationToTargets([], null)).toEqual([]));
-    it('(undefined, []) → []', () => expect(annotationToTargets(undefined, [])).toEqual([]));
-    it('(0, []) → []',         () => expect(annotationToTargets(0, [])).toEqual([]));
-    it('(true, []) → []',      () => expect(annotationToTargets(true, [])).toEqual([]));
-    it('([], "str") → []',     () => expect(annotationToTargets([], 'str')).toEqual([]));
+    it('(null, null) → []', () => expect(dbToTargets(null, null)).toEqual([]));
+    it('(null, []) → []',   () => expect(dbToTargets(null, [])).toEqual([]));
+    it('([], null) → []',   () => expect(dbToTargets([], null)).toEqual([]));
+    it('(undefined, []) → []', () => expect(dbToTargets(undefined, [])).toEqual([]));
+    it('(0, []) → []',         () => expect(dbToTargets(0, [])).toEqual([]));
+    it('(true, []) → []',      () => expect(dbToTargets(true, [])).toEqual([]));
+    it('([], "str") → []',     () => expect(dbToTargets([], 'str')).toEqual([]));
   });
 
   describe('new format — boundary edge cases', () => {
-    it('[] → []', () => expect(annotationToTargets([], [])).toEqual([]));
+    it('[] → []', () => expect(dbToTargets([], [])).toEqual([]));
 
     it('boundary with empty points → skipped, returns []', () => {
-      expect(annotationToTargets([{ points: [] }], [])).toEqual([]);
+      expect(dbToTargets([{ points: [] }], [])).toEqual([]);
     });
 
     it('all-zero boundary → skipped, returns []', () => {
-      expect(annotationToTargets([{ points: [[0,0],[0,0],[0,0],[0,0]] }], [])).toEqual([]);
+      expect(dbToTargets([{ points: [[0,0],[0,0],[0,0],[0,0]] }], [])).toEqual([]);
     });
 
     it('boundary with one non-zero point → kept', () => {
-      expect(annotationToTargets([{ points: [[0,0],[0,0],[0,0],[0,1]] }], [])).toHaveLength(1);
+      expect(dbToTargets([{ points: [[0,0],[0,0],[0,0],[0,1]] }], [])).toHaveLength(1);
     });
 
     it('mix: zero then valid boundary → only valid kept', () => {
@@ -334,24 +358,24 @@ describe('annotationToTargets', () => {
         { points: [[0,0],[0,0],[0,0],[0,0]] },
         boundary(500, 50),
       ];
-      const result = annotationToTargets(mixed, []);
+      const result = dbToTargets(mixed, []);
       expect(result).toHaveLength(1);
     });
   });
 
   describe('new format — rings assignment', () => {
     it('1 boundary + empty rings → 1 target, 0 ring sets', () => {
-      const result = annotationToTargets([boundary(50, 50)], []);
+      const result = dbToTargets([boundary(50, 50)], []);
       expect(result[0].ringSets).toHaveLength(0);
     });
 
     it('1 boundary + 1 ring set → assigned', () => {
-      const result = annotationToTargets([boundary(50, 50)], [rs(50, 50)]);
+      const result = dbToTargets([boundary(50, 50)], [rs(50, 50)]);
       expect(result[0].ringSets).toHaveLength(1);
     });
 
     it('2 boundaries + 2 ring sets → centroid matching', () => {
-      const result = annotationToTargets(
+      const result = dbToTargets(
         [boundary(50, 50), boundary(500, 50)],
         [rs(45, 45), rs(500, 50)],
       );
@@ -360,12 +384,12 @@ describe('annotationToTargets', () => {
     });
 
     it('empty RingSet → skipped', () => {
-      const result = annotationToTargets([boundary(50, 50)], [[]]);
+      const result = dbToTargets([boundary(50, 50)], [[]]);
       expect(result[0].ringSets).toHaveLength(0);
     });
 
     it('RingSet with empty first ring points → skipped', () => {
-      const result = annotationToTargets(
+      const result = dbToTargets(
         [boundary(50, 50)],
         [[{ points: [] as [number,number][] }]],
       );
@@ -374,7 +398,7 @@ describe('annotationToTargets', () => {
 
     it('mix of valid, empty, and zero-points ring sets → only valid pushed', () => {
       const rings = [[], rs(50, 50), [{ points: [] as [number,number][] }], rs(60, 60)];
-      const result = annotationToTargets([boundary(50, 50)], rings);
+      const result = dbToTargets([boundary(50, 50)], rings);
       expect(result[0].ringSets).toHaveLength(2);
     });
   });
@@ -382,7 +406,7 @@ describe('annotationToTargets', () => {
   describe('old annotation boundary format', () => {
     it('old flat [x,y][] boundary + empty rings → 1 target', () => {
       const oldBoundary = [[0,0],[100,0],[100,100],[0,100]];
-      const result = annotationToTargets(oldBoundary, []);
+      const result = dbToTargets(oldBoundary, []);
       expect(result).toHaveLength(1);
       expect(result[0].paperBoundary.points).toEqual(oldBoundary);
       expect(result[0].ringSets).toHaveLength(0);
@@ -391,7 +415,7 @@ describe('annotationToTargets', () => {
     it('old flat boundary + old flat SplineRing[] → 1 target, 1 ring set', () => {
       const oldBoundary = [[0,0],[100,0],[100,100],[0,100]];
       const oldRings = [ring(45, 45), ring(55, 55)]; // isOldAnnotationRings path
-      const result = annotationToTargets(oldBoundary, oldRings);
+      const result = dbToTargets(oldBoundary, oldRings);
       expect(result).toHaveLength(1);
       expect(result[0].ringSets).toHaveLength(1);
       expect(result[0].ringSets[0]).toHaveLength(2);
@@ -399,7 +423,7 @@ describe('annotationToTargets', () => {
 
     it('old flat boundary + new RingSet[] → 1 target, ring set assigned', () => {
       const oldBoundary = [[0,0],[100,0],[100,100],[0,100]];
-      const result = annotationToTargets(oldBoundary, [rs(50, 50)]);
+      const result = dbToTargets(oldBoundary, [rs(50, 50)]);
       expect(result).toHaveLength(1);
       expect(result[0].ringSets).toHaveLength(1);
     });
@@ -409,27 +433,27 @@ describe('annotationToTargets', () => {
       // reach closest_target_idx=0 (the only target). No index-out-of-bounds.
       const oldBoundary = [[0,0],[100,0],[100,100],[0,100]];
       const twoRingSets = [rs(30, 30), rs(70, 70)];
-      const result = annotationToTargets(oldBoundary, twoRingSets);
+      const result = dbToTargets(oldBoundary, twoRingSets);
       expect(result[0].ringSets).toHaveLength(2);
     });
   });
 
   describe('[RingSet] — single-element RingSet[] is valid new format', () => {
     it('[RingSet] processed correctly without unwanted flattening', () => {
-      const result = annotationToTargets([boundary(50, 50)], [rs(50, 50)]);
+      const result = dbToTargets([boundary(50, 50)], [rs(50, 50)]);
       expect(result[0].ringSets).toHaveLength(1);
       expect(result[0].ringSets[0]).toHaveLength(1);
     });
   });
 
   describe('round-trip with targetsToDB', () => {
-    it('targetsToDB → annotationToTargets reproduces equivalent structure', () => {
+    it('targetsToDB → dbToTargets reproduces equivalent structure', () => {
       const original: TargetData[] = [
         { paperBoundary: boundary(50, 50), ringSets: [rs(45, 45)] },
         { paperBoundary: boundary(500, 50), ringSets: [rs(495, 50), rs(505, 50)] },
       ];
       const { boundary: dbBoundary, rings: dbRings } = targetsToDB(original, []);
-      const result = annotationToTargets(dbBoundary, dbRings);
+      const result = dbToTargets(dbBoundary, dbRings);
       expect(result).toHaveLength(2);
       expect(result[0].ringSets).toHaveLength(1);
       expect(result[1].ringSets).toHaveLength(2);
