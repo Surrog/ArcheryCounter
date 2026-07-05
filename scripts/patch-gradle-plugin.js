@@ -28,7 +28,7 @@ patch('gradle/libs.versions.toml', [
   [/^kotlin = "2\.\d+\.\d+"/m, 'kotlin = "2.3.0"'],
 ]);
 
-const apiPatch = [[/KotlinVersion\.KOTLIN_1_[89]/g, 'KotlinVersion.KOTLIN_2_0']];
+const apiPatch = [[/KotlinVersion\.KOTLIN_[12]_\d/g, 'KotlinVersion.KOTLIN_2_1']];
 for (const sub of ['shared', 'shared-testutil', 'settings-plugin', 'react-native-gradle-plugin']) {
   patch(`${sub}/build.gradle.kts`, apiPatch);
 }
