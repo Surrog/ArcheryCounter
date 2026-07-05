@@ -28,8 +28,8 @@ describe('useArcheryScorer', () => {
     jest.clearAllMocks();
   });
 
-  it('starts with empty state', () => {
-    const { result } = renderHook(() => useArcheryScorer());
+  it('starts with empty state', async () => {
+    const { result } = await renderHook(() => useArcheryScorer());
     expect(result.current.imageUri).toBeNull();
     expect(result.current.targets).toBeNull();
     expect(result.current.loading).toBe(false);
@@ -38,7 +38,7 @@ describe('useArcheryScorer', () => {
 
   it('does nothing when picker is cancelled', async () => {
     mockLaunch.mockResolvedValue({ didCancel: true });
-    const { result } = renderHook(() => useArcheryScorer());
+    const { result } = await renderHook(() => useArcheryScorer());
 
     await act(async () => {
       await result.current.pickAndProcess();
@@ -53,7 +53,7 @@ describe('useArcheryScorer', () => {
       assets: [{ uri: 'file:///test.jpg', width: 1000, height: 800 }],
     });
 
-    const { result } = renderHook(() => useArcheryScorer());
+    const { result } = await renderHook(() => useArcheryScorer());
 
     await act(async () => {
       await result.current.pickAndProcess();
@@ -77,7 +77,7 @@ describe('useArcheryScorer', () => {
     // Override mock for this test only
     (ArcheryCounter.processImage as jest.Mock<any>).mockRejectedValueOnce(new Error('CV error'));
 
-    const { result } = renderHook(() => useArcheryScorer());
+    const { result } = await renderHook(() => useArcheryScorer());
 
     await act(async () => {
       await result.current.pickAndProcess();
@@ -94,7 +94,7 @@ describe('useArcheryScorer', () => {
     });
     (ArcheryCounter.processImage as jest.Mock<any>).mockRejectedValueOnce('plain string error');
 
-    const { result } = renderHook(() => useArcheryScorer());
+    const { result } = await renderHook(() => useArcheryScorer());
     await act(async () => { await result.current.pickAndProcess(); });
 
     expect(result.current.error).toBe('plain string error');
@@ -106,13 +106,13 @@ describe('useArcheryScorer', () => {
       assets: [{ uri: 'file:///test.jpg', width: 1000, height: 800 }],
     });
 
-    const { result } = renderHook(() => useArcheryScorer());
+    const { result } = await renderHook(() => useArcheryScorer());
 
     await act(async () => {
       await result.current.pickAndProcess();
     });
 
-    act(() => {
+    await act(async () => {
       result.current.reset();
     });
 
