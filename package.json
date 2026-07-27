@@ -36,7 +36,7 @@
     "@react-native/babel-preset": "0.86.2",
     "@react-native/jest-preset": "0.86.0",
     "@react-native/metro-config": "0.86.2",
-    "@react-native/typescript-config": "0.86.1",
+    "@react-native/typescript-config": "0.86.2",
     "@testing-library/react-native": "^14.0.0",
     "@types/jest": "^30.0.0",
     "@types/pg": "^8.18.0",
