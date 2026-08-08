@@ -15,7 +15,7 @@
     "seed-from-parquet": "node --no-warnings --import ts-node/esm scripts/seed-from-parquet.ts"
   },
   "dependencies": {
-    "@react-native/new-app-screen": "0.86.0",
+    "@react-native/new-app-screen": "0.86.2",
     "jpeg-js": "^0.4.4",
     "onnxruntime-node": "^1.24.3",
     "onnxruntime-react-native": "^1.24.3",
