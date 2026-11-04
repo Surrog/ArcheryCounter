@@ -43,7 +43,7 @@
     "@types/react": "^19.2.0",
     "@types/react-test-renderer": "^19.1.0",
     "hyparquet": "^1.25.1",
-    "hyparquet-writer": "^0.16.0",
+    "hyparquet-writer": "^0.18.0",
     "jest": "^30.4.2",
     "metro-config": "^0.87.0",
     "pg": "^8.20.0",
